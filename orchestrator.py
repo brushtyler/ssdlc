@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SSDLC Multi-Agent Orchestrator (/opt/ssdlc/orchestrator.py)
+SSDLC Multi-Agent Orchestrator (orchestrator.py)
 Zero-Global-Touch, Multi-Project Isolated SSDLC State Machine.
 
 Key Isolation & Traceability Guarantees:

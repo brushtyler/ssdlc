@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# /opt/ssdlc/setup-ssdlc.sh
+# setup-ssdlc.sh
 # Zero-Global-Touch SSDLC Toolkit, Shared Image Builder, CLI Updater & Project Initializer
 #
 # GUARANTEES:
 #   - NEVER modifies /root/.codex, /root/.gemini, /root/.claude, or /usr/local/bin.
-#   - All shared tools live inside /opt/ssdlc/.tools/ and the 'ssdlc-runner:latest' Docker image.
+#   - All shared tools live inside .tools/ and the 'ssdlc-runner:latest' Docker image.
 #   - Each project gets its own isolated .ssdlc/project.env, .ssdlc/.runtime/ (CODEX_HOME &
 #     CLAUDE_CONFIG_DIR), .ssdlc/docker-compose.yml, .agents/skills/ssdlc/, and ./ssdlc CLI.
 # ==============================================================================
@@ -34,8 +34,8 @@ usage() {
 Usage: $0 [COMMAND] [OPTIONS]
 
 Commands:
-  --bootstrap                     Initialize /opt/ssdlc/.tools and build '${IMAGE_NAME}' (Zero changes to host configs)
-  --update-tools                  Update codex, claude, agy, and uv inside /opt/ssdlc/.tools (instant live update for all projects)
+  --bootstrap                     Initialize .tools and build '${IMAGE_NAME}' (Zero changes to host configs)
+  --update-tools                  Update codex, claude, agy, and uv inside .tools (instant live update for all projects)
   --rebuild-image                 Rebuild the thin CLI layer of '${IMAGE_NAME}' with latest codex & claude
   --init-project <DIR> [OPTIONS]  Initialize isolated SSDLC config & Docker runner inside project <DIR>
       --id <PROJECT_ID>           Unique project identifier for OpenRouter & state telemetry (default: folder name)
@@ -44,15 +44,15 @@ Commands:
   --help, -h                      Show this help message
 
 Examples:
-  # 1. Bootstrap /opt/ssdlc toolkit & shared Docker image on a VM:
-  $0 --bootstrap
+  # 1. Bootstrap SSDLC toolkit & shared Docker image:
+  ./setup-ssdlc.sh --bootstrap
 
   # 2. Initialize Project A and Project B (each isolated with its own keys & state):
-  $0 --init-project /opt/project-alpha --id proj-alpha --mode docker
-  $0 --init-project /opt/project-beta  --id proj-beta  --mode docker
+  ./setup-ssdlc.sh --init-project /path/to/project-alpha --id proj-alpha --mode docker
+  ./setup-ssdlc.sh --init-project /path/to/project-beta  --id proj-beta  --mode docker
 
-  # 3. Update codex, claude, and agy across all projects in one command:
-  $0 --update-tools
+  # 3. Update codex, claude, and uv across all projects in one command:
+  ./setup-ssdlc.sh --update-tools
 EOF
 }
 
