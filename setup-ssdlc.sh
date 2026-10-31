@@ -4,7 +4,7 @@
 # Zero-Global-Touch SSDLC Toolkit, Shared Image Builder, CLI Updater & Project Initializer
 #
 # GUARANTEES:
-#   - NEVER modifies /root/.codex, /root/.gemini, /root/.claude, or /usr/local/bin.
+#   - NEVER modifies ~/.codex, ~/.gemini, ~/.claude, or host global directories.
 #   - All shared tools live inside .tools/ and the 'ssdlc-runner:latest' Docker image.
 #   - Each project gets its own isolated .ssdlc/project.env, .ssdlc/.runtime/ (CODEX_HOME &
 #     CLAUDE_CONFIG_DIR), .ssdlc/docker-compose.yml, .agents/skills/ssdlc/, and ./ssdlc CLI.
@@ -57,7 +57,7 @@ EOF
 }
 
 # ------------------------------------------------------------------------------
-# 1. Isolated Shared Tools Management (/opt/ssdlc/.tools)
+# 1. Isolated Shared Tools Management (.tools)
 #    Mounted read-only into all project containers and used by local-isolated runs.
 # ------------------------------------------------------------------------------
 sync_or_update_tools() {
@@ -76,7 +76,7 @@ sync_or_update_tools() {
     ln -sf "/usr/local/bin/codex" "${TOOLS_BIN}/codex"
   fi
 
-  # 2. Install/Update 'uv' strictly inside /opt/ssdlc/.tools/bin
+  # 2. Install/Update 'uv' strictly inside .tools/bin
   log_info "Installing/updating 'uv' in ${TOOLS_BIN}..."
   if env UV_INSTALL_DIR="${TOOLS_BIN}" INSTALLER_NO_MODIFY_PATH=1 \
        curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1; then
@@ -85,7 +85,7 @@ sync_or_update_tools() {
     log_warn "Could not download uv from astral.sh (offline or restricted network)."
   fi
 
-  # 3. Update @openai/codex and @anthropic-ai/claude-code via npm inside /opt/ssdlc/.tools/npm-global
+  # 3. Update @openai/codex and @anthropic-ai/claude-code via npm inside .tools/npm-global
   if command -v npm >/dev/null 2>&1; then
     log_info "Updating @openai/codex and @anthropic-ai/claude-code in ${TOOLS_NPM}..."
     NPM_CONFIG_PREFIX="${TOOLS_NPM}" npm install -g @openai/codex@latest @anthropic-ai/claude-code@latest || \
@@ -136,7 +136,7 @@ build_shared_image() {
 }
 
 # ------------------------------------------------------------------------------
-# 3. Show Versions (Host + /opt/ssdlc/.tools + Container)
+# 3. Show Versions (Host + .tools + Container)
 # ------------------------------------------------------------------------------
 show_versions() {
   echo "=== SSDLC Toolkit Versions (${SSDLC_HOME}) ==="
