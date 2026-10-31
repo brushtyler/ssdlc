@@ -233,16 +233,16 @@ class DynamicRoutingPolicy:
     EFFORT_LADDER = ["low", "medium", "high", "xhigh"]
 
     BASE_EFFORT_MATRIX: Dict[str, Dict[str, str]] = {
-        "00-recon":       {"S": "low",    "M": "medium", "L": "medium"},
-        "01-po":          {"S": "low",    "M": "medium", "L": "high"},
-        "02-design-arch": {"S": "low",    "M": "medium", "L": "high"},
-        "02-design-sec":  {"S": "medium", "M": "high",   "L": "xhigh"},
-        "03-dev":         {"S": "low",    "M": "medium", "L": "high"},
-        "04-review":      {"S": "medium", "M": "high",   "L": "high"},
-        "05-qa":          {"S": "medium", "M": "medium", "L": "high"},
-        "05b-appsec":     {"S": "high",   "M": "high",   "L": "xhigh"},
-        "06-ops":         {"S": "low",    "M": "medium", "L": "high"},
-        "07-docs":        {"S": "low",    "M": "low",    "L": "medium"},
+        "00-recon":       {"S": "low",    "M": "low",    "L": "medium"},
+        "01-po":          {"S": "low",    "M": "medium", "L": "medium"},
+        "02-design-arch": {"S": "low",    "M": "medium", "L": "medium"},
+        "02-design-sec":  {"S": "low",    "M": "medium", "L": "medium"},
+        "03-dev":         {"S": "low",    "M": "low",    "L": "medium"},
+        "04-review":      {"S": "low",    "M": "medium", "L": "medium"},
+        "05-qa":          {"S": "low",    "M": "low",    "L": "medium"},
+        "05b-appsec":     {"S": "low",    "M": "medium", "L": "medium"},
+        "06-ops":         {"S": "low",    "M": "low",    "L": "medium"},
+        "07-docs":        {"S": "low",    "M": "low",    "L": "low"},
     }
 
     @classmethod
@@ -258,6 +258,13 @@ class DynamicRoutingPolicy:
         if attempt > 1:
             bump = 2 if attempt >= 3 else (attempt - 1)
             idx = min(len(cls.EFFORT_LADDER) - 1, idx + bump)
+
+        # Budget Guardrail: Cap reasoning effort to prevent token explosion
+        max_effort = os.environ.get("SSDLC_MAX_REASONING_EFFORT", "medium").lower().strip()
+        if max_effort in cls.EFFORT_LADDER:
+            max_idx = cls.EFFORT_LADDER.index(max_effort)
+            idx = min(idx, max_idx)
+
         return cls.EFFORT_LADDER[idx]
 
     @classmethod
@@ -282,6 +289,10 @@ class DynamicRoutingPolicy:
         else:
             engine = configured_engine
 
+        # Safety: default to Sonnet 4.6 when using claude to prevent defaulting to opus-5.5
+        if not configured_model and engine == "claude":
+            configured_model = "claude-sonnet-4.6"
+
         model = configured_model
         if attempt >= 2 and escalation_model:
             model = escalation_model
@@ -291,7 +302,7 @@ class DynamicRoutingPolicy:
     @classmethod
     def resolve_review_models(cls, risk_tier: str, attempt: int = 1) -> Tuple[List[str], str]:
         models_csv = os.environ.get(
-            "SSDLC_REVIEW_MODELS", "deepseek/deepseek-r1,anthropic/claude-3.7-sonnet"
+            "SSDLC_REVIEW_MODELS", "deepseek/deepseek-r1-0528,anthropic/claude-sonnet-4.5"
         )
         all_models = [m.strip() for m in models_csv.split(",") if m.strip()]
         effort = cls.resolve_reasoning_effort("04-review", risk_tier, attempt=attempt)
@@ -540,8 +551,10 @@ class EngineRunner:
     ) -> Tuple[str, float, int, int]:
         full_prompt = f"SYSTEM INSTRUCTIONS:\n{system_prompt}\n\nTASK:\n{user_prompt}"
         if "claude" in model_hint.lower() and shutil.which("claude"):
-            out, _ = EngineRunner.run_claude(full_prompt, cwd=Path.cwd(), read_only=True)
-            return out, 0.0, 0, 0
+            out, _, c, ti, to = EngineRunner.run_claude(
+                full_prompt, cwd=Path.cwd(), read_only=True, model=model_hint, reasoning_effort=reasoning_effort
+            )
+            return out, c, ti, to
         if shutil.which("codex"):
             out, _ = EngineRunner.run_codex(
                 full_prompt,
@@ -551,8 +564,10 @@ class EngineRunner:
             )
             return out, 0.0, 0, 0
         if shutil.which("claude"):
-            out, _ = EngineRunner.run_claude(full_prompt, cwd=Path.cwd(), read_only=True)
-            return out, 0.0, 0, 0
+            out, _, c, ti, to = EngineRunner.run_claude(
+                full_prompt, cwd=Path.cwd(), read_only=True, model=model_hint, reasoning_effort=reasoning_effort
+            )
+            return out, c, ti, to
         raise RuntimeError(
             "Neither OPENROUTER_API_KEY nor local 'codex'/'claude' CLI is available."
         )
@@ -605,16 +620,33 @@ class EngineRunner:
         read_only: bool = True,
         use_openrouter: bool = False,
         writable_worktree: Optional[Path] = None,
-    ) -> Tuple[str, int]:
+        model: str = "",
+        reasoning_effort: str = "medium",
+        max_budget_usd: float = 3.0,
+    ) -> Tuple[str, int, float, int, int]:
         env = os.environ.copy()
         env["IS_SANDBOX"] = "1"
         if use_openrouter and env.get("OPENROUTER_API_KEY"):
             env["ANTHROPIC_BASE_URL"] = "https://openrouter.ai/api"
             env["ANTHROPIC_AUTH_TOKEN"] = env["OPENROUTER_API_KEY"]
             env["ANTHROPIC_API_KEY"] = env["OPENROUTER_API_KEY"]
-        cmd = ["claude", "-p", prompt]
+
+        target_model = model or os.environ.get("SSDLC_DEV_MODEL", "claude-sonnet-4.6")
+        if "/" in target_model:
+            target_model = target_model.split("/")[-1]
+
+        cmd = ["claude", "-p", prompt, "--model", target_model, "--output-format", "json"]
         if not read_only:
             cmd.append("--dangerously-skip-permissions")
+
+        # Effort cap
+        effort_level = "low" if reasoning_effort == "low" else "medium"
+        cmd.extend(["--effort", effort_level])
+
+        # Budget cap per execution
+        if max_budget_usd > 0:
+            cmd.extend(["--max-budget-usd", f"{max_budget_usd:.2f}"])
+
         if EngineRunner._should_spawn_role_container():
             cmd = EngineRunner._wrap_in_role_container(
                 cmd,
@@ -631,7 +663,21 @@ class EngineRunner:
             timeout=dev_timeout,
         )
         combined = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
-        return combined.strip(), proc.returncode
+        cost_usd = 0.0
+        tokens_in = 0
+        tokens_out = 0
+        result_text = combined.strip()
+        try:
+            parsed = json.loads(proc.stdout.strip())
+            if isinstance(parsed, dict):
+                result_text = parsed.get("result", "") or combined.strip()
+                cost_usd = float(parsed.get("total_cost_usd", 0.0) or 0.0)
+                usage = parsed.get("usage", {})
+                tokens_in = int(usage.get("input_tokens", 0)) + int(usage.get("cache_read_input_tokens", 0))
+                tokens_out = int(usage.get("output_tokens", 0))
+        except Exception:
+            pass
+        return result_text, proc.returncode, cost_usd, tokens_in, tokens_out
 
     @staticmethod
     def invoke_role(
@@ -660,12 +706,12 @@ class EngineRunner:
             )
         full_prompt = f"{system_prompt}\n\n---\n\n{user_prompt}"
         if engine == "claude":
-            out, rc = EngineRunner.run_claude(
-                full_prompt, cwd=cwd, read_only=(sandbox == "read-only")
+            out, rc, cost, tin, tout = EngineRunner.run_claude(
+                full_prompt, cwd=cwd, read_only=(sandbox == "read-only"), model=model, reasoning_effort=reasoning_effort
             )
             if rc != 0:
                 raise RuntimeError(f"claude exited with code {rc}:\n{out}")
-            return out, 0.0, 0, 0, trace_user
+            return out, cost, tin, tout, trace_user
         if engine == "codex":
             out, rc = EngineRunner.run_codex(
                 full_prompt,
@@ -792,7 +838,12 @@ class RemoteSyncManager:
             return False
         print(f"\n==> [Remote-Sync] Pushing branch '{branch}' to origin...")
         try:
-            cmd = ["git", "push", "-u", "origin", branch]
+            push_target = "origin"
+            if self.provider == "github" and self.token and self.owner and self.repo:
+                push_target = f"https://x-access-token:{self.token}@{self.host}/{self.owner}/{self.repo}.git"
+            elif self.provider == "gitlab" and self.token and self.owner and self.repo:
+                push_target = f"https://oauth2:{self.token}@{self.host}/{self.owner}/{self.repo}.git"
+            cmd = ["git", "push", "-u", push_target, f"{branch}:{branch}"]
             proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True)
             if proc.returncode == 0:
                 print(f"    [OK] Remote branch synced: {self.remote_url} ({branch})")
@@ -1404,9 +1455,17 @@ class SSDLCOrchestrator:
         t0 = time.time()
         in_container = Path("/.dockerenv").exists() or os.environ.get("SSDLC_EXECUTION_MODE", "docker") == "docker"
         dev_sandbox = "danger-full-access" if in_container else "workspace-write"
+        dev_budget = float(os.environ.get("SSDLC_DEV_BUDGET_USD", "3.0"))
         if dev_engine == "claude":
-            out, rc = EngineRunner.run_claude(
-                prompt, cwd=wt, read_only=False, use_openrouter=use_or, writable_worktree=wt
+            out, rc, dev_cost, dev_tin, dev_tout = EngineRunner.run_claude(
+                prompt,
+                cwd=wt,
+                read_only=False,
+                use_openrouter=use_or,
+                writable_worktree=wt,
+                model=dev_model,
+                reasoning_effort=dev_effort,
+                max_budget_usd=dev_budget,
             )
         else:
             out, rc = EngineRunner.run_codex(
@@ -1418,6 +1477,7 @@ class SSDLCOrchestrator:
                 use_openrouter=use_or,
                 writable_worktree=wt,
             )
+            dev_cost, dev_tin, dev_tout = 0.0, 0, 0
         dur = time.time() - t0
 
         # Cryptographic SHA-256 integrity check on upstream .ssdlc/ specs & threat model
@@ -1483,6 +1543,9 @@ class SSDLCOrchestrator:
                 dev_model or "default",
                 "COMPLETED" if rc == 0 else f"RC_{rc}",
                 dur,
+                cost_usd=dev_cost,
+                tokens_in=dev_tin,
+                tokens_out=dev_tout,
                 trace_user=f"{self.project_id}:{self.ticket_id}:03-dev-a{attempt}",
                 reasoning_effort=dev_effort,
             )
@@ -2102,6 +2165,18 @@ To **REJECT** and send feedback back to the team:
                         capture_output=True,
                         text=True,
                     )
+
+            if not self.state.get("issue_id"):
+                req_text = self._read_optional(self.dir_po / "requirements.md")
+                issue_num, issue_url = self.remote_sync.sync_issue(
+                    self.state.get("goal", self.ticket_id), req_text
+                )
+                if issue_num:
+                    self.issue_id = issue_num
+                    self.state["issue_id"] = issue_num
+                    self.state["issue_url"] = issue_url
+                    self._save_state()
+
             pushed = self.remote_sync.push_branch(branch, cwd=(wt if wt.exists() else self.repo_root))
             if pushed:
                 pr_url = self.remote_sync.create_or_update_pr(
@@ -2138,6 +2213,20 @@ To **REJECT** and send feedback back to the team:
         "08-supervisor",
     ]
 
+    def check_budget_circuit_breaker(self) -> None:
+        budget_cap = float(os.environ.get("SSDLC_BUDGET_CAP_USD", "10.0"))
+        if budget_cap <= 0:
+            return
+        total_spent = sum(item.get("cost_usd", 0.0) for item in self.state.get("ledger", []))
+        if total_spent >= budget_cap:
+            msg = f"Circuit Breaker: Total spend (${total_spent:.2f}) reached or exceeded SSDLC_BUDGET_CAP_USD (${budget_cap:.2f})!"
+            print(f"\n[CIRCUIT-BREAKER] {msg}")
+            self.record_gate("BUDGET_CAP_GATE", False, msg)
+            self.state["status"] = "HALTED_BUDGET_EXCEEDED"
+            self._save_state()
+            self.run_phase_supervisor()
+            raise RuntimeError(msg)
+
     def run_pipeline(
         self,
         goal: str,
@@ -2149,12 +2238,14 @@ To **REJECT** and send feedback back to the team:
 
         if start_idx <= self.PHASE_ORDER.index("00-recon"):
             _, active_tier = self.run_phase_recon(goal, requested_tier=tier)
+            self.check_budget_circuit_breaker()
         else:
             active_tier = self.state.get("risk_tier", tier if tier != "auto" else "M")
             print(f"    [RESUME] Skipping 00-recon (using existing risk_tier={active_tier})")
 
         if start_idx <= self.PHASE_ORDER.index("01-po"):
             self.run_phase_po(goal)
+            self.check_budget_circuit_breaker()
         else:
             print("    [RESUME] Skipping 01-po")
 
@@ -2163,6 +2254,7 @@ To **REJECT** and send feedback back to the team:
                 self.run_phase_pair_design()
             else:
                 self.record_gate("PAIR_DESIGN_GATE", True, "Skipped in Tier S (low-risk fast track).")
+            self.check_budget_circuit_breaker()
         else:
             print("    [RESUME] Skipping 02-design")
 
@@ -2174,11 +2266,13 @@ To **REJECT** and send feedback back to the team:
             for attempt in range(1, max_retries + 1):
                 if attempt > 1 or start_idx <= self.PHASE_ORDER.index("03-dev"):
                     self.run_phase_dev(feedback=feedback, attempt=attempt)
+                    self.check_budget_circuit_breaker()
                 else:
                     print("    [RESUME] Skipping initial 03-dev execution")
 
                 if attempt > 1 or start_idx <= self.PHASE_ORDER.index("04-review"):
                     rev_ok, rev_report = self.run_phase_review(attempt=attempt)
+                    self.check_budget_circuit_breaker()
                     if not rev_ok:
                         feedback = f"Code Reviewer rejected the diff (Attempt {attempt}):\n{rev_report}"
                         continue
@@ -2187,6 +2281,7 @@ To **REJECT** and send feedback back to the team:
 
                 if attempt > 1 or start_idx <= self.PHASE_ORDER.index("05-qa"):
                     qa_ok, qa_report = self.run_phase_qa(test_cmd=test_cmd, attempt=attempt)
+                    self.check_budget_circuit_breaker()
                     if not qa_ok:
                         feedback = f"QA Gate rejected the implementation (Attempt {attempt}):\n{qa_report}"
                         continue
@@ -2200,6 +2295,7 @@ To **REJECT** and send feedback back to the team:
                 )
                 if run_appsec:
                     appsec_ok, appsec_report = self.run_phase_appsec(attempt=attempt)
+                    self.check_budget_circuit_breaker()
                     if not appsec_ok:
                         feedback = f"AppSec Red-Teamer rejected the implementation (Attempt {attempt}):\n{appsec_report}"
                         continue
@@ -2212,8 +2308,10 @@ To **REJECT** and send feedback back to the team:
         if passed_all and active_tier in ("M", "L"):
             if start_idx <= self.PHASE_ORDER.index("06-ops"):
                 self.run_phase_ops()
+                self.check_budget_circuit_breaker()
             if start_idx <= self.PHASE_ORDER.index("07-docs"):
                 self.run_phase_docs()
+                self.check_budget_circuit_breaker()
 
         return self.compile_evidence_pack(ready_for_signoff=passed_all)
 
