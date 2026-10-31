@@ -160,18 +160,22 @@ class ProjectRuntimeIsolation:
 
         # Auto-inherit read-only host auth.json by default if present (unless set to false)
         if os.environ.get("SSDLC_INHERIT_HOST_CODEX_AUTH", "true").lower() == "true":
-            host_auth = Path.home() / ".codex" / "auth.json"
+            candidates = [Path.home() / ".codex" / "auth.json", Path("/root/.codex/auth.json")]
+            host_auth = next((p for p in candidates if p.exists() and p != (self.codex_home / "auth.json")), None)
             proj_auth = self.codex_home / "auth.json"
-            if host_auth.exists() and not proj_auth.exists():
+            if host_auth and (not proj_auth.exists() or host_auth.stat().st_mtime > proj_auth.stat().st_mtime):
                 shutil.copy2(host_auth, proj_auth)
                 os.chmod(proj_auth, 0o600)
 
         # Auto-inherit host Claude auth by default if present (unless set to false)
         if os.environ.get("SSDLC_INHERIT_HOST_CLAUDE_AUTH", "true").lower() == "true":
-            host_claude_json = Path.home() / ".claude.json"
-            if host_claude_json.exists():
+            candidates_claude = [Path.home() / ".claude.json", Path("/root/.claude.json")]
+            host_claude_json = next(
+                (p for p in candidates_claude if p.exists() and p != (self.claude_home / ".claude.json")), None
+            )
+            if host_claude_json:
                 for dest in (self.claude_home / ".claude.json", self.runtime_dir / ".claude.json"):
-                    if not dest.exists():
+                    if not dest.exists() or host_claude_json.stat().st_mtime > dest.stat().st_mtime:
                         shutil.copy2(host_claude_json, dest)
                         os.chmod(dest, 0o600)
 
@@ -2439,11 +2443,43 @@ def cmd_doctor(repo: Path) -> int:
     print("  - CLI Versions       :")
     for binary in ("agy", "codex", "claude", "git", "tmux", "uv", "gitleaks"):
         print(f"      * {binary:<10}: {get_cli_version(binary)}")
-    print("  - Key Fingerprints   :")
-    print(f"      * OPENROUTER_API_KEY: {fingerprint_secret(os.environ.get('OPENROUTER_API_KEY', ''))}")
-    print(f"      * OPENAI_API_KEY    : {fingerprint_secret(os.environ.get('OPENAI_API_KEY', ''))}")
-    print(f"      * ANTHROPIC_API_KEY : {fingerprint_secret(os.environ.get('ANTHROPIC_API_KEY', ''))}")
-    print(f"      * CLAUDE_OAUTH_TOKEN: {fingerprint_secret(os.environ.get('CLAUDE_CODE_OAUTH_TOKEN', ''))}")
+    print("  - Key & Subscription Status:")
+    print(f"      * OPENROUTER_API_KEY : {fingerprint_secret(os.environ.get('OPENROUTER_API_KEY', ''))}")
+    print(f"      * OPENAI_API_KEY     : {fingerprint_secret(os.environ.get('OPENAI_API_KEY', ''))}")
+    print(f"      * ANTHROPIC_API_KEY  : {fingerprint_secret(os.environ.get('ANTHROPIC_API_KEY', ''))}")
+
+    # Check Codex Subscription
+    codex_auth = Path(iso['codex_home']) / "auth.json"
+    if not codex_auth.exists():
+        codex_auth = Path.home() / ".codex" / "auth.json"
+    codex_status = "UNSET"
+    if codex_auth.exists():
+        try:
+            cd = json.loads(codex_auth.read_text(encoding="utf-8"))
+            mode = cd.get("auth_mode", "unknown")
+            plan = cd.get("chatgpt_plan_type", "active")
+            codex_status = f"ACTIVE ({mode} / {plan})"
+        except Exception:
+            codex_status = "EXISTS"
+    print(f"      * CODEX_SUBSCRIPTION : {codex_status}")
+
+    # Check Claude Subscription
+    claude_json = Path(iso['claude_home']) / ".claude.json"
+    if not claude_json.exists():
+        claude_json = Path.home() / ".claude.json"
+    claude_status = "UNSET"
+    if claude_json.exists():
+        try:
+            cld = json.loads(claude_json.read_text(encoding="utf-8"))
+            acct = cld.get("oauthAccount") or {}
+            sub = acct.get("subscriptionType") or acct.get("organizationType") or "active"
+            email = acct.get("emailAddress", "")
+            claude_status = f"ACTIVE ({sub} / {email})" if email else "EXISTS"
+        except Exception as e:
+            claude_status = f"EXISTS (err: {e})"
+    elif os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        claude_status = f"OAUTH_TOKEN ({fingerprint_secret(os.environ['CLAUDE_CODE_OAUTH_TOKEN'])})"
+    print(f"      * CLAUDE_SUBSCRIPTION: {claude_status}")
 
     remote_sync = RemoteSyncManager(repo, "doctor")
     token_status = "EXISTS" if remote_sync.token else "UNSET"
