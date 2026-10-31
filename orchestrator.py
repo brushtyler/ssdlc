@@ -688,8 +688,202 @@ class EngineRunner:
         )
 
 
+class RemoteSyncManager:
+    """Manages synchronization between local SSDLC runs and remote Git/Tracker platforms (GitHub, GitLab)."""
+
+    def __init__(self, repo_root: Path, ticket_id: str, enabled: bool = False):
+        self.repo_root = repo_root.resolve()
+        self.ticket_id = ticket_id
+        env_enabled = os.environ.get("SSDLC_SYNC_REMOTE", "false").lower() in ("true", "1", "yes")
+        self.enabled = enabled or env_enabled
+        self.provider = "generic"
+        self.host = ""
+        self.owner = ""
+        self.repo = ""
+        self.remote_url = ""
+        self.token = ""
+        self._detect_remote()
+
+    def _detect_remote(self) -> None:
+        try:
+            res = subprocess.run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=str(self.repo_root),
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.remote_url = res.stdout.strip()
+        except Exception:
+            return
+
+        m_github = re.search(
+            r"(?:git@[\w.-]*github[\w.-]*:|https?://[\w.-]*github[\w.-]*/)([\w.-]+)/([\w.-]+?)(?:\.git)?$",
+            self.remote_url,
+        )
+        if m_github:
+            self.provider = "github"
+            self.host = "github.com"
+            self.owner = m_github.group(1)
+            self.repo = m_github.group(2)
+            self.token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN", "")
+            return
+
+        m_gitlab = re.search(
+            r"(?:git@([\w.-]*gitlab[\w.-]*):|https?://([\w.-]*gitlab[\w.-]*)/)([\w.-]+)/([\w.-]+?)(?:\.git)?$",
+            self.remote_url,
+        )
+        if m_gitlab:
+            self.provider = "gitlab"
+            self.host = m_gitlab.group(1) or m_gitlab.group(2)
+            self.owner = m_gitlab.group(3)
+            self.repo = m_gitlab.group(4)
+            self.token = os.environ.get("GITLAB_TOKEN") or os.environ.get("GL_TOKEN", "")
+            return
+
+    def sync_issue(
+        self, title: str, body: str, existing_issue_id: Optional[int] = None
+    ) -> Tuple[Optional[int], Optional[str]]:
+        if not self.enabled:
+            return None, None
+        if self.provider != "github" or not self.token:
+            if self.enabled and not self.token:
+                print("    [REMOTE-SYNC] Note: GITHUB_TOKEN unset; skipping remote issue creation/sync.")
+            return None, None
+
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "SSDLC-Orchestrator",
+        }
+
+        try:
+            if existing_issue_id:
+                url = f"https://api.github.com/repos/{self.owner}/{self.repo}/issues/{existing_issue_id}/comments"
+                payload = json.dumps({"body": f"### [SSDLC PO Specification]\n\n{body}"}).encode("utf-8")
+                req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    html_url = data.get("html_url")
+                    print(f"    [REMOTE-SYNC] Synced specification to Issue #{existing_issue_id}: {html_url}")
+                    return existing_issue_id, html_url
+            else:
+                url = f"https://api.github.com/repos/{self.owner}/{self.repo}/issues"
+                payload = json.dumps(
+                    {
+                        "title": f"[SSDLC] {self.ticket_id}: {title[:100]}",
+                        "body": body,
+                        "labels": ["ssdlc", "in-progress"],
+                    }
+                ).encode("utf-8")
+                req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    num = data.get("number")
+                    html_url = data.get("html_url")
+                    print(f"    [REMOTE-SYNC] Created GitHub Issue #{num}: {html_url}")
+                    return num, html_url
+        except Exception as e:
+            print(f"    [REMOTE-SYNC] Issue sync notice: {e}")
+            return None, None
+
+    def push_branch(self, branch: str, cwd: Path) -> bool:
+        if not self.enabled:
+            return False
+        print(f"\n==> [Remote-Sync] Pushing branch '{branch}' to origin...")
+        try:
+            cmd = ["git", "push", "-u", "origin", branch]
+            proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True)
+            if proc.returncode == 0:
+                print(f"    [OK] Remote branch synced: {self.remote_url} ({branch})")
+                return True
+            else:
+                print(f"    [WARN] Remote push failed: {proc.stderr.strip()}")
+                return False
+        except Exception as e:
+            print(f"    [WARN] Remote push error: {e}")
+            return False
+
+    def create_or_update_pr(
+        self,
+        branch: str,
+        base_branch: str,
+        title: str,
+        body: str,
+        issue_number: Optional[int] = None,
+        draft: bool = True,
+    ) -> Optional[str]:
+        if not self.enabled:
+            return None
+
+        compare_url = None
+        if self.provider == "github" and self.owner and self.repo:
+            compare_url = f"https://github.com/{self.owner}/{self.repo}/compare/{base_branch}...{branch}?expand=1"
+
+        if self.provider != "github" or not self.token:
+            if compare_url:
+                print(f"    [REMOTE-SYNC] Review / Open PR manually at: {compare_url}")
+            return compare_url
+
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "SSDLC-Orchestrator",
+        }
+
+        pr_body = body
+        if issue_number:
+            pr_body = f"Closes #{issue_number}\n\n" + pr_body
+
+        try:
+            list_url = f"https://api.github.com/repos/{self.owner}/{self.repo}/pulls?head={self.owner}:{branch}&state=open"
+            req_list = urllib.request.Request(list_url, headers=headers)
+            with urllib.request.urlopen(req_list, timeout=15) as resp:
+                existing_prs = json.loads(resp.read().decode("utf-8"))
+
+            if existing_prs:
+                pr = existing_prs[0]
+                pr_number = pr["number"]
+                update_url = f"https://api.github.com/repos/{self.owner}/{self.repo}/pulls/{pr_number}"
+                payload = json.dumps({"body": pr_body}).encode("utf-8")
+                req_up = urllib.request.Request(update_url, data=payload, headers=headers, method="PATCH")
+                with urllib.request.urlopen(req_up, timeout=15) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    html_url = data.get("html_url")
+                    print(f"    [OK] Updated Pull Request #{pr_number}: {html_url}")
+                    return html_url
+            else:
+                create_url = f"https://api.github.com/repos/{self.owner}/{self.repo}/pulls"
+                payload = json.dumps(
+                    {
+                        "title": f"[SSDLC] {self.ticket_id}: {title[:100]}",
+                        "head": branch,
+                        "base": base_branch,
+                        "body": pr_body,
+                        "draft": draft,
+                    }
+                ).encode("utf-8")
+                req_cr = urllib.request.Request(create_url, data=payload, headers=headers, method="POST")
+                with urllib.request.urlopen(req_cr, timeout=15) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    html_url = data.get("html_url")
+                    print(f"    [OK] Created Draft Pull Request #{data.get('number')}: {html_url}")
+                    return html_url
+        except Exception as e:
+            print(f"    [WARN] Pull Request creation via GitHub API failed: {e}")
+            if compare_url:
+                print(f"    [REMOTE-SYNC] Review / Open PR manually at: {compare_url}")
+            return compare_url
+
+
 class SSDLCOrchestrator:
-    def __init__(self, repo_root: Path, ticket_id: str):
+    def __init__(
+        self,
+        repo_root: Path,
+        ticket_id: str,
+        sync_remote: bool = False,
+        issue_id: Optional[int] = None,
+    ):
         self.repo_root = repo_root.resolve()
         self.isolation = ProjectRuntimeIsolation(self.repo_root)
         self.iso_meta = self.isolation.activate()
@@ -723,6 +917,8 @@ class SSDLCOrchestrator:
             d.mkdir(parents=True, exist_ok=True)
 
         self.state = self._load_or_init_state()
+        self.remote_sync = RemoteSyncManager(self.repo_root, self.ticket_id, enabled=sync_remote)
+        self.issue_id = issue_id or self.state.get("issue_id")
 
     def _load_or_init_state(self) -> Dict[str, Any]:
         if self.state_file.exists():
@@ -980,6 +1176,17 @@ class SSDLCOrchestrator:
             raise RuntimeError("PO Gate Failed: requirements.md must define AC-1..N and SEC-1..N.")
         self.record_gate("PO_SPEC_GATE", True, "Verified numbered ACs and Security Abuse Cases.")
         print(f"    [OK] Wrote {req_file.relative_to(self.repo_root)}")
+
+        if self.remote_sync.enabled:
+            issue_num, issue_url = self.remote_sync.sync_issue(
+                goal, out, existing_issue_id=self.issue_id
+            )
+            if issue_num:
+                self.issue_id = issue_num
+                self.state["issue_id"] = issue_num
+                self.state["issue_url"] = issue_url
+                self._save_state()
+
         return req_file
 
     # ------------------------------------------------------------------
@@ -1863,6 +2070,56 @@ To **REJECT** and send feedback back to the team:
         pack_path.write_text(pack_md, encoding="utf-8")
         self.record_artifact("EVIDENCE_PACK.md", pack_path)
         print(f"    [OK] Evidence Pack ready at: {pack_path.relative_to(self.repo_root)}")
+
+        if self.remote_sync.enabled:
+            wt = self.worktree_dir
+            branch = self.state.get("dev_branch", f"ssdlc/{self.ticket_id}")
+            base_branch = "main"
+            try:
+                cur_b = subprocess.run(
+                    ["git", "branch", "--show-current"],
+                    cwd=str(self.repo_root),
+                    capture_output=True,
+                    text=True,
+                )
+                if cur_b.returncode == 0 and cur_b.stdout.strip():
+                    base_branch = cur_b.stdout.strip()
+            except Exception:
+                pass
+
+            if wt.exists():
+                subprocess.run(["git", "add", "-A"], cwd=str(wt), capture_output=True)
+                status_chk = subprocess.run(
+                    ["git", "status", "--porcelain"],
+                    cwd=str(wt),
+                    capture_output=True,
+                    text=True,
+                )
+                if status_chk.stdout.strip():
+                    subprocess.run(
+                        ["git", "commit", "-m", f"feat({self.ticket_id}): implementation checkpoint"],
+                        cwd=str(wt),
+                        capture_output=True,
+                        text=True,
+                    )
+            pushed = self.remote_sync.push_branch(branch, cwd=(wt if wt.exists() else self.repo_root))
+            if pushed:
+                pr_url = self.remote_sync.create_or_update_pr(
+                    branch=branch,
+                    base_branch=base_branch,
+                    title=self.state.get("goal", self.ticket_id),
+                    body=pack_md,
+                    issue_number=self.state.get("issue_id"),
+                    draft=True,
+                )
+                if pr_url:
+                    self.state["pr_url"] = pr_url
+                    self._save_state()
+                    if "- **Remote Pull Request**:" not in pack_md:
+                        pack_md += f"\n- **Remote Pull Request**: [{pr_url}]({pr_url})\n"
+                        pack_path.write_text(pack_md, encoding="utf-8")
+                        self.record_artifact("EVIDENCE_PACK.md", pack_path)
+
         return pack_path
 
     # ------------------------------------------------------------------
@@ -1985,6 +2242,12 @@ To **REJECT** and send feedback back to the team:
         self.record_gate("SUPERVISOR_SIGNOFF", True, "Supervisor approved, merged branch, and pruned temporary worktree.")
         print(f"[OK] Ticket {self.ticket_id} approved, merged, and worktree cleaned up.")
 
+        if self.remote_sync.enabled:
+            cur_b = subprocess.run(["git", "branch", "--show-current"], cwd=str(self.repo_root), capture_output=True, text=True)
+            if cur_b.returncode == 0 and cur_b.stdout.strip():
+                print(f"==> [Remote-Sync] Pushing merged '{cur_b.stdout.strip()}' to origin...")
+                subprocess.run(["git", "push", "origin", cur_b.stdout.strip()], cwd=str(self.repo_root))
+
 
 def cmd_doctor(repo: Path) -> int:
     iso = ProjectRuntimeIsolation(repo).activate()
@@ -2000,6 +2263,14 @@ def cmd_doctor(repo: Path) -> int:
     print(f"      * OPENROUTER_API_KEY: {fingerprint_secret(os.environ.get('OPENROUTER_API_KEY', ''))}")
     print(f"      * OPENAI_API_KEY    : {fingerprint_secret(os.environ.get('OPENAI_API_KEY', ''))}")
     print(f"      * ANTHROPIC_API_KEY : {fingerprint_secret(os.environ.get('ANTHROPIC_API_KEY', ''))}")
+
+    remote_sync = RemoteSyncManager(repo, "doctor")
+    token_status = "EXISTS" if remote_sync.token else "UNSET"
+    print("  - Remote Sync Status :")
+    print(f"      * Remote URL        : {remote_sync.remote_url or 'NONE'}")
+    print(f"      * Provider          : {remote_sync.provider} ({remote_sync.owner}/{remote_sync.repo if remote_sync.owner else '-'})")
+    print(f"      * API Token         : {token_status}")
+    print(f"      * Sync Remote Flag  : {'ENABLED' if remote_sync.enabled else 'DISABLED (pass --sync-remote or SSDLC_SYNC_REMOTE=true)'}")
     return 0
 
 
@@ -2022,16 +2293,40 @@ def main() -> int:
         choices=SSDLCOrchestrator.PHASE_ORDER,
         help="Resume an interrupted ticket starting from a specific phase (default: 00-recon)",
     )
+    p_run.add_argument(
+        "--sync-remote",
+        action="store_true",
+        default=False,
+        help="Enable automatic remote Git push and Issue/PR synchronization",
+    )
+    p_run.add_argument(
+        "--issue",
+        type=int,
+        default=None,
+        help="Link run to an existing remote Issue number",
+    )
 
     p_app = sub.add_parser("approve", help="Supervisor sign-off: commit worktree changes, merge, and prune worktree")
     p_app.add_argument("ticket", help="Ticket ID")
     p_app.add_argument("--repo", "-r", default=".", help="Path to Git repository")
+    p_app.add_argument(
+        "--sync-remote",
+        action="store_true",
+        default=False,
+        help="Push merged branch to remote origin",
+    )
 
     p_rej = sub.add_parser("reject", help="Supervisor rejection: bounce back to Dev with feedback")
     p_rej.add_argument("ticket", help="Ticket ID")
     p_rej.add_argument("--reason", required=True, help="Supervisor rejection feedback")
     p_rej.add_argument("--repo", "-r", default=".", help="Path to Git repository")
     p_rej.add_argument("--test-cmd", default=None, help="Deterministic test command")
+    p_rej.add_argument(
+        "--sync-remote",
+        action="store_true",
+        default=False,
+        help="Enable automatic remote synchronization on rejection cycle",
+    )
 
     args = parser.parse_args()
     repo_path = Path(getattr(args, "repo", ".")).resolve()
@@ -2040,7 +2335,9 @@ def main() -> int:
         return cmd_doctor(repo_path)
 
     if args.subcommand == "run":
-        orch = SSDLCOrchestrator(repo_path, args.ticket)
+        sync_remote = getattr(args, "sync_remote", False)
+        issue_id = getattr(args, "issue", None)
+        orch = SSDLCOrchestrator(repo_path, args.ticket, sync_remote=sync_remote, issue_id=issue_id)
         effective_tier = args.tier or os.environ.get("SSDLC_DEFAULT_TIER", "auto")
         orch.run_pipeline(
             args.goal,
@@ -2051,12 +2348,14 @@ def main() -> int:
         return 0
 
     if args.subcommand == "approve":
-        orch = SSDLCOrchestrator(repo_path, args.ticket)
+        sync_remote = getattr(args, "sync_remote", False)
+        orch = SSDLCOrchestrator(repo_path, args.ticket, sync_remote=sync_remote)
         orch.approve_and_merge()
         return 0
 
     if args.subcommand == "reject":
-        orch = SSDLCOrchestrator(repo_path, args.ticket)
+        sync_remote = getattr(args, "sync_remote", False)
+        orch = SSDLCOrchestrator(repo_path, args.ticket, sync_remote=sync_remote)
         orch.record_gate("SUPERVISOR_SIGNOFF", False, f"Rejected by supervisor: {args.reason}")
         orch.run_phase_dev(feedback=f"SUPERVISOR REJECTION: {args.reason}", attempt=99)
         orch.run_phase_review(attempt=99)
@@ -2065,6 +2364,8 @@ def main() -> int:
             orch.run_phase_appsec(attempt=99)
         orch.compile_evidence_pack(ready_for_signoff=True)
         return 0
+
+    return 0
 
     return 0
 
