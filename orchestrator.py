@@ -276,22 +276,44 @@ class DynamicRoutingPolicy:
         escalation_model = os.environ.get("SSDLC_DEV_ESCALATION_MODEL", "").strip()
         effort = cls.resolve_reasoning_effort("03-dev", risk_tier, attempt=attempt)
 
+        tier = (risk_tier or "M").upper()
+        profile = (dev_profile or "ALGORITHMIC").upper()
+
         # Automatic engine selection based on 00-recon DEV_PROFILE when SSDLC_DEV_ENGINE="auto"
         if configured_engine in ("", "auto"):
-            profile = (dev_profile or "ALGORITHMIC").upper()
+            has_codex_auth = bool(
+                os.environ.get("SSDLC_INHERIT_HOST_CODEX_AUTH", "false").lower() == "true"
+                or (Path.home() / ".codex" / "auth.json").exists()
+                or (Path("/workspace/.ssdlc/.runtime/codex_home/auth.json").exists())
+            ) and bool(shutil.which("codex"))
             has_claude_auth = bool(
                 os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
             ) and bool(shutil.which("claude"))
-            if profile in ("FULLSTACK", "REFACTOR", "DOCS") and has_claude_auth:
+
+            if has_codex_auth:
+                engine = "codex"
+            elif profile in ("FULLSTACK", "REFACTOR", "DOCS") and has_claude_auth:
                 engine = "claude"
             else:
                 engine = "codex"
         else:
             engine = configured_engine
 
-        # Safety: default to Sonnet 4.6 when using claude to prevent defaulting to opus-5.5
-        if not configured_model and engine == "claude":
-            configured_model = "claude-sonnet-4.6"
+        # Intelligent dynamic model selection when not explicitly overridden
+        if not configured_model:
+            if engine == "codex":
+                # Tier S: Fast, lightweight luna to preserve rate-limits & quota
+                if tier == "S" or profile in ("DOCS", "UI_STYLING"):
+                    configured_model = "gpt-6-luna" if attempt == 1 else "gpt-6.1-sol"
+                elif tier == "M":
+                    configured_model = "gpt-6.1-terra" if attempt == 1 else "gpt-6.1-sol"
+                else:  # Tier L: Deep flagship model
+                    configured_model = "gpt-6.1-sol"
+            elif engine == "claude":
+                if tier == "S":
+                    configured_model = "claude-haiku-4.5"
+                else:
+                    configured_model = "claude-sonnet-4.6"
 
         model = configured_model
         if attempt >= 2 and escalation_model:
@@ -300,14 +322,53 @@ class DynamicRoutingPolicy:
         return engine, model, effort
 
     @classmethod
+    def resolve_po_model(cls, risk_tier: str) -> str:
+        configured = os.environ.get("SSDLC_PO_MODEL", "").strip()
+        if configured:
+            return configured
+        tier = (risk_tier or "M").upper()
+        return "deepseek/deepseek-chat" if tier == "S" else "anthropic/claude-sonnet-4.5"
+
+    @classmethod
+    def resolve_design_models(cls, risk_tier: str) -> Tuple[str, str]:
+        arch_conf = os.environ.get("SSDLC_DESIGN_ARCH_MODEL", "").strip()
+        sec_conf = os.environ.get("SSDLC_DESIGN_SEC_MODEL", "").strip()
+        tier = (risk_tier or "M").upper()
+
+        arch = arch_conf or ("deepseek/deepseek-chat" if tier == "S" else "anthropic/claude-sonnet-4.5")
+        sec = sec_conf or "deepseek/deepseek-r1-0528"
+        return arch, sec
+
+    @classmethod
+    def resolve_ops_model(cls, risk_tier: str) -> str:
+        configured = os.environ.get("SSDLC_OPS_MODEL", "").strip()
+        if configured:
+            return configured
+        tier = (risk_tier or "M").upper()
+        return "deepseek/deepseek-chat" if tier == "S" else "anthropic/claude-sonnet-4.5"
+
+    @classmethod
+    def resolve_docs_model(cls, risk_tier: str) -> str:
+        configured = os.environ.get("SSDLC_DOCS_MODEL", "").strip()
+        if configured:
+            return configured
+        tier = (risk_tier or "M").upper()
+        return "deepseek/deepseek-chat" if tier == "S" else "google/gemini-2.5-pro"
+
+    @classmethod
     def resolve_review_models(cls, risk_tier: str, attempt: int = 1) -> Tuple[List[str], str]:
-        models_csv = os.environ.get(
-            "SSDLC_REVIEW_MODELS", "deepseek/deepseek-r1-0528,anthropic/claude-sonnet-4.5"
-        )
-        all_models = [m.strip() for m in models_csv.split(",") if m.strip()]
+        models_csv = os.environ.get("SSDLC_REVIEW_MODELS", "").strip()
+        tier = (risk_tier or "M").upper()
         effort = cls.resolve_reasoning_effort("04-review", risk_tier, attempt=attempt)
-        # In Tier S on Attempt 1, a single reviewer suffices; on bounce or Tier M/L, run full panel
-        if (risk_tier or "M").upper() == "S" and attempt == 1 and len(all_models) > 1:
+
+        if models_csv:
+            all_models = [m.strip() for m in models_csv.split(",") if m.strip()]
+        else:
+            if tier == "S" and attempt == 1:
+                return ["deepseek/deepseek-chat"], effort
+            all_models = ["deepseek/deepseek-r1-0528", "anthropic/claude-sonnet-4.5"]
+
+        if tier == "S" and attempt == 1 and len(all_models) > 1:
             return [all_models[0]], effort
         return all_models, effort
 
@@ -1172,7 +1233,7 @@ class SSDLCOrchestrator:
         self._save_state()
 
         engine = os.environ.get("SSDLC_PO_ENGINE", "openrouter")
-        model = os.environ.get("SSDLC_PO_MODEL", "anthropic/claude-3.7-sonnet")
+        model = DynamicRoutingPolicy.resolve_po_model(risk_tier)
         recon_text = (self.dir_recon / "context-and-blast-radius.md").read_text(encoding="utf-8")
 
         sys_prompt = (
@@ -1251,18 +1312,16 @@ class SSDLCOrchestrator:
         recon_text = (self.dir_recon / "context-and-blast-radius.md").read_text(encoding="utf-8")
         req_text = (self.dir_po / "requirements.md").read_text(encoding="utf-8")
 
+        risk_tier = self.state.get("risk_tier", "M")
         arch_engine = os.environ.get("SSDLC_DESIGN_ARCH_ENGINE", "openrouter")
-        arch_model = os.environ.get("SSDLC_DESIGN_ARCH_MODEL", "anthropic/claude-3.7-sonnet")
         sec_engine = os.environ.get("SSDLC_DESIGN_SEC_ENGINE", "openrouter")
-        sec_model = os.environ.get("SSDLC_DESIGN_SEC_MODEL", "deepseek/deepseek-r1")
+        arch_model, sec_model = DynamicRoutingPolicy.resolve_design_models(risk_tier)
         max_rounds = int(os.environ.get("SSDLC_MAX_DESIGN_ROUNDS", "3"))
 
         dialogue_log: List[str] = ["# Pair Design & STRIDE Threat Modeling Transcript\n"]
         current_adr = ""
         current_threat_model = ""
         approved = False
-
-        risk_tier = self.state.get("risk_tier", "M")
         for rnd in range(1, max_rounds + 1):
             arch_effort = DynamicRoutingPolicy.resolve_reasoning_effort("02-design-arch", risk_tier, attempt=rnd)
             sec_effort = DynamicRoutingPolicy.resolve_reasoning_effort("02-design-sec", risk_tier, attempt=rnd)
@@ -1455,7 +1514,9 @@ class SSDLCOrchestrator:
         t0 = time.time()
         in_container = Path("/.dockerenv").exists() or os.environ.get("SSDLC_EXECUTION_MODE", "docker") == "docker"
         dev_sandbox = "danger-full-access" if in_container else "workspace-write"
-        dev_budget = float(os.environ.get("SSDLC_DEV_BUDGET_USD", "3.0"))
+        tier_dev_budgets = {"S": 1.0, "M": 2.5, "L": 8.0}
+        dev_budget_env = os.environ.get("SSDLC_DEV_BUDGET_USD", "").strip()
+        dev_budget = float(dev_budget_env) if dev_budget_env else tier_dev_budgets.get(risk_tier, 2.5)
         if dev_engine == "claude":
             out, rc, dev_cost, dev_tin, dev_tout = EngineRunner.run_claude(
                 prompt,
@@ -1933,7 +1994,7 @@ class SSDLCOrchestrator:
         diff_text = self._read_optional(self.dir_dev / "implementation.diff", "")
 
         ops_engine = os.environ.get("SSDLC_OPS_ENGINE", "openrouter")
-        ops_model = os.environ.get("SSDLC_OPS_MODEL", "anthropic/claude-3.7-sonnet")
+        ops_model = DynamicRoutingPolicy.resolve_ops_model(risk_tier)
 
         sys_prompt = (
             "You are the Lead DevSecOps & Release Reliability Engineer.\n"
@@ -1986,7 +2047,7 @@ class SSDLCOrchestrator:
         diff_text = self._read_optional(self.dir_dev / "implementation.diff", "")
 
         docs_engine = os.environ.get("SSDLC_DOCS_ENGINE", "openrouter")
-        docs_model = os.environ.get("SSDLC_DOCS_MODEL", "anthropic/claude-3.7-sonnet")
+        docs_model = DynamicRoutingPolicy.resolve_docs_model(risk_tier)
 
         sys_prompt = (
             "You are the Technical Writer & API Contract Steward.\n"
@@ -2214,12 +2275,19 @@ To **REJECT** and send feedback back to the team:
     ]
 
     def check_budget_circuit_breaker(self) -> None:
-        budget_cap = float(os.environ.get("SSDLC_BUDGET_CAP_USD", "10.0"))
+        env_cap = os.environ.get("SSDLC_BUDGET_CAP_USD", "").strip()
+        if env_cap:
+            budget_cap = float(env_cap)
+        else:
+            tier = (self.state.get("risk_tier") or "M").upper()
+            tier_caps = {"S": 3.0, "M": 6.0, "L": 20.0}
+            budget_cap = tier_caps.get(tier, 6.0)
+
         if budget_cap <= 0:
             return
         total_spent = sum(item.get("cost_usd", 0.0) for item in self.state.get("ledger", []))
         if total_spent >= budget_cap:
-            msg = f"Circuit Breaker: Total spend (${total_spent:.2f}) reached or exceeded SSDLC_BUDGET_CAP_USD (${budget_cap:.2f})!"
+            msg = f"Circuit Breaker: Total spend (${total_spent:.2f}) reached or exceeded budget cap (${budget_cap:.2f})!"
             print(f"\n[CIRCUIT-BREAKER] {msg}")
             self.record_gate("BUDGET_CAP_GATE", False, msg)
             self.state["status"] = "HALTED_BUDGET_EXCEEDED"
