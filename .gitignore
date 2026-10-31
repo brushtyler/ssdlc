@@ -1,0 +1,14 @@
+# Local isolated CLI binaries & caches (populated by ./setup-ssdlc.sh --bootstrap)
+.tools/
+
+# Python bytecode & caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Logs, secrets & temporary session archives
+*.log
+*.env
+.env*
+.sessions/
+.ssdlc/
