@@ -196,9 +196,10 @@ export SSDLC_EXECUTION_MODE="${exec_mode}"   # "docker" (recommended) or "local"
 # export OPENAI_API_KEY="sk-proj-${proj_id}-..."
 # export ANTHROPIC_API_KEY="sk-ant-${proj_id}-..."
 
-# Optional: Set to "true" if you want this project's isolated CODEX_HOME to copy
-# your host's ~/.codex/auth.json once on first run (without sharing SQLite DBs)
-export SSDLC_INHERIT_HOST_CODEX_AUTH="false"
+# Optional: Set to "true" if you want this project to inherit
+# host flat-rate AI subscriptions (ChatGPT Plus/Pro and Claude Pro/Max)
+export SSDLC_INHERIT_HOST_CODEX_AUTH="true"
+export SSDLC_INHERIT_HOST_CLAUDE_AUTH="true"
 
 # --- Role Engine & Model Routing ---
 export SSDLC_RECON_ENGINE="openrouter"
@@ -297,11 +298,18 @@ services:
       - CLAUDE_CONFIG_DIR=/workspace/.ssdlc/.runtime/claude_home
       - XDG_CACHE_HOME=/workspace/.ssdlc/.runtime/cache
       - HOME=/workspace/.ssdlc/.runtime
+      - IS_SANDBOX=1
+      - NODE_OPTIONS=--max-old-space-size=1536
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}
     volumes:
       - ${proj_dir}:/workspace
       - ${SSDLC_HOME}:/opt/ssdlc:ro
       - /usr/local/bin/codex:/opt/host-bin/codex:ro
+      - /usr/local/bin/claude:/opt/host-bin/claude:ro
       - ${HOME}/.local/bin/agy:/opt/host-bin/agy:ro
+      - ${HOME}/.codex:${HOME}/.codex:ro
+      - ${HOME}/.claude:${HOME}/.claude:ro
+      - ${HOME}/.claude.json:${HOME}/.claude.json:ro
       - ssdlc-shared-uv-cache:/root/.cache/uv
       - ssdlc-shared-npm-cache:/root/.npm
 

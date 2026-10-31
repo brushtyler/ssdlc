@@ -89,6 +89,87 @@ When launched with `--tier auto`, Phase `00-recon` evaluates the blast radius an
 
 ---
 
+## Flat-Rate Subscriptions & Global Inheritance (ChatGPT Plus/Pro & Claude Pro/Max)
+
+SSDLC is designed to eliminate pay-per-token API waste during heavy development loops by seamlessly utilizing your existing flat-rate AI subscriptions (**OpenAI ChatGPT Plus/Pro/Team** and **Anthropic Claude Pro/Max/Team**).
+
+### 1. One-Time Host Setup (Login Once per VM)
+
+You authenticate your subscriptions **only once** on the host VM. All projects automatically inherit these credentials.
+
+#### A. OpenAI Codex (ChatGPT Plus / Pro / Team)
+Log in via the Codex CLI on the VM host:
+```bash
+codex auth login
+# or run 'codex' interactively
+```
+- Open the provided URL in your local browser, log in with your ChatGPT Plus/Pro account, and authorize.
+- Codex writes your session credentials to: `~/.codex/auth.json` (`auth_mode: "chatgpt"`).
+
+#### B. Anthropic Claude Code (Claude Pro / Max / Team)
+You have two authentication options:
+
+**Option 1: Native Persistent Login (Recommended for Shell & SSDLC)**
+```bash
+claude auth login
+```
+- Claude Code displays an authorization URL. Open it in your local browser, approve with your Claude subscription account, and copy the authorization code.
+- Paste the code at the terminal prompt. Claude Code permanently writes your credentials to: `~/.claude.json`.
+
+**Option 2: Headless 1-Year Setup Token (Ideal for Headless CI/CD)**
+```bash
+claude setup-token
+```
+- Complete the web flow to obtain a long-lived OAuth token (`sk-ant-...`).
+- Export it in your environment: `export CLAUDE_CODE_OAUTH_TOKEN="sk-ant-..."`.
+
+---
+
+### 2. Automatic Project Inheritance (`~/.ssdlc/global.env`)
+
+To prevent having to reconfigure environment variables or copy keys into every new project, SSDLC uses an **Host-Wide Defaults** architecture:
+
+📁 **`~/.ssdlc/global.env`**
+
+```bash
+# /root/.ssdlc/global.env - Inherited automatically by every SSDLC project on this host
+export OPENROUTER_API_KEY="sk-or-v1-..."             # Fallback provider for non-dev phases
+export SSDLC_INHERIT_HOST_CODEX_AUTH="true"         # Automatically inherits ~/.codex/auth.json
+export SSDLC_INHERIT_HOST_CLAUDE_AUTH="true"        # Automatically inherits ~/.claude.json
+export SSDLC_DEV_ENGINE="auto"                      # Routes to Codex/Claude automatically
+export SSDLC_MAX_REASONING_EFFORT="medium"          # Strict cap to prevent token explosion
+```
+
+#### How Inheritance Works:
+1. **Zero Configuration for New Projects**: When initializing or running any project (`./setup-ssdlc.sh --init-project` or `./ssdlc run`), SSDLC automatically loads `~/.ssdlc/global.env` and copies the host credentials into the project's isolated runtime (`.ssdlc/.runtime/codex_home/` and `.ssdlc/.runtime/claude_home/`).
+2. **Project-Specific Overrides (Optional)**: If a specific project requires a dedicated API key (e.g. for client billing or independent auditing), set it in that project's `.ssdlc/project.env`. Local project variables strictly take precedence over host defaults.
+
+---
+
+### 3. Autonomous Context-Aware Model Routing & Quota Preservation
+
+To protect your subscription rate limits from being drained by trivial edits, SSDLC's `DynamicRoutingPolicy` automatically calibrates models and reasoning effort based on the ticket's **Risk Tier** (`Tier S / M / L`) and **Dev Profile**:
+
+| SSDLC Phase | Tier S (Micro-task / CSS / Refactor) | Tier M (Standard Feature) | Tier L (Epic / High-Risk Fullstack) |
+| :--- | :--- | :--- | :--- |
+| **01 PO** | `deepseek/deepseek-chat` (~$0.14/M) | `anthropic/claude-sonnet-4.5` | `anthropic/claude-sonnet-4.5` |
+| **02 Pair Design & STRIDE** | *Bypassed (Fast Track)* | `claude-sonnet-4.5` + `deepseek-r1` | `claude-sonnet-4.5` + `deepseek-r1` |
+| **03 Dev (Codex Subscription)** | **`gpt-6-luna`** *(Preserves Pro quota)* | **`gpt-6.1-terra`** *(Escalates to `sol` on retry)* | **`gpt-6.1-sol`** |
+| **03 Dev (Claude Subscription)** | `claude-haiku-4.5` | `claude-sonnet-4.6` | `claude-sonnet-4.6` |
+| **04 Review** | 1 reviewer (`deepseek-chat`) | Dual consensus (`r1` + `sonnet`) | Multi-model panel |
+| **06 Ops & Runbook** | `deepseek/deepseek-chat` | `anthropic/claude-sonnet-4.5` | `anthropic/claude-sonnet-4.5` |
+| **07 Docs & Changelog** | `deepseek/deepseek-chat` | `google/gemini-2.5-pro` | `google/gemini-2.5-pro` |
+
+#### Built-In Safety Mechanisms:
+- **Reasoning Effort Capping**: Automatically capped at `low` for Tier S and `medium` for Tier M/L (disables `high` and `xhigh` which otherwise cause 4x token inflation).
+- **Tier-Calibrated Circuit Breakers**: Automatically halts execution if total spend across all phases hits calibrated thresholds:
+  - **Tier S**: **$3.00**
+  - **Tier M**: **$6.00**
+  - **Tier L**: **$20.00**
+  *(Configurable via `SSDLC_BUDGET_CAP_USD`).*
+
+---
+
 ## Supported Engines, CLIs & Model Routing
 
 ### CLI Engines
