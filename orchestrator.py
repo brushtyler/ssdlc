@@ -161,6 +161,15 @@ class ProjectRuntimeIsolation:
                 shutil.copy2(host_auth, proj_auth)
                 os.chmod(proj_auth, 0o600)
 
+        # Optionally link host Claude auth ONLY if SSDLC_INHERIT_HOST_CLAUDE_AUTH=true
+        if os.environ.get("SSDLC_INHERIT_HOST_CLAUDE_AUTH", "false").lower() == "true":
+            host_claude_json = Path.home() / ".claude.json"
+            if host_claude_json.exists():
+                for dest in (self.claude_home / ".claude.json", self.runtime_dir / ".claude.json"):
+                    if not dest.exists():
+                        shutil.copy2(host_claude_json, dest)
+                        os.chmod(dest, 0o600)
+
         os.environ["CODEX_HOME"] = str(self.codex_home)
         os.environ["CLAUDE_CONFIG_DIR"] = str(self.claude_home)
         os.environ["XDG_CACHE_HOME"] = str(self.cache_dir)
