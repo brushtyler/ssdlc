@@ -2433,6 +2433,15 @@ To **REJECT** and send feedback back to the team:
             (self.dir_dev / "commit-sha.txt").write_text(sha + "\n", encoding="utf-8")
             self.record_artifact("03-dev/commit-sha.txt", self.dir_dev / "commit-sha.txt")
 
+        # Clean any local ticket evidence in self.dir_ticket (except worktree) so git merge does not collide
+        if self.dir_ticket.exists():
+            for item in self.dir_ticket.iterdir():
+                if item.name != "worktree":
+                    if item.is_dir():
+                        shutil.rmtree(item, ignore_errors=True)
+                    else:
+                        item.unlink(missing_ok=True)
+
         subprocess.run(["git", "merge", "--no-ff", branch, "-m", f"Merge SSDLC verified branch {branch}"], cwd=str(self.repo_root), check=True)
         # Prune worktree to reclaim disk space while preserving .ssdlc/<ticket> evidence
         if wt.exists():
