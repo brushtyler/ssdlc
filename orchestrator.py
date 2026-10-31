@@ -305,12 +305,18 @@ class DynamicRoutingPolicy:
                 or (Path("/workspace/.ssdlc/.runtime/codex_home/auth.json").exists())
             ) and bool(shutil.which("codex"))
             has_claude_auth = bool(
-                os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
+                os.environ.get("ANTHROPIC_API_KEY")
+                or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+                or (Path.home() / ".claude.json").exists()
+                or Path("/root/.claude.json").exists()
+                or Path("/workspace/.ssdlc/.runtime/claude_home/.claude.json").exists()
             ) and bool(shutil.which("claude"))
 
-            if has_codex_auth:
+            if profile in ("FULLSTACK", "REFACTOR", "DOCS") and has_claude_auth:
+                engine = "claude"
+            elif has_codex_auth:
                 engine = "codex"
-            elif profile in ("FULLSTACK", "REFACTOR", "DOCS") and has_claude_auth:
+            elif has_claude_auth:
                 engine = "claude"
             else:
                 engine = "codex"
