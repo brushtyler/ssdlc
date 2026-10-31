@@ -2433,9 +2433,9 @@ To **REJECT** and send feedback back to the team:
             (self.dir_dev / "commit-sha.txt").write_text(sha + "\n", encoding="utf-8")
             self.record_artifact("03-dev/commit-sha.txt", self.dir_dev / "commit-sha.txt")
 
-        # Clean any local ticket evidence in self.dir_ticket (except worktree) so git merge does not collide
-        if self.dir_ticket.exists():
-            for item in self.dir_ticket.iterdir():
+        # Clean any local ticket evidence in self.ssdlc_root (except worktree) so git merge does not collide
+        if self.ssdlc_root.exists():
+            for item in self.ssdlc_root.iterdir():
                 if item.name != "worktree":
                     if item.is_dir():
                         shutil.rmtree(item, ignore_errors=True)
