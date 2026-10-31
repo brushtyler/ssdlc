@@ -2438,6 +2438,7 @@ def cmd_doctor(repo: Path) -> int:
     print(f"      * OPENROUTER_API_KEY: {fingerprint_secret(os.environ.get('OPENROUTER_API_KEY', ''))}")
     print(f"      * OPENAI_API_KEY    : {fingerprint_secret(os.environ.get('OPENAI_API_KEY', ''))}")
     print(f"      * ANTHROPIC_API_KEY : {fingerprint_secret(os.environ.get('ANTHROPIC_API_KEY', ''))}")
+    print(f"      * CLAUDE_OAUTH_TOKEN: {fingerprint_secret(os.environ.get('CLAUDE_CODE_OAUTH_TOKEN', ''))}")
 
     remote_sync = RemoteSyncManager(repo, "doctor")
     token_status = "EXISTS" if remote_sync.token else "UNSET"
