@@ -586,13 +586,14 @@ class EngineRunner:
             cmd = EngineRunner._wrap_in_role_container(
                 cmd, cwd=cwd, writable_worktree=writable_worktree
             )
+        dev_timeout = int(os.environ.get("SSDLC_DEV_TIMEOUT", "2400"))
         proc = subprocess.run(
             cmd,
             cwd=str(cwd),
             env=os.environ.copy(),
             capture_output=True,
             text=True,
-            timeout=900,
+            timeout=dev_timeout,
         )
         combined = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
         return combined.strip(), proc.returncode
@@ -606,9 +607,11 @@ class EngineRunner:
         writable_worktree: Optional[Path] = None,
     ) -> Tuple[str, int]:
         env = os.environ.copy()
+        env["IS_SANDBOX"] = "1"
         if use_openrouter and env.get("OPENROUTER_API_KEY"):
             env["ANTHROPIC_BASE_URL"] = "https://openrouter.ai/api"
             env["ANTHROPIC_AUTH_TOKEN"] = env["OPENROUTER_API_KEY"]
+            env["ANTHROPIC_API_KEY"] = env["OPENROUTER_API_KEY"]
         cmd = ["claude", "-p", prompt]
         if not read_only:
             cmd.append("--dangerously-skip-permissions")
@@ -618,13 +621,14 @@ class EngineRunner:
                 cwd=cwd,
                 writable_worktree=(None if read_only else writable_worktree),
             )
+        dev_timeout = int(os.environ.get("SSDLC_DEV_TIMEOUT", "2400"))
         proc = subprocess.run(
             cmd,
             cwd=str(cwd),
             env=env,
             capture_output=True,
             text=True,
-            timeout=900,
+            timeout=dev_timeout,
         )
         combined = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
         return combined.strip(), proc.returncode
