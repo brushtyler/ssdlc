@@ -179,6 +179,15 @@ class ProjectRuntimeIsolation:
                         shutil.copy2(host_claude_json, dest)
                         os.chmod(dest, 0o600)
 
+        # Auto-inherit git user identity from host ~/.gitconfig
+        for hg in (Path("/root/.gitconfig"), Path.home() / ".gitconfig"):
+            if hg.exists() and hg != (self.runtime_dir / ".gitconfig"):
+                runtime_gc = self.runtime_dir / ".gitconfig"
+                if not runtime_gc.exists() or hg.stat().st_mtime > runtime_gc.stat().st_mtime:
+                    shutil.copy2(hg, runtime_gc)
+                    os.chmod(runtime_gc, 0o644)
+                break
+
         os.environ["CODEX_HOME"] = str(self.codex_home)
         os.environ["CLAUDE_CONFIG_DIR"] = str(self.claude_home)
         os.environ["XDG_CACHE_HOME"] = str(self.cache_dir)

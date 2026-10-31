@@ -310,6 +310,7 @@ services:
       - ${HOME}/.codex:${HOME}/.codex:ro
       - ${HOME}/.claude:${HOME}/.claude:ro
       - ${HOME}/.claude.json:${HOME}/.claude.json:ro
+      - ${HOME}/.gitconfig:${HOME}/.gitconfig:ro
       - ssdlc-shared-uv-cache:/root/.cache/uv
       - ssdlc-shared-npm-cache:/root/.npm
 
