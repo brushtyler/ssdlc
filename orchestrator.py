@@ -111,7 +111,12 @@ class ProjectRuntimeIsolation:
         self.claude_home.mkdir(parents=True, exist_ok=True)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-        # Load project-specific .ssdlc/project.env
+        # 1. Load host-wide defaults from ~/.ssdlc/global.env (if present)
+        global_env = Path.home() / ".ssdlc" / "global.env"
+        if global_env.exists():
+            load_env_file(global_env, override=False)
+
+        # 2. Load project-specific .ssdlc/project.env (takes precedence)
         load_env_file(self.project_env, override=True)
 
         # Ensure isolated CODEX_HOME/config.toml has OpenRouter provider, auto_review,
@@ -153,16 +158,16 @@ class ProjectRuntimeIsolation:
         else:
             self.ensure_trusted_path(self.repo_root)
 
-        # Optionally link read-only host auth.json ONLY if SSDLC_INHERIT_HOST_CODEX_AUTH=true
-        if os.environ.get("SSDLC_INHERIT_HOST_CODEX_AUTH", "false").lower() == "true":
+        # Auto-inherit read-only host auth.json by default if present (unless set to false)
+        if os.environ.get("SSDLC_INHERIT_HOST_CODEX_AUTH", "true").lower() == "true":
             host_auth = Path.home() / ".codex" / "auth.json"
             proj_auth = self.codex_home / "auth.json"
             if host_auth.exists() and not proj_auth.exists():
                 shutil.copy2(host_auth, proj_auth)
                 os.chmod(proj_auth, 0o600)
 
-        # Optionally link host Claude auth ONLY if SSDLC_INHERIT_HOST_CLAUDE_AUTH=true
-        if os.environ.get("SSDLC_INHERIT_HOST_CLAUDE_AUTH", "false").lower() == "true":
+        # Auto-inherit host Claude auth by default if present (unless set to false)
+        if os.environ.get("SSDLC_INHERIT_HOST_CLAUDE_AUTH", "true").lower() == "true":
             host_claude_json = Path.home() / ".claude.json"
             if host_claude_json.exists():
                 for dest in (self.claude_home / ".claude.json", self.runtime_dir / ".claude.json"):
