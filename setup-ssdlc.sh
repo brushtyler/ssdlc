@@ -285,6 +285,42 @@ EOF
     log_ok "Created isolated CODEX_HOME config: ${proj_codex_toml}"
   fi
 
+  # 2b. Initialize Living Standards Registry (<project>/.ssdlc/standards/)
+  local proj_standards="${proj_ssdlc}/standards"
+  mkdir -p "${proj_standards}"
+  if [ ! -f "${proj_standards}/DESIGN_SYSTEM.md" ]; then
+    cat << 'EOF' > "${proj_standards}/DESIGN_SYSTEM.md"
+# Living Design System & UI Tokens
+
+> Mandatory contract for all UI/UX tickets in this project.
+> All components must use these tokens rather than hardcoded hex colors or arbitrary spacing.
+
+## 1. Tokens Reference
+- Spacing: Use standard project spacing tokens (e.g. `space.xs=4, sm=8, md=16, lg=24, xl=32`).
+- Radii: Use standard border radii tokens (e.g. `shape.sm=8, md=14, lg=22, pill=999`).
+- Theme: Retrieve colors via the project's theme hook/context; never write raw `#hex` in components.
+
+## 2. Safe Area & Platform Rules
+- Always use platform safe area insets for headers and footers.
+- Use vector/SVG icons; raw Unicode symbols or emojis as icons are strictly prohibited.
+- Implement all 4 states for async components: Loading, Empty, Error, Success.
+EOF
+    log_ok "Created initial Design System standards: ${proj_standards}/DESIGN_SYSTEM.md"
+  fi
+
+  if [ ! -f "${proj_standards}/COMPONENT_CATALOG.md" ]; then
+    cat << 'EOF' > "${proj_standards}/COMPONENT_CATALOG.md"
+# Living Component Catalog
+
+> Reuse First: Inspect this catalog before creating bespoke UI widgets.
+> New reusable components are automatically registered here upon ticket approval.
+
+## Reusable Components
+- Check project's component directory before building new primitives.
+EOF
+    log_ok "Created initial Component Catalog: ${proj_standards}/COMPONENT_CATALOG.md"
+  fi
+
   # 3. Create per-project Docker Compose file (<project>/.ssdlc/docker-compose.yml)
   local compose_file="${proj_ssdlc}/docker-compose.yml"
   cat << EOF > "${compose_file}"

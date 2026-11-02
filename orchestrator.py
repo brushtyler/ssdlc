@@ -1333,10 +1333,24 @@ class SSDLCOrchestrator:
         )
         recent_commits = log_proc.stdout.strip() if log_proc.returncode == 0 else ""
         tree_str = "\n".join(files) if files else "(empty or non-git directory)"
+
+        # Living Standards & Design System memory retrieval
+        standards_ctx = []
+        standards_dir = self.repo_root / ".ssdlc" / "standards"
+        if standards_dir.is_dir():
+            for std_file in sorted(standards_dir.glob("*.md")):
+                try:
+                    content = std_file.read_text(encoding="utf-8")
+                    standards_ctx.append(f"\n--- {std_file.name} ---\n{content}\n")
+                except Exception:
+                    pass
+        standards_str = "\n".join(standards_ctx) if standards_ctx else "(No .ssdlc/standards/ found)"
+
         return (
             f"Project ID: {self.project_id}\n"
             f"Repository Root: {self.repo_root}\n"
             f"Recent Commits:\n{recent_commits}\n\n"
+            f"LIVING PROJECT STANDARDS & REUSABLE ASSETS (MANDATORY):\n{standards_str}\n\n"
             f"Tracked Files (up to 250):\n{tree_str}\n"
         )
 
@@ -1450,6 +1464,8 @@ class SSDLCOrchestrator:
         if dev_profile == "FRONTEND_UI":
             ui_nfr_prompt = (
                 "\n\n### MANDATORY FRONTEND / MOBILE NON-FUNCTIONAL REQUIREMENTS:\n"
+                "- NFR-DESIGN-SYSTEM: Every UI element MUST strictly use the living design tokens from DESIGN_SYSTEM.md (space.*, shape.*, type.*, useTheme()). Zero hardcoded hex colors or arbitrary spacing numbers permitted.\n"
+                "- NFR-REUSE-FIRST: Explicitly mandate reusing existing primitives from COMPONENT_CATALOG.md (<Button>, <Card>, <Loading>, <SecureImage>) instead of inventing bespoke widgets.\n"
                 "- NFR-SAFE-AREA: Explicit handling of notch, Dynamic Island, status bar, and home indicator insets (useSafeAreaInsets or container).\n"
                 "- NFR-4-STATES: Every interactive component or screen must define 4 states: Loading (skeleton/spinner with max 5s timeout), Empty, Error (with retry trigger), and Success/Active.\n"
                 "- NFR-OFFLINE-AUTH: Behavior when guest or network is offline.\n"
@@ -1552,9 +1568,10 @@ class SSDLCOrchestrator:
             ui_arch_rules = ""
             if dev_profile == "FRONTEND_UI":
                 ui_arch_rules = (
-                    "\nUI/UX ARCHITECTURE RULES:\n"
-                    "- Specify component hierarchy, props, and exact Design System tokens (spacing, typography, palette).\n"
-                    "- Ensure Safe Area Insets are factored into all container boundaries.\n"
+                    "\nUI/UX ARCHITECTURE & DESIGN SYSTEM RULES:\n"
+                    "- ZERO DRIFT: Specify exact Design System tokens (import { space, shape, type, useTheme } from '@/theme/tokens').\n"
+                    "- REUSE MANDATE: Check COMPONENT_CATALOG.md and reuse existing primitives (<Button>, <Card>, <Loading>, <SecureImage>) rather than designing duplicates.\n"
+                    "- Ensure Safe Area Insets are factored into all container boundaries via useSafeAreaInsets.\n"
                     "- Enforce vector/SVG icons (@expo/vector-icons or custom SVG) and explicitly forbid raw Unicode glyphs.\n"
                 )
             arch_sys = (
@@ -1734,9 +1751,11 @@ class SSDLCOrchestrator:
         if dev_profile == "FRONTEND_UI":
             ui_dev_rules = (
                 "\n\nMANDATORY FRONTEND / UI/UX IMPLEMENTATION RULES:\n"
+                "- ZERO TOKEN DRIFT: Import space, shape, type, useTheme from `@/theme/tokens`. Never use hardcoded hex colors or arbitrary spacing numbers.\n"
+                "- REUSE COMPONENT CATALOG: Reuse primitives from `@/components/Primitives` (<Button>, <Card>, <Loading>) before inventing custom widgets.\n"
                 "- Do NOT use raw Unicode characters or emojis (e.g. '♥', '★', arrows) as icons. Always use vector icons (e.g. from `@expo/vector-icons` or SVG).\n"
                 "- Always use `useSafeAreaInsets` or safe area containers for top/bottom boundaries to prevent notch and status bar collisions.\n"
-                "- Implement all 4 component states: Loading (skeleton/spinner), Empty, Error, and Success.\n"
+                "- Implement all 4 component states: Loading (skeleton/spinner with max 5s timeout), Empty, Error (with retry trigger), and Success.\n"
             )
 
         prompt = (
@@ -1902,8 +1921,10 @@ class SSDLCOrchestrator:
         ui_review_rules = ""
         if dev_profile == "FRONTEND_UI":
             ui_review_rules = (
-                "\n\n### MANDATORY FRONTEND / UI/UX FIDELITY AUDIT:\n"
+                "\n\n### MANDATORY FRONTEND / UI/UX & LIVING DESIGN SYSTEM AUDIT:\n"
                 "- Check every UI Acceptance Criterion (AC-*) in requirements.md 1-by-1.\n"
+                "- ZERO TOKEN DRIFT: Verify all styling references theme.color.*, space.*, and shape.*. If the diff contains hardcoded hex colors (#...) or arbitrary spacing numbers (e.g. padding: 13, margin: 7), YOU MUST REJECT WITH CHANGES_REQUESTED.\n"
+                "- REUSE VERIFICATION: Verify that existing primitives from COMPONENT_CATALOG.md (<Button>, <Card>, <Loading>) are imported instead of duplicating basic UI widgets.\n"
                 "- Safe Area Insets: Verify safe area insets (useSafeAreaInsets or platform container) are used; reject hardcoded status bar paddings.\n"
                 "- Visual Assets: If the specification requires SVG or vector icons, verify vector imports. If the code uses raw Unicode strings (like emojis, arrows, symbols) as icon substitutes, YOU MUST REJECT WITH CHANGES_REQUESTED.\n"
                 "- Component States: Verify Loading, Empty, and Error states are implemented.\n"
@@ -2692,6 +2713,23 @@ To **REJECT** and send feedback back to the team:
                         item.unlink(missing_ok=True)
 
         subprocess.run(["git", "merge", "--no-ff", branch, "-m", f"Merge SSDLC verified branch {branch}"], cwd=str(self.repo_root), check=True)
+
+        # Compound Knowledge: Auto-register any new components into .ssdlc/standards/COMPONENT_CATALOG.md
+        standards_catalog = self.repo_root / ".ssdlc" / "standards" / "COMPONENT_CATALOG.md"
+        diff_file = self.dir_dev / "implementation.diff"
+        if standards_catalog.exists() and diff_file.exists():
+            diff_text = self._read_optional(diff_file, "")
+            new_components = re.findall(r"\+\+\+ b/(?:client/[^/]+/)?src/components/([^/\s]+\.tsx)", diff_text)
+            if new_components:
+                catalog_text = standards_catalog.read_text(encoding="utf-8")
+                updates = []
+                for comp in sorted(set(new_components)):
+                    if comp not in catalog_text:
+                        updates.append(f"- **`{comp}`**: Introduced in ticket `{self.ticket_id}`.\n")
+                if updates:
+                    standards_catalog.write_text(catalog_text.rstrip() + "\n\n## Recently Merged Components\n" + "".join(updates), encoding="utf-8")
+                    print(f"    [Standards Registry] Auto-registered {len(updates)} new component(s) into COMPONENT_CATALOG.md")
+
         # Prune worktree to reclaim disk space while preserving .ssdlc/<ticket> evidence
         if wt.exists():
             subprocess.run(["git", "worktree", "remove", "--force", str(wt)], cwd=str(self.repo_root), capture_output=True)
