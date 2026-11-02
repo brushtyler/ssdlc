@@ -247,14 +247,14 @@ class CostAndTelemetryEntry:
         }
 
 
-class DynamicRoutingPolicy:
+class SquadDispatcher:
     """
-    Dynamically computes reasoning effort ('low' | 'medium' | 'high' | 'xhigh'),
-    engine routing, and model selection based on:
-      1. Phase & Role
-      2. Risk Tier ('S' | 'M' | 'L')
-      3. Task Dev Profile ('ALGORITHMIC' | 'FULLSTACK' | 'SECURITY' | 'REFACTOR' | 'DOCS')
-      4. Retry Attempt (escalates reasoning effort on each bounce)
+    Intelligent Meta-Orchestrator & Cost/Expertise Triage.
+    Dynamically routes each SSDLC phase to the optimal engine and model based on:
+      1. Phase & Role requirement
+      2. Task Profile ('FRONTEND_UI' | 'ALGORITHMIC' | 'DATABASE_MIGRATION' | 'SECURITY' | 'DOCS' | 'REFACTOR')
+      3. Risk Tier ('S' | 'M' | 'L') and Retry Escalation Attempt
+      4. Available Local CLI Subscriptions (Claude Max, Codex Plus/Pro, agy Flash) vs OpenRouter
     """
 
     EFFORT_LADDER = ["low", "medium", "high", "xhigh"]
@@ -281,12 +281,10 @@ class DynamicRoutingPolicy:
             tier = "M"
         base = cls.BASE_EFFORT_MATRIX.get(phase_key, {}).get(tier, "medium")
         idx = cls.EFFORT_LADDER.index(base) if base in cls.EFFORT_LADDER else 1
-        # Escalate +1 step per retry bounce (attempt 2 -> +1, attempt 3+ or 99 -> +2/max)
         if attempt > 1:
             bump = 2 if attempt >= 3 else (attempt - 1)
             idx = min(len(cls.EFFORT_LADDER) - 1, idx + bump)
 
-        # Budget Guardrail: Cap reasoning effort to prevent token explosion
         max_effort = os.environ.get("SSDLC_MAX_REASONING_EFFORT", "medium").lower().strip()
         if max_effort in cls.EFFORT_LADDER:
             max_idx = cls.EFFORT_LADDER.index(max_effort)
@@ -295,115 +293,214 @@ class DynamicRoutingPolicy:
         return cls.EFFORT_LADDER[idx]
 
     @classmethod
-    def resolve_dev_engine_and_model(
-        cls, risk_tier: str, dev_profile: str, attempt: int = 1
-    ) -> Tuple[str, str, str]:
-        configured_engine = os.environ.get("SSDLC_DEV_ENGINE", "auto").lower().strip()
-        configured_model = os.environ.get("SSDLC_DEV_MODEL", "").strip()
-        escalation_model = os.environ.get("SSDLC_DEV_ESCALATION_MODEL", "").strip()
-        effort = cls.resolve_reasoning_effort("03-dev", risk_tier, attempt=attempt)
+    def has_claude_max(cls) -> bool:
+        return bool(
+            (Path("/root/.claude/.credentials.json").exists())
+            or (Path.home() / ".claude" / ".credentials.json").exists()
+            or (Path.home() / ".claude.json").exists()
+            or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+        ) and bool(shutil.which("claude"))
 
+    @classmethod
+    def has_codex_auth(cls) -> bool:
+        return bool(
+            (Path("/root/.codex/auth.json").exists())
+            or (Path.home() / ".codex" / "auth.json").exists()
+            or os.environ.get("SSDLC_INHERIT_HOST_CODEX_AUTH", "true").lower() == "true"
+        ) and bool(shutil.which("codex"))
+
+    @classmethod
+    def has_agy(cls) -> bool:
+        return bool(
+            (Path.home() / ".local" / "bin" / "agy").exists()
+            or Path("/root/.local/bin/agy").exists()
+            or Path("/opt/host-bin/agy").exists()
+            or shutil.which("agy")
+        )
+
+    @classmethod
+    def has_openrouter(cls) -> bool:
+        return bool(os.environ.get("OPENROUTER_API_KEY", "").strip())
+
+    @classmethod
+    def dispatch_role(
+        cls,
+        phase_key: str,
+        risk_tier: str = "M",
+        dev_profile: str = "ALGORITHMIC",
+        attempt: int = 1,
+    ) -> Tuple[str, str, str, str]:
+        """
+        Returns (engine, model, effort, reasoning_justification).
+        Prioritizes:
+          - claude (Claude Max) for UI/UX, complex frontend, architecture, and visual audit.
+          - agy (gemini-3.8-flash) for ultra-fast, zero-cost Recon, PO, Docs, and summaries.
+          - codex (gpt-6-luna / gpt-6.1-sol) for algorithmic backend code and STRIDE security logic.
+          - openrouter (deepseek-r1) for specialized adversarial reasoning.
+        """
         tier = (risk_tier or "M").upper()
         profile = (dev_profile or "ALGORITHMIC").upper()
+        effort = cls.resolve_reasoning_effort(phase_key, tier, attempt=attempt)
 
-        # Automatic engine selection based on 00-recon DEV_PROFILE when SSDLC_DEV_ENGINE="auto"
-        if configured_engine in ("", "auto"):
-            has_codex_auth = bool(
-                os.environ.get("SSDLC_INHERIT_HOST_CODEX_AUTH", "false").lower() == "true"
-                or (Path.home() / ".codex" / "auth.json").exists()
-                or (Path("/workspace/.ssdlc/.runtime/codex_home/auth.json").exists())
-            ) and bool(shutil.which("codex"))
-            has_claude_auth = bool(
-                os.environ.get("ANTHROPIC_API_KEY")
-                or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
-                or (Path.home() / ".claude.json").exists()
-                or Path("/root/.claude.json").exists()
-                or Path("/workspace/.ssdlc/.runtime/claude_home/.claude.json").exists()
-            ) and bool(shutil.which("claude"))
+        # Check for explicit per-phase user override
+        env_engine_var = f"SSDLC_{phase_key.split('-')[-1].upper()}_ENGINE"
+        env_model_var = f"SSDLC_{phase_key.split('-')[-1].upper()}_MODEL"
+        explicit_engine = os.environ.get(env_engine_var, "").lower().strip()
+        explicit_model = os.environ.get(env_model_var, "").strip()
 
-            if profile in ("FULLSTACK", "REFACTOR", "DOCS") and has_claude_auth:
-                engine = "claude"
-            elif has_codex_auth:
-                engine = "codex"
-            elif has_claude_auth:
-                engine = "claude"
-            else:
-                engine = "codex"
-        else:
-            engine = configured_engine
+        if explicit_engine and explicit_engine != "auto":
+            return explicit_engine, explicit_model, effort, "Explicit env override"
 
-        # Intelligent dynamic model selection when not explicitly overridden
-        if not configured_model:
-            if engine == "codex":
-                # Tier S: Fast, lightweight luna to preserve rate-limits & quota
-                if tier == "S" or profile in ("DOCS", "UI_STYLING"):
-                    configured_model = "gpt-6-luna" if attempt == 1 else "gpt-6.1-sol"
-                elif tier == "M":
-                    configured_model = "gpt-6.1-terra" if attempt == 1 else "gpt-6.1-sol"
-                else:  # Tier L: Deep flagship model
-                    configured_model = "gpt-6.1-sol"
-            elif engine == "claude":
-                if tier == "S":
-                    configured_model = "claude-haiku-4.5"
-                else:
-                    configured_model = "claude-sonnet-4.6"
+        has_claude = cls.has_claude_max()
+        has_codex = cls.has_codex_auth()
+        has_agy = cls.has_agy()
+        has_or = cls.has_openrouter()
 
-        model = configured_model
-        if attempt >= 2 and escalation_model:
-            model = escalation_model
+        # PHASE 0: 00-recon (fast repository archaeology)
+        if phase_key == "00-recon":
+            if has_agy:
+                return "agy", "gemini-3.8-flash-low", "low", "Fast repo archaeology via agy (Gemini 3.8 Flash, zero subscription impact)"
+            if has_codex:
+                return "codex", "gpt-6-luna", "low", "Fast repo archaeology via Codex Luna"
+            return "openrouter", "google/gemini-2.0-flash-001", "low", "OpenRouter Gemini Flash fallback"
 
+        # PHASE 1: 01-po (Product Owner & Acceptance Criteria)
+        if phase_key == "01-po":
+            if profile == "FRONTEND_UI" and has_claude:
+                return "claude", "sonnet", effort, "Claude Max (Sonnet 5.5) for precise UI/UX ACs and Safe Area matrix"
+            if has_agy and tier == "S":
+                return "agy", "gemini-3.8-flash-medium", effort, "agy Gemini Flash for rapid Tier S specification"
+            if has_claude:
+                return "claude", "sonnet", effort, "Claude Max (Sonnet 5.5) specification steward"
+            return "openrouter", "anthropic/claude-3.7-sonnet", effort, "OpenRouter fallback"
+
+        # PHASE 2: 02-design-arch (Architecture & ADR)
+        if phase_key == "02-design-arch":
+            if has_claude:
+                return "claude", "sonnet", effort, "Claude Max (Sonnet 5.5) Lead Systems & UI/UX Architect"
+            if has_codex:
+                return "codex", "gpt-6.1-sol", effort, "Codex Sol Systems Architect"
+            return "openrouter", "anthropic/claude-3.7-sonnet", effort, "OpenRouter Architect fallback"
+
+        # PHASE 2: 02-design-sec (Security Architect & Threat Modeling)
+        if phase_key == "02-design-sec":
+            if has_codex:
+                return "codex", "gpt-6.1-sol", effort, "Codex Sol for rigorous STRIDE threat analysis"
+            if has_or:
+                return "openrouter", "deepseek/deepseek-r1", effort, "OpenRouter DeepSeek-R1 logic reasoning"
+            if has_claude:
+                return "claude", "sonnet", effort, "Claude Max (Sonnet 5.5) Security Architect"
+            return "openrouter", "deepseek/deepseek-r1", effort, "Fallback STRIDE model"
+
+        # PHASE 3: 03-dev (Implementation in isolated worktree)
+        if phase_key == "03-dev":
+            if profile == "FRONTEND_UI" and has_claude:
+                return "claude", "sonnet", effort, "Claude Max (Sonnet 5.5) specialized Frontend/Mobile/UI implementation"
+            if tier == "S" and has_codex:
+                return "codex", "gpt-6-luna", effort, "Codex Luna fast lightweight spot-fix implementation"
+            if has_claude and profile in ("FULLSTACK", "REFACTOR"):
+                return "claude", "sonnet", effort, "Claude Max (Sonnet 5.5) fullstack refactor implementation"
+            if has_codex:
+                return "codex", "gpt-6.1-sol", effort, "Codex Sol algorithmic/backend implementation"
+            if has_claude:
+                return "claude", "sonnet", effort, "Claude Max fallback"
+            return "openrouter", "anthropic/claude-3.7-sonnet", effort, "OpenRouter Dev fallback"
+
+        # PHASE 4: 04-review (Multi-model code review)
+        if phase_key == "04-review":
+            if profile == "FRONTEND_UI" and has_claude:
+                return "claude", "sonnet", effort, "Claude Max (Sonnet 5.5) UI/UX Fidelity & Visual Spec Checker"
+            if has_claude:
+                return "claude", "sonnet", effort, "Claude Max (Sonnet 5.5) Senior Code Reviewer"
+            if has_codex:
+                return "codex", "gpt-6.1-sol", effort, "Codex Sol Code Reviewer"
+            return "openrouter", "anthropic/claude-3.7-sonnet", effort, "OpenRouter Review fallback"
+
+        # PHASE 5: 05-qa (Traceability & Verification)
+        if phase_key == "05-qa":
+            if has_claude:
+                return "claude", "sonnet", effort, "Claude Max (Sonnet 5.5) QA & Acceptance Criteria Verifier"
+            if has_agy:
+                return "agy", "gemini-3.8-flash-medium", effort, "agy Gemini Flash QA matrix verifier"
+            return "openrouter", "anthropic/claude-3.7-sonnet", effort, "OpenRouter QA fallback"
+
+        # PHASE 5b: 05b-appsec (Red-Teaming & SCA)
+        if phase_key == "05b-appsec":
+            if has_or:
+                return "openrouter", "deepseek/deepseek-r1", effort, "OpenRouter DeepSeek-R1 Offensive Red-Teamer"
+            if has_codex:
+                return "codex", "gpt-6.1-sol", effort, "Codex Sol Offensive Red-Teamer"
+            if has_claude:
+                return "claude", "sonnet", effort, "Claude Max AppSec Auditor"
+            return "openrouter", "deepseek/deepseek-r1", effort, "Fallback Red-Teamer"
+
+        # PHASE 6: 06-ops (Release Runbook & Observability)
+        if phase_key == "06-ops":
+            if has_codex:
+                return "codex", "gpt-6-luna", effort, "Codex Luna fast DevSecOps release & rollback runbook"
+            if has_agy:
+                return "agy", "gemini-3.8-flash-low", effort, "agy Gemini Flash DevSecOps runbook"
+            if has_claude:
+                return "claude", "sonnet", effort, "Claude Max DevSecOps runbook"
+            return "openrouter", "anthropic/claude-3.7-sonnet", effort, "OpenRouter Ops fallback"
+
+        # PHASE 7: 07-docs (Changelog & API Docs)
+        if phase_key == "07-docs":
+            if has_agy:
+                return "agy", "gemini-3.8-flash-low", effort, "agy Gemini 3.8 Flash (ultra-fast zero-cost changelog steward)"
+            if has_codex:
+                return "codex", "gpt-6-luna", effort, "Codex Luna documentation steward"
+            if has_claude:
+                return "claude", "sonnet", effort, "Claude Max documentation steward"
+            return "openrouter", "google/gemini-2.0-flash-001", effort, "OpenRouter Docs fallback"
+
+        return "openrouter", "anthropic/claude-3.7-sonnet", effort, "Default fallback"
+
+    # Backwards compatibility methods
+    @classmethod
+    def resolve_dev_engine_and_model(cls, risk_tier: str, dev_profile: str, attempt: int = 1):
+        engine, model, effort, _ = cls.dispatch_role("03-dev", risk_tier, dev_profile, attempt)
         return engine, model, effort
 
     @classmethod
     def resolve_po_model(cls, risk_tier: str) -> str:
-        configured = os.environ.get("SSDLC_PO_MODEL", "").strip()
-        if configured:
-            return configured
-        tier = (risk_tier or "M").upper()
-        return "deepseek/deepseek-chat" if tier == "S" else "anthropic/claude-sonnet-4.5"
+        _, model, _, _ = cls.dispatch_role("01-po", risk_tier)
+        return model
 
     @classmethod
     def resolve_design_models(cls, risk_tier: str) -> Tuple[str, str]:
-        arch_conf = os.environ.get("SSDLC_DESIGN_ARCH_MODEL", "").strip()
-        sec_conf = os.environ.get("SSDLC_DESIGN_SEC_MODEL", "").strip()
-        tier = (risk_tier or "M").upper()
-
-        arch = arch_conf or ("deepseek/deepseek-chat" if tier == "S" else "anthropic/claude-sonnet-4.5")
-        sec = sec_conf or "deepseek/deepseek-r1-0528"
-        return arch, sec
+        _, arch_model, _, _ = cls.dispatch_role("02-design-arch", risk_tier)
+        _, sec_model, _, _ = cls.dispatch_role("02-design-sec", risk_tier)
+        return arch_model, sec_model
 
     @classmethod
     def resolve_ops_model(cls, risk_tier: str) -> str:
-        configured = os.environ.get("SSDLC_OPS_MODEL", "").strip()
-        if configured:
-            return configured
-        tier = (risk_tier or "M").upper()
-        return "deepseek/deepseek-chat" if tier == "S" else "anthropic/claude-sonnet-4.5"
+        _, model, _, _ = cls.dispatch_role("06-ops", risk_tier)
+        return model
 
     @classmethod
     def resolve_docs_model(cls, risk_tier: str) -> str:
-        configured = os.environ.get("SSDLC_DOCS_MODEL", "").strip()
-        if configured:
-            return configured
-        tier = (risk_tier or "M").upper()
-        return "deepseek/deepseek-chat" if tier == "S" else "google/gemini-2.5-pro"
+        _, model, _, _ = cls.dispatch_role("07-docs", risk_tier)
+        return model
 
     @classmethod
     def resolve_review_models(cls, risk_tier: str, attempt: int = 1) -> Tuple[List[str], str]:
-        models_csv = os.environ.get("SSDLC_REVIEW_MODELS", "").strip()
         tier = (risk_tier or "M").upper()
-        effort = cls.resolve_reasoning_effort("04-review", risk_tier, attempt=attempt)
-
+        effort = cls.resolve_reasoning_effort("04-review", tier, attempt=attempt)
+        models_csv = os.environ.get("SSDLC_REVIEW_MODELS", "").strip()
         if models_csv:
-            all_models = [m.strip() for m in models_csv.split(",") if m.strip()]
-        else:
-            if tier == "S" and attempt == 1:
-                return ["deepseek/deepseek-chat"], effort
-            all_models = ["deepseek/deepseek-r1-0528", "anthropic/claude-sonnet-4.5"]
+            return [m.strip() for m in models_csv.split(",") if m.strip()], effort
+        # Cross-model review: Claude Sonnet (Max) + Codex Sol (Plus/Pro)
+        if cls.has_claude_max() and cls.has_codex_auth():
+            return ["claude:sonnet", "codex:gpt-6.1-sol"], effort
+        if cls.has_claude_max():
+            return ["claude:sonnet"], effort
+        if cls.has_codex_auth():
+            return ["codex:gpt-6.1-sol"], effort
+        return ["deepseek/deepseek-r1", "anthropic/claude-3.7-sonnet"], effort
 
-        if tier == "S" and attempt == 1 and len(all_models) > 1:
-            return [all_models[0]], effort
-        return all_models, effort
+
+DynamicRoutingPolicy = SquadDispatcher
 
 
 class EngineRunner:
@@ -493,6 +590,41 @@ class EngineRunner:
         host_agy = Path.home() / ".local" / "bin" / "agy"
         if host_agy.exists():
             docker_cmd.extend(["-v", f"{host_agy}:/opt/host-bin/agy:ro"])
+
+        # Auto-mount host subscriptions into container as read-only (zero host pollution)
+        # Claude Max auth
+        host_claude_json = Path.home() / ".claude.json"
+        if host_claude_json.exists():
+            docker_cmd.extend(["-v", f"{host_claude_json}:/root/.claude.json:ro"])
+        host_claude_cred = Path.home() / ".claude" / ".credentials.json"
+        if host_claude_cred.exists():
+            docker_cmd.extend([
+                "-v", f"{host_claude_cred}:/root/.claude/.credentials.json:ro",
+                "--tmpfs", "/root/.cache/claude-cli-nodejs:rw",
+                "--tmpfs", "/root/.claude/backups:rw",
+                "--tmpfs", "/root/.claude/cache:rw",
+                "--tmpfs", "/root/.claude/sessions:rw",
+            ])
+
+        # Codex Plus/Pro auth
+        host_codex_auth = Path.home() / ".codex" / "auth.json"
+        if host_codex_auth.exists():
+            docker_cmd.extend(["-v", f"{host_codex_auth}:/root/.codex/auth.json:ro"])
+        host_codex_ver = Path.home() / ".codex" / "version.json"
+        if host_codex_ver.exists():
+            docker_cmd.extend(["-v", f"{host_codex_ver}:/root/.codex/version.json:ro"])
+
+        # agy Gemini Flash auth & ephemeral tmpfs mounts
+        host_gemini = Path.home() / ".gemini"
+        if host_gemini.exists():
+            docker_cmd.extend([
+                "-v", f"{host_gemini}:/root/.gemini:ro",
+                "--tmpfs", "/root/.gemini/antigravity-cli/brain:rw",
+                "--tmpfs", "/root/.gemini/antigravity-cli/conversations:rw",
+                "--tmpfs", "/root/.gemini/antigravity-cli/log:rw",
+                "--tmpfs", "/root/.gemini/antigravity-cli/cache:rw",
+                "--tmpfs", "/root/.gemini/antigravity-cli/annotations:rw",
+            ])
 
         if writable_worktree is not None:
             wt_resolved = writable_worktree.resolve()
@@ -667,6 +799,46 @@ class EngineRunner:
         )
 
     @staticmethod
+    def run_agy(
+        prompt: str,
+        cwd: Path,
+        model: str = "gemini-3.8-flash-low",
+        reasoning_effort: str = "low",
+        timeout: int = 1200,
+    ) -> Tuple[str, int]:
+        """
+        Executes agy CLI in headless print mode.
+        Default model: gemini-3.8-flash-low (fast, free, generous quota).
+        Avoids rate-limited models on agy.
+        """
+        target_model = model or "gemini-3.8-flash-low"
+        effort = reasoning_effort if reasoning_effort in ("low", "medium", "high", "xhigh") else "low"
+        cmd = [
+            "agy",
+            "-p",
+            prompt,
+            "--model",
+            target_model,
+            "--effort",
+            effort,
+            "--dangerously-skip-permissions",
+        ]
+        if EngineRunner._should_spawn_role_container():
+            cmd = EngineRunner._wrap_in_role_container(
+                cmd, cwd=cwd, writable_worktree=None, pass_ai_keys=False
+            )
+        proc = subprocess.run(
+            cmd,
+            cwd=str(cwd),
+            env=os.environ.copy(),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        combined = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
+        return combined.strip(), proc.returncode
+
+    @staticmethod
     def run_codex(
         prompt: str,
         cwd: Path,
@@ -681,6 +853,7 @@ class EngineRunner:
         cmd = [
             "codex",
             "exec",
+            "--skip-git-repo-check",
             "--sandbox",
             effective_sandbox,
             "-c",
@@ -716,7 +889,7 @@ class EngineRunner:
         writable_worktree: Optional[Path] = None,
         model: str = "",
         reasoning_effort: str = "medium",
-        max_budget_usd: float = 3.0,
+        max_budget_usd: float = 0.0,
     ) -> Tuple[str, int, float, int, int]:
         env = os.environ.copy()
         env["IS_SANDBOX"] = "1"
@@ -725,7 +898,8 @@ class EngineRunner:
             env["ANTHROPIC_AUTH_TOKEN"] = env["OPENROUTER_API_KEY"]
             env["ANTHROPIC_API_KEY"] = env["OPENROUTER_API_KEY"]
 
-        target_model = model or os.environ.get("SSDLC_DEV_MODEL", "claude-sonnet-4.6")
+        # Default model is 'sonnet' (resolves to claude-sonnet-5-5 under Claude Max)
+        target_model = model or os.environ.get("SSDLC_DEV_MODEL", "sonnet")
         if "/" in target_model:
             target_model = target_model.split("/")[-1]
 
@@ -737,7 +911,7 @@ class EngineRunner:
         effort_level = "low" if reasoning_effort == "low" else "medium"
         cmd.extend(["--effort", effort_level])
 
-        # Budget cap per execution
+        # Budget cap per execution (only if explicitly set > 0)
         if max_budget_usd > 0:
             cmd.extend(["--max-budget-usd", f"{max_budget_usd:.2f}"])
 
@@ -788,17 +962,16 @@ class EngineRunner:
     ) -> Tuple[str, float, int, int, str]:
         engine = engine.lower().strip()
         trace_user = f"{project_id}:{ticket_id}:{phase}"
-        if engine == "openrouter":
-            return EngineRunner.call_openrouter(
-                model,
-                system_prompt,
-                user_prompt,
-                project_id,
-                ticket_id,
-                phase,
-                reasoning_effort=reasoning_effort,
-            )
         full_prompt = f"{system_prompt}\n\n---\n\n{user_prompt}"
+
+        if engine == "agy":
+            out, rc = EngineRunner.run_agy(
+                full_prompt, cwd=cwd, model=model, reasoning_effort=reasoning_effort
+            )
+            if rc != 0:
+                raise RuntimeError(f"agy exited with code {rc}:\n{out}")
+            return out, 0.0, 0, 0, trace_user
+
         if engine == "claude":
             out, rc, cost, tin, tout = EngineRunner.run_claude(
                 full_prompt, cwd=cwd, read_only=(sandbox == "read-only"), model=model, reasoning_effort=reasoning_effort
@@ -806,6 +979,7 @@ class EngineRunner:
             if rc != 0:
                 raise RuntimeError(f"claude exited with code {rc}:\n{out}")
             return out, cost, tin, tout, trace_user
+
         if engine == "codex":
             out, rc = EngineRunner.run_codex(
                 full_prompt,
@@ -817,6 +991,7 @@ class EngineRunner:
             if rc != 0:
                 raise RuntimeError(f"codex exited with code {rc}:\n{out}")
             return out, 0.0, 0, 0, trace_user
+
         return EngineRunner.call_openrouter(
             model,
             system_prompt,
@@ -1174,9 +1349,8 @@ class SSDLCOrchestrator:
         self.state["current_phase"] = "00-recon"
         self._save_state()
 
-        engine = os.environ.get("SSDLC_RECON_ENGINE", "openrouter")
-        model = os.environ.get("SSDLC_RECON_MODEL", "google/gemini-2.5-pro")
-        effort = DynamicRoutingPolicy.resolve_reasoning_effort("00-recon", "M", attempt=1)
+        engine, model, effort, reason = SquadDispatcher.dispatch_role("00-recon", "M", attempt=1)
+        print(f"    [Squad Dispatcher] 00-recon allocated to {engine}:{model} (reasoning={effort}) — {reason}")
         repo_ctx = self._gather_repo_context()
 
         sys_prompt = (
@@ -1191,8 +1365,9 @@ class SSDLCOrchestrator:
             "   - `RISK_TIER: M` (Standard feature or multi-file change)\n"
             "   - `RISK_TIER: L` (Security-critical: Auth, Crypto, Payments, DB Schema Migration, New External Dependencies, Public API surface)\n"
             "   And classify the implementation profile into one of:\n"
+            "   - `DEV_PROFILE: FRONTEND_UI` (UI, layout, React Native, Expo, CSS, web client, components)\n"
             "   - `DEV_PROFILE: ALGORITHMIC` (Backend logic, concurrency, data structures, CLI, APIs)\n"
-            "   - `DEV_PROFILE: FULLSTACK` (UI, frontend/backend integration, multi-file CRUD)\n"
+            "   - `DEV_PROFILE: FULLSTACK` (Fullstack integration, multi-file CRUD)\n"
             "   - `DEV_PROFILE: SECURITY` (Auth, crypto, permissions, sanitization)\n"
             "   - `DEV_PROFILE: REFACTOR` (Large multi-file restructuring)\n"
             "Ensure both `RISK_TIER: <S|M|L>` and `DEV_PROFILE: <PROFILE>` appear at the end."
@@ -1223,9 +1398,11 @@ class SSDLCOrchestrator:
             detected_tier = m.group(1)
 
         dev_profile = "ALGORITHMIC"
-        mp = re.search(r"DEV_PROFILE:\s*(ALGORITHMIC|FULLSTACK|SECURITY|REFACTOR|DOCS)\b", out)
+        mp = re.search(r"DEV_PROFILE:\s*(FRONTEND_UI|ALGORITHMIC|FULLSTACK|SECURITY|REFACTOR|DOCS)\b", out)
         if mp:
             dev_profile = mp.group(1)
+        elif any(k in goal.lower() for k in ("ui", "ux", "layout", "carousel", "screen", "style", "css", "tailwind", "react native", "expo", "component")):
+            dev_profile = "FRONTEND_UI"
 
         final_tier = detected_tier if requested_tier.lower() == "auto" else requested_tier.upper()
         self.state["risk_tier"] = final_tier
@@ -1260,14 +1437,24 @@ class SSDLCOrchestrator:
     # ------------------------------------------------------------------
     def run_phase_po(self, goal: str) -> Path:
         risk_tier = self.state.get("risk_tier", "M")
-        effort = DynamicRoutingPolicy.resolve_reasoning_effort("01-po", risk_tier, attempt=1)
-        print(f"\n==> [{self.project_id} | Phase 1: 01-po] Product Owner defining Stories & ACs (reasoning={effort})...")
+        dev_profile = self.state.get("dev_profile", "ALGORITHMIC")
+        engine, model, effort, reason = SquadDispatcher.dispatch_role("01-po", risk_tier, dev_profile, attempt=1)
+        print(f"\n==> [{self.project_id} | Phase 1: 01-po] Product Owner defining Stories & ACs ({engine}:{model}, reasoning={effort})...")
+        print(f"    [Squad Dispatcher] 01-po allocated — {reason}")
         self.state["current_phase"] = "01-po"
         self._save_state()
 
-        engine = os.environ.get("SSDLC_PO_ENGINE", "openrouter")
-        model = DynamicRoutingPolicy.resolve_po_model(risk_tier)
         recon_text = (self.dir_recon / "context-and-blast-radius.md").read_text(encoding="utf-8")
+
+        ui_nfr_prompt = ""
+        if dev_profile == "FRONTEND_UI":
+            ui_nfr_prompt = (
+                "\n\n### MANDATORY FRONTEND / MOBILE NON-FUNCTIONAL REQUIREMENTS:\n"
+                "- NFR-SAFE-AREA: Explicit handling of notch, Dynamic Island, status bar, and home indicator insets (useSafeAreaInsets or container).\n"
+                "- NFR-4-STATES: Every interactive component or screen must define 4 states: Loading (skeleton/spinner with max 5s timeout), Empty, Error (with retry trigger), and Success/Active.\n"
+                "- NFR-OFFLINE-AUTH: Behavior when guest or network is offline.\n"
+                "- NFR-ASSETS: Explicit requirement for vector/SVG icons (e.g. @expo/vector-icons or SVG component); raw Unicode glyphs or emoji as icons are STRICTLY PROHIBITED.\n"
+            )
 
         sys_prompt = (
             "You are the Product Owner (PO) in a strict Secure Software Development Lifecycle (SSDLC).\n"
@@ -1277,6 +1464,7 @@ class SSDLCOrchestrator:
             "3. ## Testable Acceptance Criteria (numbered AC-1, AC-2, ... with Given/When/Then)\n"
             "4. ## Security Requirements & Abuse Cases (numbered SEC-1, SEC-2, ...)\n"
             "5. ## Non-Functional & Observability Requirements (logging, metrics, rollback expectations)\n"
+            f"{ui_nfr_prompt}"
             "Be concrete, testable, and unambiguous."
         )
         user_prompt = f"CODEBASE RECON & BLAST RADIUS:\n{recon_text}\n\nUSER GOAL:\n{goal}"
@@ -1346,9 +1534,11 @@ class SSDLCOrchestrator:
         req_text = (self.dir_po / "requirements.md").read_text(encoding="utf-8")
 
         risk_tier = self.state.get("risk_tier", "M")
-        arch_engine = os.environ.get("SSDLC_DESIGN_ARCH_ENGINE", "openrouter")
-        sec_engine = os.environ.get("SSDLC_DESIGN_SEC_ENGINE", "openrouter")
-        arch_model, sec_model = DynamicRoutingPolicy.resolve_design_models(risk_tier)
+        dev_profile = self.state.get("dev_profile", "ALGORITHMIC")
+        arch_engine, arch_model, _, arch_reason = SquadDispatcher.dispatch_role("02-design-arch", risk_tier, dev_profile)
+        sec_engine, sec_model, _, sec_reason = SquadDispatcher.dispatch_role("02-design-sec", risk_tier, dev_profile)
+        print(f"    [Squad Dispatcher] Architect: {arch_engine}:{arch_model} ({arch_reason})")
+        print(f"    [Squad Dispatcher] Security Reviewer: {sec_engine}:{sec_model} ({sec_reason})")
         max_rounds = int(os.environ.get("SSDLC_MAX_DESIGN_ROUNDS", "3"))
 
         dialogue_log: List[str] = ["# Pair Design & STRIDE Threat Modeling Transcript\n"]
@@ -1356,14 +1546,23 @@ class SSDLCOrchestrator:
         current_threat_model = ""
         approved = False
         for rnd in range(1, max_rounds + 1):
-            arch_effort = DynamicRoutingPolicy.resolve_reasoning_effort("02-design-arch", risk_tier, attempt=rnd)
-            sec_effort = DynamicRoutingPolicy.resolve_reasoning_effort("02-design-sec", risk_tier, attempt=rnd)
+            arch_effort = SquadDispatcher.resolve_reasoning_effort("02-design-arch", risk_tier, attempt=rnd)
+            sec_effort = SquadDispatcher.resolve_reasoning_effort("02-design-sec", risk_tier, attempt=rnd)
             print(f"    -> Round {rnd}/{max_rounds}: Architect ({arch_engine}:{arch_model}, reasoning={arch_effort}) proposing ADR...")
+            ui_arch_rules = ""
+            if dev_profile == "FRONTEND_UI":
+                ui_arch_rules = (
+                    "\nUI/UX ARCHITECTURE RULES:\n"
+                    "- Specify component hierarchy, props, and exact Design System tokens (spacing, typography, palette).\n"
+                    "- Ensure Safe Area Insets are factored into all container boundaries.\n"
+                    "- Enforce vector/SVG icons (@expo/vector-icons or custom SVG) and explicitly forbid raw Unicode glyphs.\n"
+                )
             arch_sys = (
                 "You are the Lead Systems Architect in a Pair Design session.\n"
                 "Draft or revise a complete Architecture Decision Record (ADR) that satisfies all PO Acceptance "
                 "Criteria (AC-*) and Security Requirements (SEC-*), and resolves any critiques from the Security Reviewer.\n"
                 "Include: Exact file paths to create/modify, interfaces, DB/state impact, error handling, and test strategy."
+                f"{ui_arch_rules}"
             )
             arch_user = (
                 f"CODEBASE RECON:\n{recon_text}\n\n"
@@ -1512,13 +1711,14 @@ class SSDLCOrchestrator:
     def run_phase_dev(self, feedback: str = "", attempt: int = 1) -> Tuple[Path, List[str]]:
         risk_tier = self.state.get("risk_tier", "M")
         dev_profile = self.state.get("dev_profile", "ALGORITHMIC")
-        dev_engine, dev_model, dev_effort = DynamicRoutingPolicy.resolve_dev_engine_and_model(
-            risk_tier, dev_profile, attempt=attempt
+        dev_engine, dev_model, dev_effort, dev_reason = SquadDispatcher.dispatch_role(
+            "03-dev", risk_tier, dev_profile, attempt=attempt
         )
         print(
             f"\n==> [{self.project_id} | Phase 3: 03-dev] Developer ({dev_engine}:{dev_model or 'default'}, "
             f"reasoning={dev_effort}, profile={dev_profile}) in isolated worktree (Attempt {attempt})..."
         )
+        print(f"    [Squad Dispatcher] 03-dev allocated — {dev_reason}")
         self.state["current_phase"] = "03-dev"
         self._save_state()
 
@@ -1530,6 +1730,15 @@ class SSDLCOrchestrator:
 
         use_or = os.environ.get("SSDLC_DEV_USE_OPENROUTER", "false").lower() == "true"
 
+        ui_dev_rules = ""
+        if dev_profile == "FRONTEND_UI":
+            ui_dev_rules = (
+                "\n\nMANDATORY FRONTEND / UI/UX IMPLEMENTATION RULES:\n"
+                "- Do NOT use raw Unicode characters or emojis (e.g. '♥', '★', arrows) as icons. Always use vector icons (e.g. from `@expo/vector-icons` or SVG).\n"
+                "- Always use `useSafeAreaInsets` or safe area containers for top/bottom boundaries to prevent notch and status bar collisions.\n"
+                "- Implement all 4 component states: Loading (skeleton/spinner), Empty, Error, and Success.\n"
+            )
+
         prompt = (
             "You are the Developer in an SSDLC pipeline working inside an isolated Git worktree.\n"
             "Implement the code and unit tests required by the PO Requirements and the approved ADR + Threat Model.\n"
@@ -1540,6 +1749,7 @@ class SSDLCOrchestrator:
             f"PO REQUIREMENTS:\n{req_text}\n\n"
             f"APPROVED ARCHITECTURE (ADR):\n{adr_text}\n\n"
             f"THREAT MODEL MITIGATIONS REQUIRED:\n{tm_text}\n"
+            f"{ui_dev_rules}"
         )
         if feedback:
             prompt += f"\n\nCRITICAL FEEDBACK FROM PREVIOUS REVIEW/QA/APPSEC GATE (MUST FIX):\n{feedback}\n"
@@ -1657,11 +1867,13 @@ class SSDLCOrchestrator:
     # ------------------------------------------------------------------
     def run_phase_review(self, attempt: int = 1) -> Tuple[bool, str]:
         risk_tier = self.state.get("risk_tier", "M")
-        review_models, rev_effort = DynamicRoutingPolicy.resolve_review_models(risk_tier, attempt=attempt)
+        dev_profile = self.state.get("dev_profile", "ALGORITHMIC")
+        review_models, rev_effort = SquadDispatcher.resolve_review_models(risk_tier, attempt=attempt)
         print(
             f"\n==> [{self.project_id} | Phase 4: 04-review] Multi-Model Code Reviewer "
-            f"({len(review_models)} model(s), reasoning={rev_effort})..."
+            f"({len(review_models)} reviewer(s), reasoning={rev_effort})..."
         )
+        print(f"    [Squad Dispatcher] Review panel: {review_models}")
         self.state["current_phase"] = "04-review"
         self._save_state()
 
@@ -1687,6 +1899,16 @@ class SSDLCOrchestrator:
                 "unbounded memory/queues, missing timeouts, and non-idempotent retries."
             )
 
+        ui_review_rules = ""
+        if dev_profile == "FRONTEND_UI":
+            ui_review_rules = (
+                "\n\n### MANDATORY FRONTEND / UI/UX FIDELITY AUDIT:\n"
+                "- Check every UI Acceptance Criterion (AC-*) in requirements.md 1-by-1.\n"
+                "- Safe Area Insets: Verify safe area insets (useSafeAreaInsets or platform container) are used; reject hardcoded status bar paddings.\n"
+                "- Visual Assets: If the specification requires SVG or vector icons, verify vector imports. If the code uses raw Unicode strings (like emojis, arrows, symbols) as icon substitutes, YOU MUST REJECT WITH CHANGES_REQUESTED.\n"
+                "- Component States: Verify Loading, Empty, and Error states are implemented.\n"
+            )
+
         review_engine = os.environ.get("SSDLC_REVIEW_ENGINE", "openrouter")
 
         sys_prompt = (
@@ -1695,11 +1917,12 @@ class SSDLCOrchestrator:
             "1. The agreed Architecture Decision Record (ADR) — check for design drift.\n"
             "2. The Threat Model — verify every required security mitigation is implemented.\n"
             "3. Code quality — race conditions, error handling, resource leaks, maintainability."
-            f"{specialist_instructions}\n\n"
+            f"{specialist_instructions}\n"
+            f"{ui_review_rules}\n"
             "Output a structured Markdown review with:\n"
             "- ### ADR Conformance Checklist\n"
             "- ### Threat Model Mitigation Checklist\n"
-            "- ### Specialist Lens Audit (DB / Perf / SRE if active)\n"
+            "- ### Specialist Lens Audit (DB / Perf / SRE / UI if active)\n"
             "- ### Findings (Critical / Major / Minor)\n"
             "At the very end, output EXACTLY one of:\n"
             "REVIEW_STATUS: APPROVED (if zero Critical or Major defects exist)\n"
@@ -1717,11 +1940,16 @@ class SSDLCOrchestrator:
         all_approved = True
 
         for mdl in review_models:
-            print(f"    -> Running Reviewer model: {mdl} (reasoning={rev_effort})...")
+            if ":" in mdl and not mdl.startswith("http"):
+                effective_engine, effective_model = mdl.split(":", 1)
+            else:
+                effective_engine = review_engine
+                effective_model = mdl
+            print(f"    -> Running Reviewer: {effective_engine}:{effective_model} (reasoning={rev_effort})...")
             t0 = time.time()
             rev_out, cost, tin, tout, trace_user = EngineRunner.invoke_role(
-                review_engine,
-                mdl,
+                effective_engine,
+                effective_model,
                 sys_prompt,
                 user_prompt,
                 self.repo_root,
@@ -1739,8 +1967,8 @@ class SSDLCOrchestrator:
                 CostAndTelemetryEntry(
                     f"04-review-a{attempt}",
                     "Code Reviewer",
-                    review_engine,
-                    mdl,
+                    effective_engine,
+                    effective_model,
                     "APPROVED" if passed else "CHANGES_REQUESTED",
                     dur,
                     cost,
@@ -1750,7 +1978,7 @@ class SSDLCOrchestrator:
                     reasoning_effort=rev_effort,
                 )
             )
-            combined_reviews.append(f"## Reviewer: `{mdl}` ({'APPROVED' if passed else 'CHANGES_REQUESTED'}, reasoning={rev_effort})\n\n{rev_out}\n\n---\n")
+            combined_reviews.append(f"## Reviewer: `{effective_engine}:{effective_model}` ({'APPROVED' if passed else 'CHANGES_REQUESTED'}, reasoning={rev_effort})\n\n{rev_out}\n\n---\n")
 
         report_text = "\n".join(combined_reviews)
         rev_path = self.dir_review / f"review-report-a{attempt}.md"
@@ -1835,8 +2063,12 @@ class SSDLCOrchestrator:
 
     def run_phase_qa(self, test_cmd: Optional[str] = None, attempt: int = 1) -> Tuple[bool, str]:
         risk_tier = self.state.get("risk_tier", "M")
-        qa_effort = DynamicRoutingPolicy.resolve_reasoning_effort("05-qa", risk_tier, attempt=attempt)
-        print(f"\n==> [{self.project_id} | Phase 5: 05-qa] QA & Verifier (reasoning={qa_effort}) running deterministic checks + AC Matrix...")
+        dev_profile = self.state.get("dev_profile", "ALGORITHMIC")
+        qa_engine, qa_model, qa_effort, qa_reason = SquadDispatcher.dispatch_role(
+            "05-qa", risk_tier, dev_profile, attempt=attempt
+        )
+        print(f"\n==> [{self.project_id} | Phase 5: 05-qa] QA & Verifier ({qa_engine}:{qa_model}, reasoning={qa_effort}) running checks + AC Matrix...")
+        print(f"    [Squad Dispatcher] 05-qa allocated — {qa_reason}")
         self.state["current_phase"] = "05-qa"
         self._save_state()
 
@@ -1850,13 +2082,20 @@ class SSDLCOrchestrator:
         tm_text = self._read_optional(self.dir_design / "threat-model.md")
         diff_text = self._read_optional(self.dir_dev / "implementation.diff", "")
 
-        qa_engine = os.environ.get("SSDLC_QA_ENGINE", "openrouter")
-        qa_model = os.environ.get("SSDLC_QA_MODEL", "anthropic/claude-3.7-sonnet")
+        ui_qa_rules = ""
+        if dev_profile == "FRONTEND_UI":
+            ui_qa_rules = (
+                "\n\nMANDATORY UI/UX ACCEPTANCE VERIFICATION:\n"
+                "- Verify all Safe Area insets and dynamic notch padding.\n"
+                "- Verify that vector icons are used instead of Unicode emojis.\n"
+                "- Verify Loading, Empty, and Error UI fallback states.\n"
+            )
 
         sys_prompt = (
             "You are the Lead QA & Verification Engineer in an SSDLC pipeline.\n"
             "Verify the implementation diff and deterministic test logs against EVERY Acceptance Criterion (AC-*) "
             "and Security Requirement (SEC-*) in `01-po/requirements.md`.\n"
+            f"{ui_qa_rules}"
             "Produce:\n"
             "1. ## Requirements Traceability Matrix (Markdown Table: ID | Requirement | Verification Evidence | Status PASS/FAIL)\n"
             "2. ## Edge Cases & Behavioral Verification Analysis\n"
@@ -1922,8 +2161,12 @@ class SSDLCOrchestrator:
     # ------------------------------------------------------------------
     def run_phase_appsec(self, attempt: int = 1) -> Tuple[bool, str]:
         risk_tier = self.state.get("risk_tier", "M")
-        appsec_effort = DynamicRoutingPolicy.resolve_reasoning_effort("05b-appsec", risk_tier, attempt=attempt)
-        print(f"\n==> [{self.project_id} | Phase 5b: 05b-appsec] AppSec Red-Teamer & SCA Auditor (reasoning={appsec_effort})...")
+        dev_profile = self.state.get("dev_profile", "ALGORITHMIC")
+        appsec_engine, appsec_model, appsec_effort, appsec_reason = SquadDispatcher.dispatch_role(
+            "05b-appsec", risk_tier, dev_profile, attempt=attempt
+        )
+        print(f"\n==> [{self.project_id} | Phase 5b: 05b-appsec] AppSec Red-Teamer ({appsec_engine}:{appsec_model}, reasoning={appsec_effort})...")
+        print(f"    [Squad Dispatcher] 05b-appsec allocated — {appsec_reason}")
         self.state["current_phase"] = "05b-appsec"
         self._save_state()
 
@@ -1952,9 +2195,6 @@ class SSDLCOrchestrator:
         sca_path = self.dir_appsec / "supply-chain-sca.md"
         sca_path.write_text(sca_text, encoding="utf-8")
         self.record_artifact("05b-appsec/supply-chain-sca.md", sca_path)
-
-        appsec_engine = os.environ.get("SSDLC_APPSEC_ENGINE", "openrouter")
-        appsec_model = os.environ.get("SSDLC_APPSEC_MODEL", "deepseek/deepseek-r1")
 
         sys_prompt = (
             "You are the Principal AppSec Red-Teamer & Supply-Chain Security Auditor.\n"
@@ -2018,16 +2258,17 @@ class SSDLCOrchestrator:
     # ------------------------------------------------------------------
     def run_phase_ops(self) -> Path:
         risk_tier = self.state.get("risk_tier", "M")
-        ops_effort = DynamicRoutingPolicy.resolve_reasoning_effort("06-ops", risk_tier, attempt=1)
-        print(f"\n==> [{self.project_id} | Phase 6: 06-ops] DevSecOps checking Release Readiness & Rollback (reasoning={ops_effort})...")
+        dev_profile = self.state.get("dev_profile", "ALGORITHMIC")
+        ops_engine, ops_model, ops_effort, ops_reason = SquadDispatcher.dispatch_role(
+            "06-ops", risk_tier, dev_profile, attempt=1
+        )
+        print(f"\n==> [{self.project_id} | Phase 6: 06-ops] DevSecOps ({ops_engine}:{ops_model}, reasoning={ops_effort})...")
+        print(f"    [Squad Dispatcher] 06-ops allocated — {ops_reason}")
         self.state["current_phase"] = "06-ops"
         self._save_state()
 
         adr_text = self._read_optional(self.dir_design / "adr.md")
         diff_text = self._read_optional(self.dir_dev / "implementation.diff", "")
-
-        ops_engine = os.environ.get("SSDLC_OPS_ENGINE", "openrouter")
-        ops_model = DynamicRoutingPolicy.resolve_ops_model(risk_tier)
 
         sys_prompt = (
             "You are the Lead DevSecOps & Release Reliability Engineer.\n"
@@ -2071,16 +2312,17 @@ class SSDLCOrchestrator:
     # ------------------------------------------------------------------
     def run_phase_docs(self) -> Path:
         risk_tier = self.state.get("risk_tier", "M")
-        docs_effort = DynamicRoutingPolicy.resolve_reasoning_effort("07-docs", risk_tier, attempt=1)
-        print(f"\n==> [{self.project_id} | Phase 7: 07-docs] Documentation Steward updating changelog & docs (reasoning={docs_effort})...")
+        dev_profile = self.state.get("dev_profile", "ALGORITHMIC")
+        docs_engine, docs_model, docs_effort, docs_reason = SquadDispatcher.dispatch_role(
+            "07-docs", risk_tier, dev_profile, attempt=1
+        )
+        print(f"\n==> [{self.project_id} | Phase 7: 07-docs] Documentation Steward ({docs_engine}:{docs_model}, reasoning={docs_effort})...")
+        print(f"    [Squad Dispatcher] 07-docs allocated — {docs_reason}")
         self.state["current_phase"] = "07-docs"
         self._save_state()
 
         req_text = self._read_optional(self.dir_po / "requirements.md")
         diff_text = self._read_optional(self.dir_dev / "implementation.diff", "")
-
-        docs_engine = os.environ.get("SSDLC_DOCS_ENGINE", "openrouter")
-        docs_model = DynamicRoutingPolicy.resolve_docs_model(risk_tier)
 
         sys_prompt = (
             "You are the Technical Writer & API Contract Steward.\n"
@@ -2407,9 +2649,16 @@ To **REJECT** and send feedback back to the team:
             passed_all = True
 
         if passed_all and active_tier in ("M", "L"):
-            if start_idx <= self.PHASE_ORDER.index("06-ops"):
+            # Elastic pipeline: On pure FRONTEND_UI without infra/DB changes, skip 06-ops to save tokens
+            is_frontend_ui = self.state.get("dev_profile") == "FRONTEND_UI"
+            diff_text = self._read_optional(self.dir_dev / "implementation.diff", "").lower()
+            has_infra_changes = any(k in diff_text for k in ("docker", "k8s", "alembic", "prisma", "migration", ".sql", "compose", "terraform"))
+            if is_frontend_ui and not has_infra_changes:
+                print("    [Squad Dispatcher] Elastic Pipeline: Skipping 06-ops (pure frontend UI task with zero infra/DB impact).")
+            elif start_idx <= self.PHASE_ORDER.index("06-ops"):
                 self.run_phase_ops()
                 self.check_budget_circuit_breaker()
+
             if start_idx <= self.PHASE_ORDER.index("07-docs"):
                 self.run_phase_docs()
                 self.check_budget_circuit_breaker()

@@ -202,36 +202,39 @@ export SSDLC_INHERIT_HOST_CODEX_AUTH="true"
 export SSDLC_INHERIT_HOST_CLAUDE_AUTH="true"
 
 # --- Role Engine & Model Routing ---
-export SSDLC_RECON_ENGINE="openrouter"
-export SSDLC_RECON_MODEL="google/gemini-2.5-pro"
+# --- Dynamic Squad Dispatcher Routing ---
+# Set to "auto" to let SquadDispatcher dynamically select the optimal engine
+# (Claude Max for UI/architecture, Codex for algorithms/STRIDE, agy for fast docs/recon, OpenRouter for DeepSeek-R1)
+export SSDLC_RECON_ENGINE="auto"
+export SSDLC_RECON_MODEL=""
 
-export SSDLC_PO_ENGINE="openrouter"
-export SSDLC_PO_MODEL="anthropic/claude-3.7-sonnet"
+export SSDLC_PO_ENGINE="auto"
+export SSDLC_PO_MODEL=""
 
-export SSDLC_DESIGN_ARCH_ENGINE="openrouter"
-export SSDLC_DESIGN_ARCH_MODEL="anthropic/claude-3.7-sonnet"
-export SSDLC_DESIGN_SEC_ENGINE="openrouter"
-export SSDLC_DESIGN_SEC_MODEL="deepseek/deepseek-r1"
+export SSDLC_DESIGN_ARCH_ENGINE="auto"
+export SSDLC_DESIGN_ARCH_MODEL=""
+export SSDLC_DESIGN_SEC_ENGINE="auto"
+export SSDLC_DESIGN_SEC_MODEL=""
 
-export SSDLC_DEV_ENGINE="auto"   # "auto" (routes by 00-recon DEV_PROFILE), "codex", or "claude"
-export SSDLC_DEV_MODEL=""        # Optional base model override
-export SSDLC_DEV_ESCALATION_MODEL=""  # Optional heavy model used automatically on Attempt 2+ bounces
+export SSDLC_DEV_ENGINE="auto"
+export SSDLC_DEV_MODEL=""
+export SSDLC_DEV_ESCALATION_MODEL=""
 export SSDLC_DEV_USE_OPENROUTER="false"
 
-export SSDLC_REVIEW_ENGINE="openrouter"
-export SSDLC_REVIEW_MODELS="deepseek/deepseek-r1,anthropic/claude-3.7-sonnet"
+export SSDLC_REVIEW_ENGINE="auto"
+export SSDLC_REVIEW_MODELS=""
 
-export SSDLC_QA_ENGINE="openrouter"
-export SSDLC_QA_MODEL="anthropic/claude-3.7-sonnet"
+export SSDLC_QA_ENGINE="auto"
+export SSDLC_QA_MODEL=""
 
-export SSDLC_APPSEC_ENGINE="openrouter"
-export SSDLC_APPSEC_MODEL="deepseek/deepseek-r1"
+export SSDLC_APPSEC_ENGINE="auto"
+export SSDLC_APPSEC_MODEL=""
 
-export SSDLC_OPS_ENGINE="openrouter"
-export SSDLC_OPS_MODEL="anthropic/claude-3.7-sonnet"
+export SSDLC_OPS_ENGINE="auto"
+export SSDLC_OPS_MODEL=""
 
-export SSDLC_DOCS_ENGINE="openrouter"
-export SSDLC_DOCS_MODEL="anthropic/claude-3.7-sonnet"
+export SSDLC_DOCS_ENGINE="auto"
+export SSDLC_DOCS_MODEL=""
 
 export SSDLC_DEFAULT_TIER="auto"
 export SSDLC_MAX_DESIGN_ROUNDS=3
