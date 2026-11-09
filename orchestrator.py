@@ -68,6 +68,17 @@ def parse_qa_verdict(report: str) -> Optional[str]:
     return None
 
 
+def parse_appsec_verdict(report: str) -> Optional[str]:
+    """Require exactly one AppSec marker on the final line."""
+    markers = re.findall(r'\bAPPSEC_STATUS\s*:', report)
+    final = report.rstrip().splitlines()[-1].strip() if report.strip() else ''
+    if len(markers) == 1:
+        for verdict in ('SECURE', 'VULNERABLE'):
+            if final == f'APPSEC_STATUS: {verdict}':
+                return verdict
+    return None
+
+
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -260,7 +271,9 @@ class CostAndTelemetryEntry:
         tokens_out: int = 0,
         trace_user: str = "",
         reasoning_effort: str = "medium",
+        details: Optional[Dict[str, Any]] = None,
     ):
+        self.details = details
         self.phase = phase
         self.role = role
         self.engine = engine
@@ -274,7 +287,7 @@ class CostAndTelemetryEntry:
         self.reasoning_effort = reasoning_effort
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        result = {
             "timestamp": utc_now(),
             "phase": self.phase,
             "role": self.role,
@@ -288,6 +301,10 @@ class CostAndTelemetryEntry:
             "tokens_out": self.tokens_out,
             "trace_user": self.trace_user,
         }
+
+        if self.details is not None:
+            result["details"] = self.details
+        return result
 
 
 class SquadDispatcher:
