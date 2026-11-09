@@ -648,7 +648,7 @@ Transitive invalidation and verification-only revalidation are available through
 scheduler.invalidate(["T1"], reason="Recheck affected tasks and their dependants")
 result = scheduler.revalidate()
 if not result.complete:
-    inspect(result.failed, result.blocked)
+    print({"failed": result.failed, "blocked": result.blocked})
 ```
 
 `revalidate()` accepts a journal with only COMPLETED/INVALIDATED tasks. It checks

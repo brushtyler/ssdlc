@@ -1260,6 +1260,9 @@ class RevalidateTests(SchedulerTests):
         self.assertEqual(run['status'], 'ABORTED')
         self.assertEqual(run['cursor']['task_id'], 'A')
         self.assertEqual(run['cursor']['check_id'], 'CHECK-A')
+        attempt = scheduler.state['tasks']['A']['revalidations'][-1]
+        self.assertEqual(attempt['checks'], [])
+        self.assertFalse((root/attempt['dir']/'check-0.log').exists())
         for path, content in originals.items():
             self.assertEqual(path.read_bytes(), content)
 
