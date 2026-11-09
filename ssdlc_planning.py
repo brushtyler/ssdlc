@@ -5,10 +5,11 @@ from pathlib import Path
 from ssdlc_tasks import PlanError, atomic_json, digest, file_hash, parse_plan_output, log_retry_reason, validate_document
 
 
-def validate_plan_review(report: str, plan: dict, requirements: list[str], history: list[dict], quality=None) -> dict:
+def validate_plan_review(report: str, plan: dict, requirements: list[str], history: list[dict], quality=None,
+                         schema_name='task-plan-review') -> dict:
     """Require attributable findings and explicit dispositions of earlier blockers."""
     result = parse_plan_output(report)
-    validate_document('task-plan-review', result)
+    validate_document(schema_name, result)
     findings = result['findings']
     ids = [f['finding_id'] for f in findings]
     if len(ids) != len(set(ids)):
@@ -38,7 +39,7 @@ def validate_plan_review(report: str, plan: dict, requirements: list[str], histo
             if (not any(finding.get(field) for field in ('requirement_refs', 'standard_refs', 'quality_check_refs'))
                     or finding['category'] == 'IMPROVEMENT'):
                 raise PlanError('Blocking finding needs an approved requirement or quality obligation and cannot be an optional improvement')
-        if history and finding['finding_id'] not in old_ids and finding['new_issue_reason'] == 'INITIAL_REVIEW':
+        if assessed and finding['finding_id'] not in old_ids and finding['new_issue_reason'] == 'INITIAL_REVIEW':
             raise PlanError('New review finding must explain introduction by revision or earlier omission')
     blockers = [f for f in findings if f['status'] == 'OPEN' and f['severity'] == 'BLOCKING']
     if (result['verdict'] == 'APPROVED') != (not blockers):

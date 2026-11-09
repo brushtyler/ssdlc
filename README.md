@@ -460,6 +460,48 @@ are advisory. New findings after the first review must identify an earlier omiss
 or a defect introduced by revision. The protocol checks attribution and consistency;
 the independent reviewer still decides whether the evidence actually resolves a defect.
 
+Pair design also persists its session and immutable drafts/reviews under
+`02-design/design-session/`, with a sealed copy of inputs. Both architect and reviewer
+receive cumulative reviews and the latest ADR; relevant tracked source files named
+by recon are supplied with hashes and numbered excerpts (up to four files/80,000
+characters, 50,000 per file). Truncation is explicit. The architect must verify actual
+interfaces, journal state, evidence stores and exception boundaries against source.
+The reviewer returns `schemas/design-review.schema.json`, including a STRIDE analysis,
+stable finding IDs and explicit blocker dispositions. Optional advice cannot block;
+new blockers require approved requirement or quality references and justification.
+
+Fresh design sessions default to five total rounds; `SSDLC_MAX_DESIGN_ROUNDS` can
+set the initial limit. The persisted limit and consumed reservations survive restart.
+Interrupted architect calls consume their reserved round; a captured ADR is reused.
+Reviews allow at most two reserved responses on the same ADR, including uncertain
+calls and one correction for invalid output. An identical ADR with the same unresolved
+blocking IDs stops as STAGNATION; environment prerequisites stop separately. Approval
+requires a valid independent review, never exhaustion of the limit. Changed inputs
+or altered evidence require explicit reconciliation/revision. Canonical `adr.md` and
+`threat-model.md` are published after approval; partial work remains in round evidence.
+
+Resume design only, with an explicit total limit up to eight if needed:
+
+```bash
+./ssdlc design --ticket TKT-001 --rounds 5
+```
+
+This command verifies upstream recon/PO approvals, input hashes and a clean unchanged
+target. It refuses an existing plan/worktree and never starts development. A lower
+limit is rejected; extensions are recorded. Repeating the command does not reset
+rounds. Planning is blocked while a persistent design session lacks approval.
+
+Legacy rounds require explicit import from a specific verified directory; they are
+copied and counted, and their prose critiques remain context rather than an approval:
+
+```bash
+./ssdlc design --ticket TKT-001 --rounds 5 --import-legacy rounds/ROUND_DIRECTORY
+```
+
+For three exhausted legacy rounds this resumes at round four. Omit `--import-legacy`
+on subsequent resumes. The old files remain intact; missing, ambiguous or modified
+source evidence and interrupted imports block rather than starting from scratch.
+
 Fresh structured sessions allow at most four semantic repairs, within the existing
 cost circuit breaker. Three consecutive reviews retaining the same blocking IDs stop
 as STAGNATION. Environment prerequisites stop as ENVIRONMENT_PREREQUISITE rather than
