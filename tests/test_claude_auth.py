@@ -47,6 +47,21 @@ class ClaudeAuthTests(unittest.TestCase):
                 )
                 self.assertEqual("CLAUDE_CODE_OAUTH_TOKEN=test-token" in cmd, enabled)
 
+    def test_non_root_permission_error_on_restricted_paths_is_handled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            repo = Path(tmp) / "repo"
+            home.mkdir()
+            repo.mkdir()
+            with patch("pathlib.Path.home", return_value=home), \
+                 patch("os.geteuid", return_value=1000, create=True):
+                # When non-root, restricted paths must not raise PermissionError
+                isolation = ProjectRuntimeIsolation(repo)
+                isolation.activate()
+                # Verify dispatcher doesn't raise PermissionError
+                SquadDispatcher.has_codex_auth()
+                SquadDispatcher.has_agy()
+
 
 if __name__ == "__main__":
     unittest.main()
