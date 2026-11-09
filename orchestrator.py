@@ -1667,7 +1667,7 @@ class SSDLCOrchestrator:
             self._save_state()
             return self.dir_design / 'plan.json'
 
-    def _run_task_development(self, feedback: str = "") -> Tuple[Path, List[str]]:
+    def _run_task_development(self, feedback: str = "", recover_protocol_task=None) -> Tuple[Path, List[str]]:
         plan = self._ensure_task_plan()
         controller = self._ensure_controller_contract()
         quality = json.loads((self.dir_recon / "quality-contract.json").read_text())
@@ -1723,7 +1723,7 @@ class SSDLCOrchestrator:
         self.state["current_step"] = "task-development"
         self.state["status"] = "IN_PROGRESS"
         self._save_state()
-        result = scheduler.run(ordered, feedback)
+        result = scheduler.run(ordered, feedback, recover_protocol_task=recover_protocol_task)
         self.state["tasks_status"] = result["tasks"]
         self.state["task_verified_head"] = result["expected_head"]
         diff = self.dir_dev / "implementation.diff"

@@ -113,6 +113,19 @@ def diagnostic_excerpt(text: str, limit: int) -> str:
     return text[:head] + marker + text[-tail:]
 
 
+def developer_blocker(output: str) -> str | None:
+    """A completion claim requests verification; it never grants completion."""
+    markers = re.findall(r'^[ \t]*TASK_DEV_STATUS:[ \t]*(\w+)[ \t]*$', output, re.M)
+    if not markers:
+        return None
+    final = output.strip().splitlines()[-1].strip()
+    if len(markers) != 1 or not re.fullmatch(r'TASK_DEV_STATUS:[ \t]*' + re.escape(markers[0]), final):
+        return 'DEVELOPER_PROTOCOL'
+    if markers[0] in ('COMPLETE', 'COMPLETED', 'IMPLEMENTED', 'SUCCESS'):
+        return None
+    return markers[0] if markers[0] in ('SCOPE_REQUIRED', 'ENVIRONMENT_BLOCKED') else 'DEVELOPER_PROTOCOL'
+
+
 def test_suite_is_empty(stdout: str, stderr: str = '') -> bool:
     """Use the final runner summary, rather than quoted/nested empty-suite output.
 
@@ -725,11 +738,11 @@ class TaskScheduler:
                                   'Do not weaken checks or expand scope to pass verification.')
         return context
 
-    def _restore_candidate(self, task: dict, record: dict) -> None:
+    def _restore_candidate(self, task: dict, record: dict, *, protocol_recovery=False) -> None:
         if not record.get('failed_attempts'):
             return
         candidate = record['failed_attempts'][-1]
-        if candidate['category'] != 'CHECK_FAILURE':
+        if candidate['category'] != 'CHECK_FAILURE' and not (protocol_recovery and candidate['category'] == 'DEVELOPER_PROTOCOL'):
             raise DevelopmentBlocked(candidate['category'], 'Previous attempt needs explicit reconciliation')
         self._assert_clean()
         path = confined(self.directory, candidate['diff_ref'], protect=False)
@@ -751,6 +764,53 @@ class TaskScheduler:
             confined(self.wt, name)
         if sorted(self._changed()) != changed:
             raise TaskError('Restored repair candidate differs from archived paths')
+
+    def _recover_protocol_candidate(self, task: dict, record: dict) -> None:
+        """Explicitly verify an archived ready candidate; do not rerun its developer."""
+        candidate = record.get('failed_attempts', [{}])[-1]
+        if record['status'] == 'COMPLETED' and record.get('protocol_recoveries'):
+            return
+        if record['status'] != 'FAILED' or candidate.get('category') != 'DEVELOPER_PROTOCOL' or candidate.get('checks'):
+            raise TaskError('Protocol recovery requires an unverified archived protocol failure')
+        original = confined(self.directory, f"{task['task_id']}/attempt-{candidate['attempt']}/developer.log", protect=False)
+        output = original.read_text()
+        if (record.get('failure') != json.dumps(candidate['checks']) + '\n' + output
+                or record.get('producer', {}).get('exit_code') != 0 or developer_blocker(output) is not None
+                or not re.search(r'TASK_DEV_STATUS:', output)):
+            raise TaskError('Archived developer response does not request normal verification')
+        recoveries = record.setdefault('protocol_recoveries', [])
+        recovery = {'attempt': candidate['attempt'], 'status': 'RESERVED',
+                    'developer_log_ref': str(original.relative_to(self.directory)), 'developer_log_sha256': file_hash(original),
+                    'candidate_tree': candidate['tree']}
+        directory = self.directory / task['task_id'] / f'protocol-recovery-{len(recoveries) + 1}'
+        recoveries.append(recovery)
+        self._save('PROTOCOL_RECOVERY_RESERVED')
+        directory.mkdir(parents=True, exist_ok=False)
+        self._restore_candidate(task, record, protocol_recovery=True)
+        protected, changed = self._protected(), self._changed()
+        signature = self._source_signature(changed)
+        record.update(status='VERIFYING', checks=[])
+        self._save('PROTOCOL_RECOVERY_VERIFYING')
+        print(f"[task-dev] Verifying archived {task['task_id']} attempt {candidate['attempt']}; no developer invocation.", flush=True)
+        results = self._verify(task, record, directory)
+        self._assert_tree()
+        if (self._protected() != protected or self._changed() != changed or self._source_signature(changed) != signature
+                or self._ignored() != self.state['ignored_paths'] or git(self.wt, 'write-tree') != candidate['tree']):
+            raise TaskError('Verification changed the recovered candidate or metadata')
+        if all(not c['exit_code'] and not c['empty_suite'] for c in results):
+            recovery['status'] = 'PASSED'
+            record.update(status='COMMIT_INTENT', candidate_tree=candidate['tree'], changed_files=changed,
+                          commit_message=f'feat({self.plan["ticket_id"]}/{task["task_id"]}): {task["title"]}\n\nSSDLC-Attempt: {candidate["attempt"]}')
+            self._save('COMMIT_INTENT')
+            self._complete_intent(task, record)
+            return
+        recovery['status'] = 'FAILED'
+        record['failed_attempts'].append({**copy.deepcopy(candidate), 'category': 'CHECK_FAILURE', 'checks': results,
+                                         'origin': 'explicit_protocol_verification'})
+        record.update(status='FAILED', failure=json.dumps(results) + '\n' + output)
+        self._save('PROTOCOL_RECOVERY_FAILED')
+        self._rollback_attempt(record, changed)
+        self._log_failed_checks(results)
 
     def _rollback_attempt(self, record: dict, changed: list[str]) -> None:
         for path in changed:
@@ -788,11 +848,11 @@ class TaskScheduler:
         self.state['expected_head'] = head
         self._save('TASK_COMPLETED')
 
-    def run(self, ordered: list[dict], feedback: str = '') -> dict:
+    def run(self, ordered: list[dict], feedback: str = '', *, recover_protocol_task=None) -> dict:
         with ticket_lock(self.directory / 'scheduler.lock'):
-            return self._run(ordered, feedback)
+            return self._run(ordered, feedback, recover_protocol_task=recover_protocol_task)
 
-    def _run(self, ordered: list[dict], feedback: str) -> dict:
+    def _run(self, ordered: list[dict], feedback: str, *, recover_protocol_task=None) -> dict:
         if any(t['kind'] != 'task' or t['verification']['mode'] != 'automated' for t in ordered):
             raise TaskError('Bootstrap supports automated tasks only; subgoals/review_only require later increments')
         self.guard()
@@ -826,14 +886,22 @@ class TaskScheduler:
             # Targeted bounce belongs to Step 3. Never silently skip rejected completed tasks.
             raise TaskError('Review feedback requires explicit invalidation, unavailable in the bootstrap scheduler')
         pending = [t for t in ordered if state['tasks'][t['task_id']]['status'] != 'COMPLETED']
+        if recover_protocol_task is not None and recover_protocol_task not in state['tasks']:
+            raise TaskError('Unknown task for protocol recovery')
         for task in pending:
             record = state['tasks'][task['task_id']]
-            if record.get('failed_attempts') and record['failed_attempts'][-1]['category'] != 'CHECK_FAILURE':
+            recovering = task['task_id'] == recover_protocol_task
+            if record.get('failed_attempts') and record['failed_attempts'][-1]['category'] != 'CHECK_FAILURE' and not recovering:
                 raise DevelopmentBlocked(record['failed_attempts'][-1]['category'], 'Previous attempt needs explicit reconciliation')
-            if record['attempts'] >= self.max_attempts:
+            if record['attempts'] >= self.max_attempts and not recovering:
                 raise TaskError(f'Task {task["task_id"]} exhausted its persistent attempt limit')
         if pending:
             self._preflight()
+        if recover_protocol_task:
+            task = next(t for t in ordered if t['task_id'] == recover_protocol_task)
+            if not all(state['tasks'][dep]['status'] == 'COMPLETED' for dep in task['depends_on']):
+                raise TaskError('Protocol recovery dependency has not completed')
+            self._recover_protocol_candidate(task, state['tasks'][recover_protocol_task])
         for task in ordered:
             record = state['tasks'][task['task_id']]
             if record['status'] == 'COMPLETED':
@@ -864,6 +932,7 @@ class TaskScheduler:
                 prompt = ('Implement only this task, reusing project conventions. Do not commit, change Git metadata, '
                           'or modify protected SSDLC artifacts. Stay within target_files. '
                           'If repair context is supplied, the previous failed candidate is already restored: repair it in place. '
+                          'When ready for independent verification, end with TASK_DEV_STATUS: COMPLETE. '
                           'If completion requires changes outside target_files, end with TASK_DEV_STATUS: SCOPE_REQUIRED. '
                           'For a missing environment prerequisite, end with TASK_DEV_STATUS: ENVIRONMENT_BLOCKED. '
                           'Explain the blocker and do not bypass it, weaken checks or expand scope.\n'
@@ -889,14 +958,7 @@ class TaskScheduler:
                     raise TaskError('Task exceeded approved manifest; scope reconciliation is required')
                 for path in changed:
                     confined(self.wt, path)
-                markers = re.findall(r'^TASK_DEV_STATUS:\s*(\w+)\s*$', result['output'], re.M)
-                blocker = None
-                if markers:
-                    final = result['output'].strip().splitlines()[-1]
-                    if len(markers) != 1 or final != 'TASK_DEV_STATUS: ' + markers[0] or markers[0] not in ('SCOPE_REQUIRED', 'ENVIRONMENT_BLOCKED'):
-                        blocker = 'DEVELOPER_PROTOCOL'
-                    else:
-                        blocker = markers[0]
+                blocker = developer_blocker(result['output'])
                 if result['exit_code'] != 0:
                     blocker = blocker or 'DEVELOPER_INVOCATION'
                 if not changed and not blocker:

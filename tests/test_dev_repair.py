@@ -1,12 +1,73 @@
 import json
 from unittest.mock import patch
 
-from ssdlc_tasks import DevelopmentBlocked, TaskError, diagnostic_excerpt, file_hash, git
+from ssdlc_tasks import DevelopmentBlocked, TaskError, developer_blocker, diagnostic_excerpt, file_hash, git
 from ssdlc_tasks import test_suite_is_empty as suite_is_empty
 from test_task_bootstrap import RepositoryTests
 
 
 class DevelopmentRepairTests(RepositoryTests):
+    def test_completion_status_is_a_request_to_verify_not_an_approval(self):
+        for status in ('COMPLETE', 'COMPLETED', 'IMPLEMENTED', 'SUCCESS'):
+            self.assertIsNone(developer_blocker('Done\nTASK_DEV_STATUS: ' + status))
+        self.assertEqual(developer_blocker('TASK_DEV_STATUS: SCOPE_REQUIRED'), 'SCOPE_REQUIRED')
+        self.assertEqual(developer_blocker('TASK_DEV_STATUS: ENVIRONMENT_BLOCKED'), 'ENVIRONMENT_BLOCKED')
+        self.assertEqual(developer_blocker('TASK_DEV_STATUS: COMPLETE\nTASK_DEV_STATUS: SCOPE_REQUIRED'), 'DEVELOPER_PROTOCOL')
+
+    def test_complete_claim_cannot_skip_failing_verification(self):
+        def developer(*args):
+            result = self.developer(*args)
+            result['output'] = 'TASK_DEV_STATUS: COMPLETE'
+            return result
+        with self.assertRaisesRegex(TaskError, 'exhausted'):
+            self.scheduler(developer, self.verifier, max_attempts=1).run(self.plan['tasks'])
+        self.assertEqual(git(self.wt, 'rev-parse', 'HEAD'), self.base)
+        self.assertEqual(len(self.calls), 1)
+
+    def legacy_protocol_failure(self):
+        def developer(*args):
+            result = self.developer(*args)
+            result['output'] = 'Implemented within scope.\nTASK_DEV_STATUS: COMPLETE'
+            return result
+        with patch('ssdlc_tasks.developer_blocker', return_value='DEVELOPER_PROTOCOL'):
+            with self.assertRaisesRegex(DevelopmentBlocked, 'DEVELOPER_PROTOCOL'):
+                self.scheduler(developer, self.verifier, max_attempts=1).run(self.plan['tasks'])
+        return self.scheduler(developer, self.verifier, max_attempts=2)
+
+    def test_explicit_protocol_recovery_verifies_original_patch_without_another_developer(self):
+        scheduler = self.legacy_protocol_failure()
+        scheduler.verifier = lambda *args: ('Ran 1 test\nOK', '', 0)
+        original = scheduler.directory/'T1/attempt-1/developer.log'
+        before = file_hash(original)
+        result = scheduler.run(self.plan['tasks'], recover_protocol_task='T1')
+        record = result['tasks']['T1']
+        self.assertEqual(record['status'], 'COMPLETED')
+        self.assertEqual(record['attempts'], 1)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(record['failed_attempts'][0]['category'], 'DEVELOPER_PROTOCOL')
+        self.assertEqual(record['protocol_recoveries'][0]['status'], 'PASSED')
+        self.assertTrue(all(c['exit_code'] == 0 for c in record['checks']))
+        self.assertEqual(file_hash(original), before)
+        self.assertEqual(git(self.wt, 'rev-list', '--count', self.base+'..HEAD'), '1')
+
+    def test_recovered_patch_that_fails_checks_uses_remaining_real_developer_attempt(self):
+        scheduler = self.legacy_protocol_failure()
+        result = scheduler.run(self.plan['tasks'], recover_protocol_task='T1')
+        record = result['tasks']['T1']
+        self.assertEqual(record['status'], 'COMPLETED')
+        self.assertEqual(record['attempts'], 2)
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(record['failed_attempts'][-1]['category'], 'CHECK_FAILURE')
+        self.assertIn('AssertionError: expected recovery', self.calls[-1][1])
+
+    def test_protocol_recovery_rejects_changed_raw_developer_response(self):
+        scheduler = self.legacy_protocol_failure()
+        (scheduler.directory/'T1/attempt-1/developer.log').write_text('Different answer\nTASK_DEV_STATUS: COMPLETE')
+        with self.assertRaisesRegex(TaskError, 'does not request normal verification'):
+            scheduler.run(self.plan['tasks'], recover_protocol_task='T1')
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(git(self.wt, 'status', '--porcelain'), '')
+
     def test_nested_empty_suite_diagnostic_does_not_override_real_unittest_summary(self):
         stdout = 'Fixture diagnostic:\nRan 0 tests\n\nOK\n'
         stderr = 'Ran 157 tests in 23.381s\n\nOK\n'
