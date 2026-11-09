@@ -57,6 +57,17 @@ def parse_review_verdict(report: str) -> Optional[str]:
     return None
 
 
+def parse_qa_verdict(report: str) -> Optional[str]:
+    """QA approval requires one exact final marker, never a quoted substring."""
+    markers = re.findall(r'\bQA_STATUS\s*:', report)
+    final = report.rstrip().splitlines()[-1].strip() if report.strip() else ''
+    if len(markers) == 1:
+        for verdict in ('PASSED', 'FAILED'):
+            if final == f'QA_STATUS: {verdict}':
+                return verdict
+    return None
+
+
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -2431,6 +2442,24 @@ class SSDLCOrchestrator:
     # ------------------------------------------------------------------
     # PHASE 4: Code Reviewer (+ Conditional DB & Perf/SRE Specialist Lenses)
     # ------------------------------------------------------------------
+    def _verified_task_review_input(self, diff_text: str) -> Tuple[Path, int]:
+        try:
+            diff_limit = int(os.environ.get('SSDLC_REVIEW_MAX_DIFF_CHARS', '200000'))
+        except ValueError as exc:
+            raise TaskError('SSDLC_REVIEW_MAX_DIFF_CHARS must be a positive integer') from exc
+        if not 1 <= diff_limit <= 1000000:
+            raise TaskError('SSDLC_REVIEW_MAX_DIFF_CHARS must be between 1 and 1000000')
+        if len(diff_text) > diff_limit:
+            raise TaskError(f'Full review diff ({len(diff_text)} chars) exceeds configured review budget ({diff_limit}); no truncation performed')
+        if (not self.worktree_dir.is_dir() or not self.state.get('task_verified_head')
+                or git(self.worktree_dir, 'rev-parse', 'HEAD') != self.state['task_verified_head']
+                or git(self.worktree_dir, 'status', '--porcelain')):
+            raise TaskError('Code review requires the clean verified task checkpoint')
+        expected_diff = git(self.worktree_dir, 'diff', '--binary', self.state['base_commit'], 'HEAD') + '\n'
+        if diff_text != expected_diff:
+            raise TaskError('Review diff differs from the verified cumulative checkpoint')
+        return self.worktree_dir, diff_limit
+
     def run_phase_review(self, attempt: int = 1) -> Tuple[bool, str]:
         risk_tier = self.state.get("risk_tier", "M")
         dev_profile = self.state.get("dev_profile", "ALGORITHMIC")
@@ -2478,21 +2507,7 @@ class SSDLCOrchestrator:
             )
 
         if self._task_mode():
-            try:
-                diff_limit = int(os.environ.get('SSDLC_REVIEW_MAX_DIFF_CHARS', '200000'))
-            except ValueError as exc:
-                raise TaskError('SSDLC_REVIEW_MAX_DIFF_CHARS must be a positive integer') from exc
-            if not 1 <= diff_limit <= 1000000:
-                raise TaskError('SSDLC_REVIEW_MAX_DIFF_CHARS must be between 1 and 1000000')
-            if len(diff_text) > diff_limit:
-                raise TaskError(f'Full review diff ({len(diff_text)} chars) exceeds configured review budget ({diff_limit}); no truncation performed')
-            if (not self.worktree_dir.is_dir() or not self.state.get('task_verified_head')
-                    or git(self.worktree_dir, 'rev-parse', 'HEAD') != self.state['task_verified_head']
-                    or git(self.worktree_dir, 'status', '--porcelain')):
-                raise TaskError('Code review requires the clean verified task checkpoint')
-            expected_diff = git(self.worktree_dir, 'diff', '--binary', self.state['base_commit'], 'HEAD') + '\n'
-            if diff_text != expected_diff:
-                raise TaskError('Review diff differs from the verified cumulative checkpoint')
+            _, diff_limit = self._verified_task_review_input(diff_text)
             ui_review_rules = (
                 "\nPROJECT QUALITY CONTRACT (apply the actual project rules, including test/config changes):\n"
                 + (self.dir_recon / "quality-contract.json").read_text()
@@ -2702,6 +2717,9 @@ class SSDLCOrchestrator:
         diff_text = self._read_optional(self.dir_dev / "implementation.diff", "")
 
         ui_qa_rules = ""
+        qa_cwd = self.repo_root
+        if self._task_mode():
+            qa_cwd, _ = self._verified_task_review_input(diff_text)
         if dev_profile == "FRONTEND_UI":
             ui_qa_rules = (
                 "\n\nMANDATORY UI/UX ACCEPTANCE VERIFICATION:\n"
@@ -2720,16 +2738,25 @@ class SSDLCOrchestrator:
             "2. ## Edge Cases & Behavioral Verification Analysis\n"
             "3. ## Verdict\n"
             "At the very end, output EXACTLY one of:\n"
-            "QA_STATUS: PASSED (only if all ACs, SEC items, and deterministic tests pass)\n"
+            "QA_STATUS: PASSED\n"
             "or\n"
-            "QA_STATUS: FAILED (if any AC, SEC item, or test fails)"
+            "QA_STATUS: FAILED\n"
+            "Use PASSED only when all ACs, SEC items and deterministic checks pass. "
+            "Emit exactly one verdict marker as the final standalone line, without annotations or code fences."
         )
         user_prompt = (
             f"PO REQUIREMENTS:\n{req_text}\n\n"
             f"THREAT MODEL:\n{tm_text}\n\n"
             f"DETERMINISTIC TEST & SCAN LOGS:\n{det_logs}\n\n"
-            f"IMPLEMENTATION DIFF:\n```diff\n{diff_text[:60000]}\n```"
+            f"IMPLEMENTATION DIFF:\n```diff\n{diff_text if self._task_mode() else diff_text[:60000]}\n```"
         )
+
+        qa_run = self.dir_qa / 'runs' / uuid.uuid4().hex
+        qa_run.mkdir(parents=True)
+        input_path = qa_run / 'inputs.json'
+        atomic_json(input_path, {'verified_head': self.state.get('task_verified_head'), 'qa_cwd': str(qa_cwd),
+                                 'system_prompt': sys_prompt, 'user_prompt': user_prompt})
+        self.record_artifact(str(input_path.relative_to(self.ssdlc_root)), input_path)
 
         t0 = time.time()
         qa_out, cost, tin, tout, trace_user = EngineRunner.invoke_role(
@@ -2737,7 +2764,7 @@ class SSDLCOrchestrator:
             qa_model,
             sys_prompt,
             user_prompt,
-            self.repo_root,
+            qa_cwd,
             self.project_id,
             self.ticket_id,
             f"05-qa-a{attempt}",
@@ -2746,8 +2773,14 @@ class SSDLCOrchestrator:
         )
         dur = time.time() - t0
 
-        llm_qa_ok = "QA_STATUS: PASSED" in qa_out
-        final_qa_ok = det_ok and llm_qa_ok
+        qa_verdict = parse_qa_verdict(qa_out)
+        llm_qa_ok = qa_verdict == 'PASSED'
+        input_changed = self._task_mode() and (git(qa_cwd, 'rev-parse', 'HEAD') != self.state['task_verified_head']
+                                               or bool(git(qa_cwd, 'status', '--porcelain')))
+        final_qa_ok = det_ok and llm_qa_ok and not input_changed
+        raw_path = qa_run / 'response.md'
+        raw_path.write_text(qa_out)
+        self.record_artifact(str(raw_path.relative_to(self.ssdlc_root)), raw_path)
 
         qa_path = self.dir_qa / "qa-traceability-matrix.md"
         qa_path.write_text(qa_out, encoding="utf-8")
@@ -2758,7 +2791,7 @@ class SSDLCOrchestrator:
                 "QA & Security Verifier",
                 qa_engine,
                 qa_model,
-                "PASSED" if final_qa_ok else "FAILED",
+                'INPUT_CHANGED' if input_changed else 'INVALID_VERDICT' if qa_verdict is None else "PASSED" if final_qa_ok else "FAILED",
                 dur,
                 cost,
                 tin,
@@ -2770,7 +2803,7 @@ class SSDLCOrchestrator:
         self.record_gate(
             f"QA_VERIFICATION_A{attempt}",
             final_qa_ok,
-            f"deterministic_ok={det_ok}, ac_matrix_ok={llm_qa_ok}, reasoning={qa_effort}",
+            f"deterministic_ok={det_ok}, ac_matrix_ok={llm_qa_ok}, input_changed={input_changed}, reasoning={qa_effort}",
         )
         print(f"    [{'OK' if final_qa_ok else 'BOUNCE'}] QA Gate status: {'PASSED' if final_qa_ok else 'FAILED'}")
         return final_qa_ok, f"{det_logs}\n\n{qa_out}"

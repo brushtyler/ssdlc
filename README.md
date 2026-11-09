@@ -632,6 +632,10 @@ calling reviewers and withholds approval if the checkpoint changes during review
 maximum 1,000,000). A larger diff stops before model invocation instead of silently
 truncating input. Each invocation archives its full prompt/input and individual raw
 reviews under `04-review/runs/`, retaining evidence even if a later reviewer fails.
+QA uses the same complete-diff budget and verified worktree, archives its input and
+raw output under `05-qa/runs/`, and requires one exact final `QA_STATUS` marker plus
+passing deterministic checks. Quoted, contradictory or annotated verdicts cannot
+approve a checkpoint; source changes during QA also withhold approval.
 
 This bootstrap requires strict file manifests and automated task checks. Runtime
 scope expansion, targeted review bounce, granular model
