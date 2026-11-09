@@ -614,6 +614,17 @@ does not reset them. Console logs show the task/attempt, whether it restores a p
 candidate, and the failed checks with evidence paths. Failure packs preserve the
 phase/category where execution actually stopped.
 
+`TASK_DEV_STATUS: COMPLETE` (also COMPLETED/IMPLEMENTED/SUCCESS) requests independent
+verification; it never bypasses checks. After a parser correction, an explicitly
+selected unverified `DEVELOPER_PROTOCOL` candidate can be recovered with
+`TaskScheduler.run(..., recover_protocol_task=task_id)`. Recovery checks the original
+response against the journal, verifies its archived patch/base/scope, then runs all
+task and required quality checks in a fresh evidence directory without another
+developer call or a counter reset. The original protocol failure remains in history.
+Only passing verification can create a checkpoint; failures return to ordinary
+repair using the remaining developer allowance. Scope/environment blockers and
+altered responses cannot use this recovery path.
+
 This bootstrap requires strict file manifests and automated task checks. Runtime
 scope expansion, targeted review bounce and transitive invalidation, granular model
 routing, shared invocation/time budgets, subgoals and the advisory lifecycle remain
