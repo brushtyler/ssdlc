@@ -22,11 +22,17 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+from ssdlc_tasks import (
+    PlanError, TaskError, TaskPlanValidator, TaskScheduler, atomic_json,
+    confined, file_hash, git, ticket_lock, validate_document,
+)
 
 
 def utc_now() -> str:
@@ -55,7 +61,7 @@ def get_cli_version(binary: str) -> str:
         return "MISSING"
     try:
         proc = subprocess.run(
-            [path, "--version"],
+            [path, "-V" if binary == "tmux" else "--version"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -178,6 +184,14 @@ class ProjectRuntimeIsolation:
                     if not dest.exists() or host_claude_json.stat().st_mtime > dest.stat().st_mtime:
                         shutil.copy2(host_claude_json, dest)
                         os.chmod(dest, 0o600)
+            host_claude_cred = Path.home() / ".claude" / ".credentials.json"
+            proj_claude_cred = self.claude_home / ".credentials.json"
+            if host_claude_cred.is_file() and (
+                not proj_claude_cred.exists()
+                or host_claude_cred.stat().st_mtime > proj_claude_cred.stat().st_mtime
+            ):
+                shutil.copy2(host_claude_cred, proj_claude_cred)
+                os.chmod(proj_claude_cred, 0o600)
 
         # Auto-inherit git user identity from host ~/.gitconfig
         for hg in (Path("/root/.gitconfig"), Path.home() / ".gitconfig"):
@@ -294,10 +308,9 @@ class SquadDispatcher:
 
     @classmethod
     def has_claude_max(cls) -> bool:
+        config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")))
         return bool(
-            (Path("/root/.claude/.credentials.json").exists())
-            or (Path.home() / ".claude" / ".credentials.json").exists()
-            or (Path.home() / ".claude.json").exists()
+            (config_dir / ".credentials.json").is_file()
             or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
         ) and bool(shutil.which("claude"))
 
@@ -536,6 +549,8 @@ class EngineRunner:
         cwd: Path,
         writable_worktree: Optional[Path] = None,
         pass_ai_keys: bool = True,
+        verification_scratch: Optional[Path] = None,
+        verification_env: Optional[Dict[str, str]] = None,
     ) -> List[str]:
         """
         Wraps a CLI/test invocation in a fresh ephemeral container where:
@@ -575,14 +590,24 @@ class EngineRunner:
             "-v",
             f"{repo_root}:{repo_root}:ro",
             "-v",
-            f"{runtime_dir}:{runtime_dir}:rw",
-            "-v",
             f"{ssdlc_home}:/opt/ssdlc:ro",
-            "-v",
-            "ssdlc-shared-uv-cache:/root/.cache/uv",
-            "-v",
-            "ssdlc-shared-npm-cache:/root/.npm",
         ]
+        if pass_ai_keys:
+            docker_cmd.extend([
+                "-v", f"{runtime_dir}:{runtime_dir}:rw",
+                "-v", "ssdlc-shared-uv-cache:/root/.cache/uv",
+                "-v", "ssdlc-shared-npm-cache:/root/.npm",
+            ])
+        else:
+            # Test code must not read isolated credentials through the repository mount.
+            docker_cmd.extend(["--tmpfs", f"{repo_root / '.ssdlc'}:rw,size=16m"])
+            docker_cmd.extend(["--tmpfs", "/opt/ssdlc/.ssdlc:rw,size=16m"])
+            if cwd.resolve() != repo_root:
+                docker_cmd.extend(["-v", f"{cwd.resolve()}:{cwd.resolve()}:ro"])
+            if verification_scratch is not None:
+                docker_cmd.extend(["-v", f"{verification_scratch}:{verification_scratch}:rw"])
+            for key, value in (verification_env or {}).items():
+                docker_cmd.extend(["-e", f"{key}={value}"])
         if not str(repo_root).startswith("/tmp/"):
             docker_cmd.extend(["--tmpfs", "/tmp:rw,exec,size=512m"])
         if Path("/usr/local/bin/codex").exists():
@@ -594,10 +619,10 @@ class EngineRunner:
         # Auto-mount host subscriptions into container as read-only (zero host pollution)
         # Claude Max auth
         host_claude_json = Path.home() / ".claude.json"
-        if host_claude_json.exists():
+        if pass_ai_keys and host_claude_json.exists():
             docker_cmd.extend(["-v", f"{host_claude_json}:/root/.claude.json:ro"])
         host_claude_cred = Path.home() / ".claude" / ".credentials.json"
-        if host_claude_cred.exists():
+        if pass_ai_keys and host_claude_cred.exists():
             docker_cmd.extend([
                 "-v", f"{host_claude_cred}:/root/.claude/.credentials.json:ro",
                 "--tmpfs", "/root/.cache/claude-cli-nodejs:rw",
@@ -608,15 +633,15 @@ class EngineRunner:
 
         # Codex Plus/Pro auth
         host_codex_auth = Path.home() / ".codex" / "auth.json"
-        if host_codex_auth.exists():
+        if pass_ai_keys and host_codex_auth.exists():
             docker_cmd.extend(["-v", f"{host_codex_auth}:/root/.codex/auth.json:ro"])
         host_codex_ver = Path.home() / ".codex" / "version.json"
-        if host_codex_ver.exists():
+        if pass_ai_keys and host_codex_ver.exists():
             docker_cmd.extend(["-v", f"{host_codex_ver}:/root/.codex/version.json:ro"])
 
         # agy Gemini Flash auth & ephemeral tmpfs mounts
         host_gemini = Path.home() / ".gemini"
-        if host_gemini.exists():
+        if pass_ai_keys and host_gemini.exists():
             docker_cmd.extend([
                 "-v", f"{host_gemini}:/root/.gemini:ro",
                 "--tmpfs", "/root/.gemini/antigravity-cli/brain:rw",
@@ -635,20 +660,17 @@ class EngineRunner:
             if wt_git_meta.is_dir():
                 docker_cmd.extend(["-v", f"{wt_git_meta}:{wt_git_meta}:rw"])
 
-        base_env_keys = [
-            "SSDLC_PROJECT_ID",
-            "CODEX_HOME",
-            "CLAUDE_CONFIG_DIR",
-            "XDG_CACHE_HOME",
-        ]
+        base_env_keys = ["SSDLC_PROJECT_ID"]
         if pass_ai_keys:
             base_env_keys.extend(
                 [
+                    "CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_CACHE_HOME",
                     "OPENROUTER_API_KEY",
                     "OPENAI_API_KEY",
                     "ANTHROPIC_API_KEY",
                     "ANTHROPIC_BASE_URL",
                     "ANTHROPIC_AUTH_TOKEN",
+                    "CLAUDE_CODE_OAUTH_TOKEN",
                 ]
             )
 
@@ -671,31 +693,34 @@ class EngineRunner:
         Executes a deterministic test or scanner command inside the read-only role container
         (with AI API keys stripped and /tmp on tmpfs) when Docker role isolation is enabled.
         """
-        if EngineRunner._should_spawn_role_container():
-            exec_cmd = EngineRunner._wrap_in_role_container(
-                cmd,
-                cwd=cwd,
-                writable_worktree=None,
-                pass_ai_keys=False,
+        # Scratch is per invocation, so tickets and retries cannot share writable caches.
+        with tempfile.TemporaryDirectory(prefix="ssdlc-check-") as scratch_name:
+            scratch = Path(scratch_name)
+            settings = {
+                "TMPDIR": str(scratch), "XDG_CACHE_HOME": str(scratch / "cache"),
+                "HOME": str(scratch / "home"), "PYTHONPYCACHEPREFIX": str(scratch / "pycache"),
+                "MYPY_CACHE_DIR": str(scratch / "mypy"), "RUFF_CACHE_DIR": str(scratch / "ruff"),
+                "npm_config_cache": str(scratch / "npm"),
+                "PYTEST_ADDOPTS": (os.environ.get("PYTEST_ADDOPTS", "") + f" -o cache_dir={scratch / 'pytest'}").strip(),
+            }
+            (scratch / "home").mkdir()
+            if EngineRunner._should_spawn_role_container():
+                exec_cmd = EngineRunner._wrap_in_role_container(
+                    cmd, cwd=cwd, pass_ai_keys=False,
+                    verification_scratch=scratch, verification_env=settings,
+                )
+                env = None
+            else:
+                # Local mode has isolated cache/env but no kernel-enforced read-only mount.
+                exec_cmd = cmd
+                hidden = {"OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+                          "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CODEX_HOME",
+                          "CLAUDE_CONFIG_DIR", "GITHUB_TOKEN", "GH_TOKEN", "GITLAB_TOKEN"}
+                env = {k: v for k, v in os.environ.items() if k not in hidden}
+                env.update(settings)
+            proc = subprocess.run(
+                exec_cmd, cwd=str(cwd), env=env, capture_output=True, text=True, timeout=timeout,
             )
-            env = None
-        else:
-            exec_cmd = cmd
-            env = {k: v for k, v in os.environ.items() if k not in (
-                "OPENROUTER_API_KEY",
-                "OPENAI_API_KEY",
-                "ANTHROPIC_API_KEY",
-                "ANTHROPIC_AUTH_TOKEN",
-            )}
-
-        proc = subprocess.run(
-            exec_cmd,
-            cwd=str(cwd),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
         return proc.stdout or "", proc.stderr or "", proc.returncode
 
     @staticmethod
@@ -1006,11 +1031,13 @@ class EngineRunner:
 class RemoteSyncManager:
     """Manages synchronization between local SSDLC runs and remote Git/Tracker platforms (GitHub, GitLab)."""
 
-    def __init__(self, repo_root: Path, ticket_id: str, enabled: bool = False):
+    def __init__(self, repo_root: Path, ticket_id: str, enabled: Optional[bool] = None):
         self.repo_root = repo_root.resolve()
         self.ticket_id = ticket_id
-        env_enabled = os.environ.get("SSDLC_SYNC_REMOTE", "false").lower() in ("true", "1", "yes")
-        self.enabled = enabled or env_enabled
+        configured = os.environ.get("SSDLC_SYNC_REMOTE", "auto").strip().lower()
+        if configured not in ("auto", "true", "false", "1", "0", "yes", "no"):
+            configured = "auto"
+        self.mode = ("true" if enabled else "false") if enabled is not None else configured
         self.provider = "generic"
         self.host = ""
         self.owner = ""
@@ -1018,6 +1045,11 @@ class RemoteSyncManager:
         self.remote_url = ""
         self.token = ""
         self._detect_remote()
+        self.enabled = (
+            self.provider in ("github", "gitlab")
+            if self.mode == "auto"
+            else self.mode in ("true", "1", "yes")
+        )
 
     def _detect_remote(self) -> None:
         try:
@@ -1033,7 +1065,7 @@ class RemoteSyncManager:
             return
 
         m_github = re.search(
-            r"(?:git@[\w.-]*github[\w.-]*:|https?://[\w.-]*github[\w.-]*/)([\w.-]+)/([\w.-]+?)(?:\.git)?$",
+            r"^(?:git@github\.com:|https?://github\.com/)([\w.-]+)/([\w.-]+?)(?:\.git)?/?$",
             self.remote_url,
         )
         if m_github:
@@ -1045,7 +1077,7 @@ class RemoteSyncManager:
             return
 
         m_gitlab = re.search(
-            r"(?:git@([\w.-]*gitlab[\w.-]*):|https?://([\w.-]*gitlab[\w.-]*)/)([\w.-]+)/([\w.-]+?)(?:\.git)?$",
+            r"^(?:git@(gitlab\.[\w.-]+):|https?://(gitlab\.[\w.-]+)/)([\w.-]+)/([\w.-]+?)(?:\.git)?/?$",
             self.remote_url,
         )
         if m_gitlab:
@@ -1201,7 +1233,7 @@ class SSDLCOrchestrator:
         self,
         repo_root: Path,
         ticket_id: str,
-        sync_remote: bool = False,
+        sync_remote: Optional[bool] = None,
         issue_id: Optional[int] = None,
     ):
         self.repo_root = repo_root.resolve()
@@ -1239,6 +1271,234 @@ class SSDLCOrchestrator:
         self.state = self._load_or_init_state()
         self.remote_sync = RemoteSyncManager(self.repo_root, self.ticket_id, enabled=sync_remote)
         self.issue_id = issue_id or self.state.get("issue_id")
+
+    def _task_mode(self) -> bool:
+        return bool(self.state.get("task_breakdown")) or os.environ.get("SSDLC_ENABLE_TASK_BREAKDOWN", "false").lower() == "true"
+
+    def _ensure_quality_contract(self) -> Dict[str, Any]:
+        target = self.dir_recon / "quality-contract.json"
+        if target.exists():
+            meta = self.state.get("artifacts", {}).get("00-recon/quality-contract.json")
+            if not meta or sha256_file(target) != meta["sha256"]:
+                raise PlanError("Quality snapshot is unregistered or changed; explicit migration required")
+            return json.loads(target.read_text())
+        if "00-recon/quality-contract.json" in self.state.get("artifacts", {}):
+            raise PlanError("Registered quality contract disappeared; refusing regeneration")
+        if not self._task_mode():
+            raise PlanError("Task breakdown is disabled")
+        if (git(self.repo_root, "rev-parse", "HEAD") != self.state["base_commit"]
+                or git(self.repo_root, "status", "--porcelain")):
+            raise PlanError("Create a clean, committed baseline before capturing the quality contract")
+        policy = self.repo_root / ".ssdlc" / "quality-contract.json"
+        if policy.exists():
+            contract = json.loads(policy.read_text())
+            contract["base_commit"] = self.state["base_commit"]
+            contract["baseline"] = []
+        else:
+            sources = []
+            standards = []
+            candidates = [self.repo_root / name for name in ("AGENTS.md", ".editorconfig", "pyproject.toml", "package.json", "ruff.toml", ".ruff.toml", "mypy.ini", "pytest.ini")]
+            candidates += sorted((self.repo_root / ".ssdlc" / "standards").glob("*.md"))
+            for index, path in enumerate(p for p in candidates if p.is_file()):
+                relative = str(path.relative_to(self.repo_root))
+                confined(self.repo_root, relative, protect=False)
+                source_id = f"SOURCE-{index + 1}"
+                sources.append({"source_id": source_id, "path": relative, "sha256": sha256_file(path)})
+                standards.append({"standard_id": f"STD-{index + 1}", "description": path.read_text(),
+                                  "source_refs": [source_id], "scope": ["*"]})
+            checks = []
+            test_files = list((self.repo_root / "tests").rglob("test_*.py"))
+            if test_files:
+                pytest_style = any(re.search(r"^def test_|^import pytest|^from pytest", p.read_text(), re.M) for p in test_files)
+                argv = ["python3", "-m", "pytest", "tests"] if pytest_style else ["python3", "-m", "unittest", "discover", "-s", "tests"]
+                checks.append({"check_id": "CHECK-TESTS", "argv": argv, "cwd": ".", "timeout_sec": 300, "kind": "test", "required": True})
+            package = self.repo_root / "package.json"
+            if package.exists():
+                scripts = json.loads(package.read_text()).get("scripts", {})
+                for script, kind in (("test", "test"), ("lint", "lint"), ("typecheck", "types")):
+                    if script in scripts:
+                        checks.append({"check_id": f"CHECK-NPM-{script.upper()}", "argv": ["npm", "run", script], "cwd": ".", "timeout_sec": 300, "kind": kind, "required": True})
+            pyproject = self._read_optional(self.repo_root / "pyproject.toml", "")
+            for marker, name, argv, kind in (
+                ("[tool.ruff", "RUFF", ["python3", "-m", "ruff", "check", "."], "lint"),
+                ("[tool.mypy", "MYPY", ["python3", "-m", "mypy", "."], "types"),
+            ):
+                if marker in pyproject:
+                    checks.append({"check_id": f"CHECK-{name}", "argv": argv, "cwd": ".", "timeout_sec": 300, "kind": kind, "required": True})
+            if not checks:
+                raise PlanError("No project checks discovered. Configure .ssdlc/quality-contract.json before enabling task breakdown")
+            contract = {"schema_version": "1.0", "contract_revision": 1, "base_commit": self.state["base_commit"],
+                        "sources": sources, "standards": standards, "checks": checks, "baseline": [],
+                        "limitations": ["Automatic discovery covers Python tests, configured Ruff/Mypy and npm test/lint/typecheck; provide an explicit contract for other tools."], "exceptions": []}
+        validate_document("quality-contract", contract)
+        baseline_dir = self.dir_recon / "baseline"
+        baseline_dir.mkdir(exist_ok=True)
+        for check in contract["checks"]:
+            self.check_budget_circuit_breaker()
+            cwd = confined(self.repo_root, check["cwd"])
+            out, err, rc = EngineRunner.run_sandboxed_cmd(check["argv"], cwd, check["timeout_sec"])
+            log = baseline_dir / f"{check['check_id']}.log"
+            log.write_text(out + "\n" + err)
+            contract["baseline"].append({"check_id": check["check_id"], "exit_code": rc,
+                                         "log_ref": str(log.relative_to(self.ssdlc_root)), "sha256": sha256_file(log)})
+            if rc or re.search(r"Ran 0 tests\b|\bno tests ran\b|\bcollected 0 items\b", out + err):
+                raise PlanError(f"Baseline check {check['check_id']} failed or ran no tests; inspect {log}")
+        atomic_json(target, contract)
+        self.record_artifact("00-recon/quality-contract.json", target)
+        return contract
+
+    def _ensure_task_plan(self) -> Dict[str, Any]:
+        self.state["task_breakdown"] = True
+        self._save_state()
+        quality = self._ensure_quality_contract()
+        plan_path = self.dir_design / "plan.json"
+        requirements = (self.dir_po / "requirements.md").read_text()
+        validator = TaskPlanValidator(self.repo_root, requirements, quality, self.ssdlc_root)
+        if plan_path.exists():
+            meta = self.state.get("artifacts", {}).get("02-design/plan.json")
+            if not meta or sha256_file(plan_path) != meta["sha256"]:
+                raise PlanError("Task plan is unregistered or changed; explicit migration required")
+            plan = json.loads(plan_path.read_text())
+            if plan["ticket_id"] != self.ticket_id or plan["base_commit"] != self.state["base_commit"]:
+                raise PlanError("Registered plan does not match this ticket and base commit")
+            validator.validate(plan)
+            return plan
+        if "02-design/plan.json" in self.state.get("artifacts", {}):
+            raise PlanError("Registered task plan disappeared; refusing regeneration")
+        engine, model, effort, _ = SquadDispatcher.dispatch_role(
+            "02-design-arch", self.state.get("risk_tier", "M"), self.state.get("dev_profile", "ALGORITHMIC")
+        )
+        context = {"requirements": requirements,
+                   "adr": self._read_optional(self.dir_design / "adr.md", "Tier S: lightweight plan"),
+                   "threat_model": self._read_optional(self.dir_design / "threat-model.md", "See SEC requirements"),
+                   "quality_contract": quality, "repo_context": self._gather_repo_context(),
+                   "ticket_id": self.ticket_id, "base_commit": self.state["base_commit"]}
+        schema = (Path(__file__).parent / "schemas" / "plan.schema.json").read_text()
+        prompt = ("Produce only a JSON task plan matching this schema. Use exact literal file paths, cover EVERY AC and SEC, "
+                  "and reference all required quality checks and applicable standards. Each requirement must map to executable checks. "
+                  "Use kind=task and automated verification only: this bootstrap has no subgoal or review_only engine. "
+                  "Preserve the supplied base_commit, ticket_id and quality_contract_ref. Do not reduce scope or security constraints.\n" + schema)
+        t0 = time.time()
+        out, cost, tin, tout, trace = EngineRunner.invoke_role(
+            engine, model, prompt, json.dumps(context, indent=2), self.repo_root,
+            self.project_id, self.ticket_id, "02-design-task-plan", reasoning_effort=effort,
+        )
+        self.record_ledger(CostAndTelemetryEntry("02-design-task-plan", "Task Planner", engine, model, "GENERATED", time.time() - t0, cost, tin, tout, trace, effort))
+        self.check_budget_circuit_breaker()
+        raw_plan = self.dir_design / "task-plan-candidate.txt"
+        raw_plan.write_text(out)
+        self.record_artifact("02-design/task-plan-candidate.txt", raw_plan)
+        candidate = out.strip()
+        if candidate.startswith("```json\n") and candidate.endswith("```"):
+            candidate = candidate[len("```json\n"):-3].strip()
+        try:
+            plan = json.loads(candidate)
+            validator.validate(plan)
+            if plan["ticket_id"] != self.ticket_id or plan["base_commit"] != self.state["base_commit"]:
+                raise PlanError("Planner changed ticket identity or base_commit")
+        except (ValueError, PlanError) as exc:
+            self.record_gate("TASK_PLAN_GATE", False, str(exc))
+            raise PlanError(f"Invalid generated plan; inspect {raw_plan}: {exc}") from exc
+        rev_engine, rev_model, rev_effort, _ = SquadDispatcher.dispatch_role(
+            "02-design-sec", self.state.get("risk_tier", "M"), self.state.get("dev_profile", "ALGORITHMIC")
+        )
+        if not model or not rev_model or rev_model.split("/")[-1] == model.split("/")[-1]:
+            raise PlanError("Task plan needs an independent reviewer")
+        t0 = time.time()
+        review, cost, tin, tout, trace = EngineRunner.invoke_role(
+            rev_engine, rev_model,
+            "Review decomposition, requirement/check coverage and project conventions. Challenge missing scenarios and assumptions. "
+            "End with exactly TASK_PLAN_STATUS: APPROVED or TASK_PLAN_STATUS: REVISION_REQUIRED.",
+            json.dumps({"context": context, "plan": plan}), self.repo_root,
+            self.project_id, self.ticket_id, "02-design-task-plan-review", reasoning_effort=rev_effort,
+        )
+        report = self.dir_design / "task-plan-review.md"
+        report.write_text(review)
+        self.record_artifact("02-design/task-plan-review.md", report)
+        self.record_ledger(CostAndTelemetryEntry("02-design-task-plan-review", "Plan Reviewer", rev_engine, rev_model, "REVIEWED", time.time() - t0, cost, tin, tout, trace, rev_effort))
+        self.check_budget_circuit_breaker()
+        approved = review.strip().endswith("TASK_PLAN_STATUS: APPROVED")
+        self.record_gate("TASK_PLAN_GATE", approved, "Schema, DAG, traceability and independent semantic review")
+        if not approved:
+            raise PlanError("Task plan requires revision; code execution has not started")
+        atomic_json(plan_path, plan)
+        self.record_artifact("02-design/plan.json", plan_path)
+        return plan
+
+    def _run_task_development(self, feedback: str = "") -> Tuple[Path, List[str]]:
+        plan = self._ensure_task_plan()
+        quality = json.loads((self.dir_recon / "quality-contract.json").read_text())
+        wt = self._ensure_worktree()
+        context = {name: self._read_optional(self.ssdlc_root / name) for name in (
+            "01-po/requirements.md", "02-design/adr.md", "02-design/threat-model.md",
+        )}
+        validator = TaskPlanValidator(self.repo_root, context["01-po/requirements.md"], quality, self.ssdlc_root)
+        ordered = validator.validate(plan)
+        protected = {name: dict(meta) for name, meta in self.state.get("artifacts", {}).items()
+                     if name.startswith(("00-recon/", "01-po/", "02-design/"))}
+        def guard():
+            validator.validate(plan)
+            for name, meta in protected.items():
+                path = self.ssdlc_root / meta["path"]
+                if not path.is_file() or sha256_file(path) != meta["sha256"]:
+                    raise TaskError(f"Protected artifact changed or disappeared: {name}")
+        def develop(task, attempt, prompt):
+            engine, model, effort, reason = SquadDispatcher.dispatch_role(
+                "03-dev", self.state.get("risk_tier", "M"), task["profile"], attempt=attempt,
+            )
+            t0 = time.time()
+            use_or = os.environ.get("SSDLC_DEV_USE_OPENROUTER", "false").lower() == "true"
+            cost, tin, tout = 0.0, 0, 0
+            if engine == "claude":
+                tier_budget = {"S": 1.0, "M": 2.5, "L": 8.0}.get(self.state.get("risk_tier", "M"), 2.5)
+                dev_budget = float(os.environ.get("SSDLC_DEV_BUDGET_USD") or tier_budget)
+                out, rc, cost, tin, tout = EngineRunner.run_claude(
+                    prompt, cwd=wt, read_only=False, use_openrouter=use_or,
+                    writable_worktree=wt, model=model, reasoning_effort=effort,
+                    max_budget_usd=dev_budget,
+                )
+            elif engine == "codex":
+                out, rc = EngineRunner.run_codex(
+                    prompt, cwd=wt, sandbox="workspace-write", model=model,
+                    reasoning_effort=effort, use_openrouter=use_or, writable_worktree=wt,
+                )
+            else:
+                raise TaskError(f"Unsupported bootstrap developer engine: {engine}")
+            self.record_ledger(CostAndTelemetryEntry(
+                f"03-dev-{task['task_id']}-a{attempt}", "Task Developer", engine, model,
+                "GENERATED" if rc == 0 else f"RC_{rc}", time.time() - t0, cost, tin, tout,
+                f"{self.project_id}:{self.ticket_id}:{task['task_id']}", effort,
+            ))
+            return {"output": out, "exit_code": rc, "engine": engine, "model": model, "effort": effort, "reason": reason}
+        scheduler = TaskScheduler(
+            wt, self.dir_dev / "tasks", plan, quality, context, develop,
+            EngineRunner.run_sandboxed_cmd, guard, self.check_budget_circuit_breaker,
+            max_attempts=int(os.environ.get("SSDLC_MAX_DEV_RETRIES", "3")),
+        )
+        self.state["current_phase"] = "03-dev"
+        self._save_state()
+        result = scheduler.run(ordered, feedback)
+        self.state["tasks_status"] = result["tasks"]
+        self.state["task_verified_head"] = result["expected_head"]
+        diff = self.dir_dev / "implementation.diff"
+        diff.write_text(git(wt, "diff", "--binary", self.state["base_commit"], "HEAD") + "\n")
+        changed = git(wt, "diff", "--name-only", self.state["base_commit"], "HEAD").splitlines()
+        specialists = set(self.state.get("specialists_triggered", []))
+        for path in changed:
+            lower = path.lower()
+            if any(k in lower for k in ("migration", "schema", "prisma", "alembic", ".sql", "models.py")):
+                specialists.add("DB_MIGRATION_AND_PRIVACY_SPECIALIST")
+            if any(k in lower for k in ("package.json", "lock", "pyproject.toml", "requirements", "auth", "crypto", "jwt", "oauth")):
+                specialists.add("APPSEC_SUPPLY_CHAIN_REDTEAM")
+            if any(k in lower for k in ("async", "worker", "queue", "cache", "pool", "concurrent")):
+                specialists.add("PERF_AND_CONCURRENCY_SRE")
+        self.state["specialists_triggered"] = sorted(specialists)
+        self._save_state()
+        self.record_artifact("03-dev/implementation.diff", diff)
+        self.record_artifact("03-dev/tasks-state.json", scheduler.journal.snapshot)
+        self.record_artifact("03-dev/task-journal.jsonl", scheduler.journal.path)
+        self.record_gate("TASK_EXECUTION_GATE", True, f"{len(ordered)} tasks locally verified; global review/QA still required")
+        return diff, changed
 
     def _load_or_init_state(self) -> Dict[str, Any]:
         if self.state_file.exists():
@@ -1278,9 +1538,7 @@ class SSDLCOrchestrator:
         if state is not None:
             self.state = state
         self.state["updated_at"] = utc_now()
-        self.state_file.write_text(
-            json.dumps(self.state, indent=2), encoding="utf-8"
-        )
+        atomic_json(self.state_file, self.state)
 
     def record_artifact(self, rel_name: str, path: Path) -> None:
         if path.exists():
@@ -1461,7 +1719,7 @@ class SSDLCOrchestrator:
         recon_text = (self.dir_recon / "context-and-blast-radius.md").read_text(encoding="utf-8")
 
         ui_nfr_prompt = ""
-        if dev_profile == "FRONTEND_UI":
+        if dev_profile == "FRONTEND_UI" and not self._task_mode():
             ui_nfr_prompt = (
                 "\n\n### MANDATORY FRONTEND / MOBILE NON-FUNCTIONAL REQUIREMENTS:\n"
                 "- NFR-DESIGN-SYSTEM: Every UI element MUST strictly use the living design tokens from DESIGN_SYSTEM.md (space.*, shape.*, type.*, useTheme()). Zero hardcoded hex colors or arbitrary spacing numbers permitted.\n"
@@ -1566,7 +1824,7 @@ class SSDLCOrchestrator:
             sec_effort = SquadDispatcher.resolve_reasoning_effort("02-design-sec", risk_tier, attempt=rnd)
             print(f"    -> Round {rnd}/{max_rounds}: Architect ({arch_engine}:{arch_model}, reasoning={arch_effort}) proposing ADR...")
             ui_arch_rules = ""
-            if dev_profile == "FRONTEND_UI":
+            if dev_profile == "FRONTEND_UI" and not self._task_mode():
                 ui_arch_rules = (
                     "\nUI/UX ARCHITECTURE & DESIGN SYSTEM RULES:\n"
                     "- ZERO DRIFT: Specify exact Design System tokens (import { space, shape, type, useTheme } from '@/theme/tokens').\n"
@@ -1687,9 +1945,11 @@ class SSDLCOrchestrator:
         self.record_artifact("02-design/pair-dialogue.md", dlg_path)
         self.record_gate(
             "PAIR_DESIGN_GATE",
-            True,
+            approved,
             f"Completed in {rnd} round(s) (explicit approval={approved}).",
         )
+        if not approved:
+            raise RuntimeError("Pair design did not receive explicit approval")
         return adr_path, tm_path
 
     # ------------------------------------------------------------------
@@ -1715,7 +1975,7 @@ class SSDLCOrchestrator:
         if chk.returncode == 0:
             cmd = ["git", "worktree", "add", str(self.worktree_dir), branch]
         else:
-            cmd = ["git", "worktree", "add", "-b", branch, str(self.worktree_dir), "HEAD"]
+            cmd = ["git", "worktree", "add", "-b", branch, str(self.worktree_dir), self.state["base_commit"]]
         proc = subprocess.run(cmd, cwd=str(self.repo_root), capture_output=True, text=True)
         if proc.returncode != 0:
             raise RuntimeError(f"Failed to create git worktree: {proc.stderr}")
@@ -1726,6 +1986,11 @@ class SSDLCOrchestrator:
         return path.read_text(encoding="utf-8") if path.exists() else fallback
 
     def run_phase_dev(self, feedback: str = "", attempt: int = 1) -> Tuple[Path, List[str]]:
+        if self._task_mode():
+            return self._run_task_development(feedback)
+        return self._run_phase_dev_legacy(feedback, attempt)
+
+    def _run_phase_dev_legacy(self, feedback: str = "", attempt: int = 1) -> Tuple[Path, List[str]]:
         risk_tier = self.state.get("risk_tier", "M")
         dev_profile = self.state.get("dev_profile", "ALGORITHMIC")
         dev_engine, dev_model, dev_effort, dev_reason = SquadDispatcher.dispatch_role(
@@ -1930,6 +2195,14 @@ class SSDLCOrchestrator:
                 "- Component States: Verify Loading, Empty, and Error states are implemented.\n"
             )
 
+        if self._task_mode():
+            if len(diff_text) > 60000:
+                raise TaskError("Bootstrap review cannot truncate the cumulative diff; split this ticket")
+            ui_review_rules = (
+                "\nPROJECT QUALITY CONTRACT (apply the actual project rules, including test/config changes):\n"
+                + (self.dir_recon / "quality-contract.json").read_text()
+                + "\nCheck missing scenarios and task interactions before delivery.\n"
+            )
         review_engine = os.environ.get("SSDLC_REVIEW_ENGINE", "openrouter")
 
         sys_prompt = (
@@ -2491,7 +2764,7 @@ To **REJECT** and send feedback back to the team:
         self.record_artifact("EVIDENCE_PACK.md", pack_path)
         print(f"    [OK] Evidence Pack ready at: {pack_path.relative_to(self.repo_root)}")
 
-        if self.remote_sync.enabled:
+        if self.remote_sync.enabled and (not self._task_mode() or ready_for_signoff):
             wt = self.worktree_dir
             branch = self.state.get("dev_branch", f"ssdlc/{self.ticket_id}")
             base_branch = "main"
@@ -2507,7 +2780,9 @@ To **REJECT** and send feedback back to the team:
             except Exception:
                 pass
 
-            if wt.exists():
+            if self._task_mode() and (git(wt, "status", "--porcelain") or self._get_head_sha(wt) != self.state.get("task_verified_head")):
+                raise TaskError("Refusing to publish changes outside verified checkpoints")
+            if wt.exists() and not self._task_mode():
                 subprocess.run(["git", "add", "-A"], cwd=str(wt), capture_output=True)
                 status_chk = subprocess.run(
                     ["git", "status", "--porcelain"],
@@ -2588,8 +2863,7 @@ To **REJECT** and send feedback back to the team:
             self.record_gate("BUDGET_CAP_GATE", False, msg)
             self.state["status"] = "HALTED_BUDGET_EXCEEDED"
             self._save_state()
-            self.run_phase_supervisor()
-            raise RuntimeError(msg)
+            raise TaskError(msg)
 
     def run_pipeline(
         self,
@@ -2598,6 +2872,34 @@ To **REJECT** and send feedback back to the team:
         tier: str = "auto",
         from_phase: str = "00-recon",
     ) -> Path:
+        with ticket_lock(self.ssdlc_root / "ticket.lock"):
+            # Reload state after acquiring the lock, not from a potentially stale constructor.
+            self.state = self._load_or_init_state()
+            if self._task_mode():
+                self.state["task_breakdown"] = True
+                self._save_state()
+                if os.environ.get("SSDLC_EXECUTION_MODE", "docker") == "docker" and not EngineRunner._should_spawn_role_container():
+                    raise TaskError("Task mode in Docker requires role-container isolation. Run the controller on the host with the runner image available, or explicitly select local mode.")
+                self._ensure_quality_contract()
+            try:
+                return self._run_pipeline(goal, test_cmd, tier, from_phase)
+            except TaskError as exc:
+                self.record_gate("TASK_EXECUTION_GATE", False, str(exc))
+                self.compile_evidence_pack(ready_for_signoff=False)
+                raise
+
+    def _run_pipeline(
+        self,
+        goal: str,
+        test_cmd: Optional[str] = None,
+        tier: str = "auto",
+        from_phase: str = "00-recon",
+    ) -> Path:
+        if self._task_mode():
+            if from_phase not in ("00-recon", "03-dev"):
+                raise TaskError("Bootstrap task mode resumes from 03-dev; skipping later gates requires Step 3 attestations")
+            if from_phase == "00-recon" and (self.dir_dev / "tasks" / "task-journal.jsonl").exists():
+                raise TaskError("Existing task execution must resume with --from-phase 03-dev to preserve its approved inputs")
         start_idx = self.PHASE_ORDER.index(from_phase) if from_phase in self.PHASE_ORDER else 0
 
         if start_idx <= self.PHASE_ORDER.index("00-recon"):
@@ -2621,6 +2923,9 @@ To **REJECT** and send feedback back to the team:
             self.check_budget_circuit_breaker()
         else:
             print("    [RESUME] Skipping 02-design")
+
+        if self._task_mode():
+            self._ensure_task_plan()
 
         max_retries = int(os.environ.get("SSDLC_MAX_DEV_RETRIES", "3"))
         feedback = ""
@@ -2684,14 +2989,32 @@ To **REJECT** and send feedback back to the team:
                 self.run_phase_docs()
                 self.check_budget_circuit_breaker()
 
+        if self._task_mode() and passed_all:
+            if (self._get_head_sha(self.worktree_dir) != self.state.get("task_verified_head")
+                    or git(self.worktree_dir, "status", "--porcelain")):
+                raise TaskError("Code changed after task verification; global gates cannot authorize delivery")
         return self.compile_evidence_pack(ready_for_signoff=passed_all)
 
     def approve_and_merge(self) -> None:
+        with ticket_lock(self.ssdlc_root / "ticket.lock"):
+            self.state = self._load_or_init_state()
+            self._approve_and_merge()
+
+    def _approve_and_merge(self) -> None:
+        if self._task_mode():
+            if self.state.get("status") != "AWAITING_SUPERVISOR_SIGNOFF":
+                raise TaskError("Task ticket has not passed the global gates")
+            if (self._get_head_sha(self.worktree_dir) != self.state.get("task_verified_head")
+                    or git(self.worktree_dir, "status", "--porcelain")):
+                raise TaskError("Task worktree no longer matches the verified checkpoint")
+            if (git(self.repo_root, "rev-parse", "HEAD") != self.state["base_commit"]
+                    or git(self.repo_root, "status", "--porcelain")):
+                raise TaskError("Bootstrap approval requires a clean unchanged target; advanced-target integration belongs to Step 3")
         if self.state.get("status") not in ("AWAITING_SUPERVISOR_SIGNOFF", "ESCALATED_TO_SUPERVISOR"):
             raise RuntimeError(f"Ticket {self.ticket_id} is in status {self.state.get('status')}, cannot approve.")
         wt = self.worktree_dir
         branch = self.state["dev_branch"]
-        if wt.exists():
+        if wt.exists() and not self._task_mode():
             subprocess.run(["git", "add", "-A"], cwd=str(wt), check=True)
             subprocess.run(
                 ["git", "commit", "-m", f"feat({self.ticket_id}): SSDLC verified implementation"],
@@ -2703,16 +3026,10 @@ To **REJECT** and send feedback back to the team:
             (self.dir_dev / "commit-sha.txt").write_text(sha + "\n", encoding="utf-8")
             self.record_artifact("03-dev/commit-sha.txt", self.dir_dev / "commit-sha.txt")
 
-        # Clean any local ticket evidence in self.ssdlc_root (except worktree) so git merge does not collide
-        if self.ssdlc_root.exists():
-            for item in self.ssdlc_root.iterdir():
-                if item.name != "worktree":
-                    if item.is_dir():
-                        shutil.rmtree(item, ignore_errors=True)
-                    else:
-                        item.unlink(missing_ok=True)
-
-        subprocess.run(["git", "merge", "--no-ff", branch, "-m", f"Merge SSDLC verified branch {branch}"], cwd=str(self.repo_root), check=True)
+        if self._task_mode():
+            git(self.repo_root, "merge", "--ff-only", self.state["task_verified_head"])
+        else:
+            subprocess.run(["git", "merge", "--no-ff", branch, "-m", f"Merge SSDLC verified branch {branch}"], cwd=str(self.repo_root), check=True)
 
         # Compound Knowledge: Auto-register any new components into .ssdlc/standards/COMPONENT_CATALOG.md
         standards_catalog = self.repo_root / ".ssdlc" / "standards" / "COMPONENT_CATALOG.md"
@@ -2774,23 +3091,25 @@ def cmd_doctor(repo: Path) -> int:
             codex_status = "EXISTS"
     print(f"      * CODEX_SUBSCRIPTION : {codex_status}")
 
-    # Check Claude Subscription
-    claude_json = Path(iso['claude_home']) / ".claude.json"
-    if not claude_json.exists():
-        claude_json = Path.home() / ".claude.json"
+    # Account metadata alone is not proof of an authenticated Claude CLI.
+    claude_cred = Path(iso['claude_home']) / ".credentials.json"
     claude_status = "UNSET"
-    if claude_json.exists():
-        try:
-            cld = json.loads(claude_json.read_text(encoding="utf-8"))
-            acct = cld.get("oauthAccount") or {}
-            sub = acct.get("subscriptionType") or acct.get("organizationType") or "active"
-            email = acct.get("emailAddress", "")
-            claude_status = f"ACTIVE ({sub} / {email})" if email else "EXISTS"
-        except Exception as e:
-            claude_status = f"EXISTS (err: {e})"
-    elif os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+    if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
         claude_status = f"OAUTH_TOKEN ({fingerprint_secret(os.environ['CLAUDE_CODE_OAUTH_TOKEN'])})"
+    elif claude_cred.is_file():
+        try:
+            credentials = json.loads(claude_cred.read_text(encoding="utf-8"))
+            if (credentials.get("claudeAiOauth") or {}).get("accessToken"):
+                claude_status = "CREDENTIALS_PRESENT (validity unverified)"
+            else:
+                claude_status = "CREDENTIALS_INVALID"
+        except (OSError, ValueError):
+            claude_status = "CREDENTIALS_INVALID"
     print(f"      * CLAUDE_SUBSCRIPTION: {claude_status}")
+
+    agy_token = Path.home() / ".gemini" / "antigravity-cli" / "antigravity-oauth-token"
+    agy_status = "AUTH_PRESENT (plan unverified)" if agy_token.is_file() else "UNSET"
+    print(f"      * AGY_SUBSCRIPTION   : {agy_status}")
 
     remote_sync = RemoteSyncManager(repo, "doctor")
     token_status = "EXISTS" if remote_sync.token else "UNSET"
@@ -2798,7 +3117,26 @@ def cmd_doctor(repo: Path) -> int:
     print(f"      * Remote URL        : {remote_sync.remote_url or 'NONE'}")
     print(f"      * Provider          : {remote_sync.provider} ({remote_sync.owner}/{remote_sync.repo if remote_sync.owner else '-'})")
     print(f"      * API Token         : {token_status}")
-    print(f"      * Sync Remote Flag  : {'ENABLED' if remote_sync.enabled else 'DISABLED (pass --sync-remote or SSDLC_SYNC_REMOTE=true)'}")
+    print(f"      * Sync Remote Flag  : {'ENABLED' if remote_sync.enabled else 'DISABLED'} ({remote_sync.mode})")
+    if remote_sync.provider == "github" and remote_sync.enabled and not remote_sync.token:
+        gh_path = shutil.which("gh")
+        if gh_path:
+            try:
+                gh_auth = subprocess.run(
+                    [gh_path, "auth", "token"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                    check=False,
+                )
+                if gh_auth.returncode == 0:
+                    print('      * Action            : gh is authenticated; run export GITHUB_TOKEN="$(gh auth token)" before ./ssdlc run. Verify the token can access this repository.')
+                else:
+                    print('      * Action            : Run gh auth login, then export GITHUB_TOKEN="$(gh auth token)" before ./ssdlc run. Verify the token can access this repository.')
+            except (OSError, subprocess.TimeoutExpired):
+                print("      * Action            : Unable to check gh authentication; set GITHUB_TOKEN before ./ssdlc run and verify repository access.")
+        else:
+            print("      * Action            : Set GITHUB_TOKEN before ./ssdlc run and verify repository access.")
     return 0
 
 
@@ -2821,12 +3159,11 @@ def main() -> int:
         choices=SSDLCOrchestrator.PHASE_ORDER,
         help="Resume an interrupted ticket starting from a specific phase (default: 00-recon)",
     )
-    p_run.add_argument(
-        "--sync-remote",
-        action="store_true",
-        default=False,
-        help="Enable automatic remote Git push and Issue/PR synchronization",
-    )
+    run_sync = p_run.add_mutually_exclusive_group()
+    run_sync.add_argument("--sync-remote", dest="sync_remote", action="store_true", default=None,
+                          help="Enable remote synchronization")
+    run_sync.add_argument("--no-sync-remote", dest="sync_remote", action="store_false",
+                          help="Disable remote synchronization")
     p_run.add_argument(
         "--issue",
         type=int,
@@ -2837,24 +3174,22 @@ def main() -> int:
     p_app = sub.add_parser("approve", help="Supervisor sign-off: commit worktree changes, merge, and prune worktree")
     p_app.add_argument("ticket", help="Ticket ID")
     p_app.add_argument("--repo", "-r", default=".", help="Path to Git repository")
-    p_app.add_argument(
-        "--sync-remote",
-        action="store_true",
-        default=False,
-        help="Push merged branch to remote origin",
-    )
+    app_sync = p_app.add_mutually_exclusive_group()
+    app_sync.add_argument("--sync-remote", dest="sync_remote", action="store_true", default=None,
+                          help="Push merged branch to remote origin")
+    app_sync.add_argument("--no-sync-remote", dest="sync_remote", action="store_false",
+                          help="Do not push merged branch")
 
     p_rej = sub.add_parser("reject", help="Supervisor rejection: bounce back to Dev with feedback")
     p_rej.add_argument("ticket", help="Ticket ID")
     p_rej.add_argument("--reason", required=True, help="Supervisor rejection feedback")
     p_rej.add_argument("--repo", "-r", default=".", help="Path to Git repository")
     p_rej.add_argument("--test-cmd", default=None, help="Deterministic test command")
-    p_rej.add_argument(
-        "--sync-remote",
-        action="store_true",
-        default=False,
-        help="Enable automatic remote synchronization on rejection cycle",
-    )
+    rej_sync = p_rej.add_mutually_exclusive_group()
+    rej_sync.add_argument("--sync-remote", dest="sync_remote", action="store_true", default=None,
+                          help="Enable remote synchronization on rejection cycle")
+    rej_sync.add_argument("--no-sync-remote", dest="sync_remote", action="store_false",
+                          help="Disable remote synchronization on rejection cycle")
 
     args = parser.parse_args()
     repo_path = Path(getattr(args, "repo", ".")).resolve()
@@ -2863,7 +3198,7 @@ def main() -> int:
         return cmd_doctor(repo_path)
 
     if args.subcommand == "run":
-        sync_remote = getattr(args, "sync_remote", False)
+        sync_remote = args.sync_remote
         issue_id = getattr(args, "issue", None)
         orch = SSDLCOrchestrator(repo_path, args.ticket, sync_remote=sync_remote, issue_id=issue_id)
         effective_tier = args.tier or os.environ.get("SSDLC_DEFAULT_TIER", "auto")
@@ -2876,13 +3211,13 @@ def main() -> int:
         return 0
 
     if args.subcommand == "approve":
-        sync_remote = getattr(args, "sync_remote", False)
+        sync_remote = args.sync_remote
         orch = SSDLCOrchestrator(repo_path, args.ticket, sync_remote=sync_remote)
         orch.approve_and_merge()
         return 0
 
     if args.subcommand == "reject":
-        sync_remote = getattr(args, "sync_remote", False)
+        sync_remote = args.sync_remote
         orch = SSDLCOrchestrator(repo_path, args.ticket, sync_remote=sync_remote)
         orch.record_gate("SUPERVISOR_SIGNOFF", False, f"Rejected by supervisor: {args.reason}")
         orch.run_phase_dev(feedback=f"SUPERVISOR REJECTION: {args.reason}", attempt=99)

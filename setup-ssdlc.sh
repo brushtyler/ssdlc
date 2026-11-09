@@ -40,6 +40,7 @@ Commands:
   --init-project <DIR> [OPTIONS]  Initialize isolated SSDLC config & Docker runner inside project <DIR>
       --id <PROJECT_ID>           Unique project identifier for OpenRouter & state telemetry (default: folder name)
       --mode <docker|local>       Default execution mode for the project (default: docker)
+      --sync-remote <auto|true|false>  Remote sync policy (default: auto, based on origin)
   --versions                      Display current versions of codex, claude, agy, uv, and docker
   --help, -h                      Show this help message
 
@@ -63,6 +64,12 @@ EOF
 sync_or_update_tools() {
   log_info "Updating isolated CLI tools inside ${TOOLS_DIR} (host configs untouched)..."
   mkdir -p "${TOOLS_BIN}" "${TOOLS_NPM}/bin"
+
+  # Python dependencies stay inside the shared toolkit, never in host site-packages.
+  if [ ! -x "${TOOLS_DIR}/python/bin/python3" ]; then
+    python3 -m venv "${TOOLS_DIR}/python"
+  fi
+  "${TOOLS_DIR}/python/bin/python3" -m pip install -r "${SSDLC_HOME}/requirements.txt"
 
   # 1. Sync or link host 'agy' and 'codex' as fallback if present on host
   if [ -x "${HOME}/.local/bin/agy" ]; then
@@ -92,7 +99,7 @@ sync_or_update_tools() {
       log_warn "npm install failed or partially completed."
     for bin_name in codex claude; do
       if [ -x "${TOOLS_NPM}/bin/${bin_name}" ]; then
-        ln -sf "${TOOLS_NPM}/bin/${bin_name}" "${TOOLS_BIN}/${bin_name}"
+        ln -sf "../npm-global/bin/${bin_name}" "${TOOLS_BIN}/${bin_name}"
       fi
     done
   elif command -v docker >/dev/null 2>&1; then
@@ -102,8 +109,8 @@ sync_or_update_tools() {
       -e NPM_CONFIG_PREFIX="/opt/ssdlc/.tools/npm-global" \
       node:22-slim \
       bash -c "npm install -g @openai/codex@latest @anthropic-ai/claude-code@latest && \
-               ln -sf /opt/ssdlc/.tools/npm-global/bin/codex /opt/ssdlc/.tools/bin/codex && \
-               ln -sf /opt/ssdlc/.tools/npm-global/bin/claude /opt/ssdlc/.tools/bin/claude" || \
+               ln -sf ../npm-global/bin/codex /opt/ssdlc/.tools/bin/codex && \
+               ln -sf ../npm-global/bin/claude /opt/ssdlc/.tools/bin/claude" || \
       log_warn "Docker-based npm tool update skipped or failed."
   fi
 
@@ -163,6 +170,8 @@ init_project() {
   local proj_dir="$1"
   local proj_id="$2"
   local exec_mode="$3"
+  local sync_mode="$4"
+  local sync_mode_explicit="$5"
 
   mkdir -p "${proj_dir}"
   proj_dir="$(cd "${proj_dir}" && pwd)"
@@ -190,6 +199,7 @@ init_project() {
 
 export SSDLC_PROJECT_ID="${proj_id}"
 export SSDLC_EXECUTION_MODE="${exec_mode}"   # "docker" (recommended) or "local"
+export SSDLC_SYNC_REMOTE="${sync_mode}"  # auto detects GitHub/GitLab origin
 
 # --- Unique Project API Keys (for per-project billing & auditability) ---
 # export OPENROUTER_API_KEY="sk-or-v1-${proj_id}-..."
@@ -237,6 +247,7 @@ export SSDLC_DOCS_ENGINE="auto"
 export SSDLC_DOCS_MODEL=""
 
 export SSDLC_DEFAULT_TIER="auto"
+export SSDLC_ENABLE_TASK_BREAKDOWN="false"
 export SSDLC_MAX_DESIGN_ROUNDS=3
 export SSDLC_MAX_DEV_RETRIES=3
 
@@ -249,6 +260,15 @@ EOF
     log_ok "Created project config: ${env_file}"
   else
     log_ok "Preserved existing project config: ${env_file}"
+    if [ "${sync_mode_explicit}" = "true" ]; then
+      if grep -q '^export SSDLC_SYNC_REMOTE=' "${env_file}"; then
+        sed -i "s/^export SSDLC_SYNC_REMOTE=.*/export SSDLC_SYNC_REMOTE=\"${sync_mode}\"/" "${env_file}"
+      else
+        printf '\nexport SSDLC_SYNC_REMOTE="%s"\n' "${sync_mode}" >> "${env_file}"
+      fi
+    elif ! grep -q '^export SSDLC_SYNC_REMOTE=' "${env_file}"; then
+      printf '\nexport SSDLC_SYNC_REMOTE="auto"\n' >> "${env_file}"
+    fi
   fi
 
   # 2. Create isolated CODEX_HOME/config.toml inside <project>/.ssdlc/.runtime/codex_home
@@ -288,11 +308,19 @@ EOF
   # 2b. Initialize Living Standards Registry (<project>/.ssdlc/standards/)
   local proj_standards="${proj_ssdlc}/standards"
   mkdir -p "${proj_standards}"
+  local standards_profile="${SSDLC_STANDARDS_PROFILE:-general}"
+  case "${standards_profile}" in
+    general|yuna) ;;
+    *) log_err "Unsupported SSDLC_STANDARDS_PROFILE: ${standards_profile}"; return 1 ;;
+  esac
   if [ -d "${SSDLC_HOME}/standards" ]; then
     for std_template in "${SSDLC_HOME}/standards/"*.md; do
       [ -f "${std_template}" ] || continue
       local base_name
       base_name="$(basename "${std_template}")"
+      if [ "${standards_profile}" = "general" ] && [ "${base_name}" != "00-PROJECT_CONVENTIONS.md" ]; then
+        continue
+      fi
       if [ ! -f "${proj_standards}/${base_name}" ]; then
         cp "${std_template}" "${proj_standards}/${base_name}"
         log_ok "Created initial standard: ${proj_standards}/${base_name}"
@@ -415,7 +443,11 @@ export XDG_CACHE_HOME="\${PROJ_DIR}/.ssdlc/.runtime/cache"
 # orchestrator.py runs on the host as the trusted state machine and spawns
 # role-scoped Docker containers with kernel-enforced :ro mounts on .ssdlc/ specs/evidence
 # and :rw ONLY on the isolated ticket worktree during Phase 3 Dev.
-exec python3 "\${SSDLC_HOME}/orchestrator.py" "\$@" --repo "\${PROJ_DIR}"
+SSDLC_PYTHON="\${SSDLC_HOME}/.tools/python/bin/python3"
+if [ ! -x "\${SSDLC_PYTHON}" ]; then
+  SSDLC_PYTHON="python3"
+fi
+exec "\${SSDLC_PYTHON}" "\${SSDLC_HOME}/orchestrator.py" "\$@" --repo "\${PROJ_DIR}"
 EOF
   chmod +x "${wrapper}"
   log_ok "Created project CLI entrypoint: ${wrapper}"
@@ -453,6 +485,8 @@ ACTION=""
 PROJ_DIR=""
 PROJ_ID=""
 EXEC_MODE="docker"
+SYNC_MODE="auto"
+SYNC_MODE_EXPLICIT="false"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -489,6 +523,15 @@ while [ $# -gt 0 ]; do
       EXEC_MODE="${2:-docker}"
       shift 2
       ;;
+    --sync-remote)
+      SYNC_MODE="${2:-}"
+      if [[ ! "${SYNC_MODE}" =~ ^(auto|true|false)$ ]]; then
+        log_err "--sync-remote must be auto, true, or false."
+        exit 1
+      fi
+      SYNC_MODE_EXPLICIT="true"
+      shift 2
+      ;;
     --help|-h)
       usage
       exit 0
@@ -521,8 +564,7 @@ case "$ACTION" in
     show_versions
     ;;
   init-project)
-    chmod +x "${SSDLC_HOME}/orchestrator.py"
-    init_project "$PROJ_DIR" "$PROJ_ID" "$EXEC_MODE"
+    init_project "$PROJ_DIR" "$PROJ_ID" "$EXEC_MODE" "$SYNC_MODE" "$SYNC_MODE_EXPLICIT"
     ;;
   *)
     usage

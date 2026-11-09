@@ -1,0 +1,2 @@
+# Optional task-breakdown path; legacy orchestration remains dependency-free.
+jsonschema>=4.19,<5

@@ -1,0 +1,226 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "advisory-proposals",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "project_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+    },
+    "ticket_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+    },
+    "event_sequence": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "events_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "proposals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "level": {
+            "enum": [
+              "CODE",
+              "ARCHITECTURE",
+              "PRODUCT",
+              "SCOPE"
+            ]
+          },
+          "phase_origin": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source_task_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source_commit": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{40,64}$"
+          },
+          "source_artifact_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "uniqueItems": true
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "uniqueItems": true
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "scenario": {
+            "type": "string",
+            "minLength": 1
+          },
+          "observation": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_kind": {
+            "enum": [
+              "OBSERVED",
+              "HYPOTHESIS"
+            ]
+          },
+          "confidence": {
+            "enum": [
+              "LOW",
+              "MEDIUM",
+              "HIGH"
+            ]
+          },
+          "proposal": {
+            "type": "string",
+            "minLength": 1
+          },
+          "scope_classification": {
+            "const": "OPTIONAL_OUT_OF_SCOPE"
+          },
+          "classification_reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "impact": {
+            "enum": [
+              "LOW",
+              "MEDIUM",
+              "HIGH"
+            ]
+          },
+          "effort": {
+            "enum": [
+              "LOW",
+              "MEDIUM",
+              "HIGH"
+            ]
+          },
+          "priority_reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "actionable_goal": {
+            "type": "string",
+            "minLength": 1
+          },
+          "success_criteria": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "uniqueItems": true
+          },
+          "target_modules": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "uniqueItems": true
+          },
+          "fingerprint": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "enum": [
+              "PROPOSED",
+              "ACCEPTED",
+              "DEFERRED",
+              "REJECTED",
+              "OBSOLETE",
+              "PROMOTED_TO_FINDING",
+              "IMPLEMENTED"
+            ]
+          },
+          "linked_ticket_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 0,
+            "uniqueItems": true
+          },
+          "remote_issue_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 0,
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "id",
+          "level",
+          "phase_origin",
+          "source_task_id",
+          "source_commit",
+          "source_artifact_refs",
+          "evidence_refs",
+          "title",
+          "scenario",
+          "observation",
+          "evidence_kind",
+          "confidence",
+          "proposal",
+          "scope_classification",
+          "classification_reason",
+          "impact",
+          "effort",
+          "priority_reason",
+          "actionable_goal",
+          "success_criteria",
+          "target_modules",
+          "fingerprint",
+          "status",
+          "linked_ticket_ids",
+          "remote_issue_refs"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 0,
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "schema_version",
+    "project_id",
+    "ticket_id",
+    "event_sequence",
+    "events_sha256",
+    "proposals"
+  ],
+  "additionalProperties": false
+}

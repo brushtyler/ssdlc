@@ -114,7 +114,7 @@ You have two authentication options:
 claude auth login
 ```
 - Claude Code displays an authorization URL. Open it in your local browser, approve with your Claude subscription account, and copy the authorization code.
-- Paste the code at the terminal prompt. Claude Code permanently writes your credentials to: `~/.claude.json`.
+- Paste the code at the terminal prompt. Claude Code stores account metadata in `~/.claude.json` and OAuth credentials in `~/.claude/.credentials.json`. SSDLC copies the credentials into the project's isolated `CLAUDE_CONFIG_DIR`.
 
 **Option 2: Headless 1-Year Setup Token (Ideal for Headless CI/CD)**
 ```bash
@@ -135,13 +135,13 @@ To prevent having to reconfigure environment variables or copy keys into every n
 # /root/.ssdlc/global.env - Inherited automatically by every SSDLC project on this host
 export OPENROUTER_API_KEY="sk-or-v1-..."             # Fallback provider for non-dev phases
 export SSDLC_INHERIT_HOST_CODEX_AUTH="true"         # Automatically inherits ~/.codex/auth.json
-export SSDLC_INHERIT_HOST_CLAUDE_AUTH="true"        # Automatically inherits ~/.claude.json
+export SSDLC_INHERIT_HOST_CLAUDE_AUTH="true"        # Inherits ~/.claude/.credentials.json and account metadata
 export SSDLC_DEV_ENGINE="auto"                      # Routes to Codex/Claude automatically
 export SSDLC_MAX_REASONING_EFFORT="medium"          # Strict cap to prevent token explosion
 ```
 
 #### How Inheritance Works:
-1. **Zero Configuration for New Projects**: When initializing or running any project (`./setup-ssdlc.sh --init-project` or `./ssdlc run`), SSDLC automatically loads `~/.ssdlc/global.env` and copies the host credentials into the project's isolated runtime (`.ssdlc/.runtime/codex_home/` and `.ssdlc/.runtime/claude_home/`).
+1. **Zero Configuration for New Projects**: When initializing or running any project (`./setup-ssdlc.sh --init-project` or `./ssdlc run`), SSDLC automatically loads `~/.ssdlc/global.env` and copies the host credentials into the project's isolated runtime (`.ssdlc/.runtime/codex_home/` and `.ssdlc/.runtime/claude_home/`). The CLI binaries live under the SSDLC repository's `.tools/` directory; they are not installed as global host commands.
 2. **Project-Specific Overrides (Optional)**: If a specific project requires a dedicated API key (e.g. for client billing or independent auditing), set it in that project's `.ssdlc/project.env`. Local project variables strictly take precedence over host defaults.
 
 ---
@@ -223,17 +223,29 @@ export SSDLC_DOCS_MODEL="anthropic/claude-sonnet-4.5"
 
 ## Remote SCM & Issue Tracker Sync (`--sync-remote`)
 
-SSDLC includes native remote synchronization with **GitHub** and **GitLab**:
+SSDLC automatically enables remote synchronization when `origin` points to GitHub or GitLab. Set `SSDLC_SYNC_REMOTE=auto|true|false` in `.ssdlc/project.env`, or use `--sync-remote` / `--no-sync-remote` on `run`, `approve`, or `reject` to override it for one command. `auto` is the default for new and existing projects.
+
+### GitHub API access
+
+An SSH deploy key can push the branch, but creating Issues and Pull Requests requires a GitHub API token. SSDLC reads `GITHUB_TOKEN` or `GH_TOKEN` from its process environment; it does not read the `gh` CLI login automatically. If `gh` is authenticated, run these commands in the target repository before starting SSDLC:
+
+```bash
+gh auth status
+export GITHUB_TOKEN="$(gh auth token)"
+./ssdlc doctor
+```
+
+`doctor` reports whether SSDLC can see the token and suggests this command when `gh` is authenticated. A token being present does not prove it can write to this repository: the authenticated account and token must be allowed to create Issues and Pull Requests here. Check those permissions if GitHub returns 403 or 404. When a token is set, SSDLC also uses it for the branch push over HTTPS, so it needs repository write access for that operation; without a token, the push uses `origin` and can use the deploy key.
 
 1. **Issue Tracking (Phase 01 PO)**:
-   - When `--sync-remote` is active, the PO specification (Acceptance Criteria and Abuse Cases) is posted to a remote Issue.
+   - On GitHub, with an API token, the PO specification (Acceptance Criteria and Abuse Cases) is posted to a remote Issue.
    - If `--issue <number>` is passed, it attaches the specification as a comment to that issue.
 2. **Delivery & PR Creation (Phase 08 Supervisor)**:
    - Commits worktree changes to `ssdlc/<ticket-id>`.
    - Pushes the branch to `origin`.
-   - Opens a **Draft Pull Request** (or GitLab Merge Request) referencing the issue (`Closes #...`) and embeds the entire `EVIDENCE_PACK.md` into the description.
+   - On GitHub, with an API token, opens a **Draft Pull Request** referencing the issue (`Closes #...`) and embeds the entire `EVIDENCE_PACK.md` into the description. GitLab synchronization currently pushes branches only.
 3. **Approval & Merge Synchronization**:
-   - Running `./ssdlc approve <ticket> --sync-remote` pushes the merged target branch to `origin`.
+   - Running `./ssdlc approve <ticket>` pushes the merged target branch to `origin` when synchronization is enabled.
 
 ---
 
@@ -268,7 +280,7 @@ This creates the isolated `.tools/` directory and builds the shared base image `
 From the `ssdlc` directory, initialize your target project:
 
 ```bash
-./setup-ssdlc.sh --init-project /path/to/my-project --id my-project --mode docker
+./setup-ssdlc.sh --init-project /path/to/my-project --id my-project --mode docker --sync-remote auto
 ```
 
 This generates the following files **inside `/path/to/my-project/`**:
@@ -291,7 +303,7 @@ Add your OpenRouter key:
 export OPENROUTER_API_KEY="sk-or-v1-..."
 ```
 
-*(Optional: Set `export SSDLC_SYNC_REMOTE="true"` and `export GITHUB_TOKEN="ghp_..."` for GitHub synchronization).*
+*(`SSDLC_SYNC_REMOTE="auto"` is generated by default. Set `GITHUB_TOKEN` for GitHub Issue and Pull Request synchronization.)*
 
 ### Step 3: Run the Environment Doctor
 Verify that CLI tools, environment isolation, and API key fingerprints are ready:
@@ -310,7 +322,7 @@ Execute a ticket with your feature or bugfix goal:
   --tier auto
 ```
 
-To enable remote GitHub/GitLab synchronization:
+To force remote synchronization even when the remote is not recognized:
 ```bash
 ./ssdlc run \
   --ticket TKT-001-auth \
@@ -413,3 +425,91 @@ Host System
 ## License
 
 Apache-2.0
+
+## Task breakdown bootstrap (opt-in)
+
+The first implementation increment provides versioned JSON schemas in `schemas/`,
+`TaskPlanValidator`, and a sequential DAG executor in `ssdlc_tasks.py`. The controller
+captures a quality contract and baseline, requests a structured plan and independent
+plan review, then executes one task at a time with the existing model routing.
+
+Keep the executing SSDLC installation pinned to a reviewed version and use a separate
+checkout as the target when developing SSDLC itself. Start from a clean, committed
+baseline and pass a narrowly scoped goal. A filename alone does not supply its content
+to API-based roles.
+
+`--bootstrap` and `--update-tools` install Python requirements into `.tools/python/`.
+Generated wrappers use that interpreter when present. For an existing toolkit, an
+isolated environment can also be prepared directly:
+
+```bash
+python3 -m venv .tools/python
+.tools/python/bin/python3 -m pip install -r requirements.txt
+.tools/python/bin/python3 -m unittest discover -s tests -v
+```
+
+Enable the path explicitly in the target project's `.ssdlc/project.env`:
+
+```bash
+export SSDLC_ENABLE_TASK_BREAKDOWN="true"
+```
+
+New projects default to generic standards. The existing yuna templates require
+`SSDLC_STANDARDS_PROFILE=yuna` during initialization. Existing project standards are
+preserved; review project-specific rules already installed before enabling the feature.
+
+Quality discovery recognizes Python tests, Ruff/Mypy configured in `pyproject.toml`,
+and npm `test`, `lint` and `typecheck` scripts. For other tools, supply
+`.ssdlc/quality-contract.json` matching `schemas/quality-contract.schema.json`.
+The controller captures a ticket snapshot with a fresh baseline; every required check
+must pass and test suites must not be empty. Source paths and their SHA-256 values
+must describe the actual project standards. The baseline array may be empty in the
+input policy because it is populated during capture.
+
+The host controller needs a usable runner image in Docker mode. Verification
+containers mount source read-only, mask SSDLC runtime credentials, and use disposable
+scratch/cache directories. Explicit `SSDLC_EXECUTION_MODE=local` also isolates caches
+and removes AI authentication environment variables, but does not enforce filesystem
+isolation. It is suitable only for trusted code and controlled tests.
+
+Execution writes manifests, logs, diffs, `task-journal.jsonl` and `tasks-state.json`
+under `.ssdlc/<ticket>/03-dev/tasks/`. The journal is authoritative. Completed tasks
+are reused after input and evidence checks. Resume from development to preserve the
+approved requirements and plan:
+
+```bash
+./ssdlc run --ticket TKT-001 --goal "The original scoped goal" --from-phase 03-dev
+```
+
+A crash around a verified Git checkpoint can be reconciled without generating or
+committing the task twice. Interrupted dirty worktrees, unexpected HEAD changes,
+modified inputs or missing evidence stop with a diagnostic and preserve the work;
+there is no automatic reset of unexplained changes. Existing monolithic tickets need
+an explicit migration; the feature does not adopt their changes silently.
+
+This bootstrap requires strict file manifests and automated task checks. Runtime
+scope expansion, targeted review bounce and transitive invalidation, granular model
+routing, shared invocation/time budgets, subgoals and the advisory lifecycle remain
+subsequent increments. Advisory schemas and provenance validation are available;
+proposal collection, export and `--from-proposal` are not implemented yet. Global
+review, QA and AppSec still run through the existing pipeline; the complete independent
+review matrix is part of the next increments.
+
+The bootstrap stops on review feedback instead of skipping rejected completed tasks.
+Approval requires passing global gates, a clean checkpoint and an unchanged clean
+target, then fast-forwards to the verified SHA and preserves evidence. Advanced-target
+integration and conditional remote delivery remain later work. This feature stays off
+by default until the integration scenarios, including real Docker isolation and model
+calls, have been validated for the chosen runner.
+
+The real Docker smoke test uses only synthetic credentials and verifies source
+read-only mounts, hidden runtime/authentication data and writable isolated scratch:
+
+```bash
+python3 tests/docker_smoke.py --image ssdlc-runner:bootstrap-test --suite
+```
+
+The selected image must contain `requirements.txt` dependencies to run the suite.
+Validation passed with 41 tests in the separate `ssdlc-runner:bootstrap-test` image;
+the existing `ssdlc-runner:latest` image was preserved. The Docker test also covers
+initializing a project while the toolkit itself is mounted read-only.

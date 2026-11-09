@@ -1,0 +1,257 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "plan",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "plan_revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "ticket_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+    },
+    "execution_strategy": {
+      "const": "sequential_dag"
+    },
+    "base_commit": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40,64}$"
+    },
+    "quality_contract_ref": {
+      "const": "00-recon/quality-contract.json"
+    },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1
+          },
+          "depends_on": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+            },
+            "minItems": 0,
+            "uniqueItems": true
+          },
+          "target_files": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "uniqueItems": true
+          },
+          "ac_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 0,
+            "uniqueItems": true
+          },
+          "sec_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 0,
+            "uniqueItems": true
+          },
+          "standard_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 0,
+            "uniqueItems": true
+          },
+          "profile": {
+            "enum": [
+              "BOILERPLATE",
+              "ALGORITHMIC",
+              "SECURITY",
+              "DATABASE_MIGRATION",
+              "FRONTEND_UI",
+              "FULLSTACK",
+              "REFACTOR",
+              "TESTS",
+              "DOCS"
+            ]
+          },
+          "complexity": {
+            "enum": [
+              "simple",
+              "standard",
+              "critical"
+            ]
+          },
+          "kind": {
+            "enum": [
+              "task",
+              "subgoal"
+            ]
+          },
+          "subgoal_reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "contract_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 0,
+            "uniqueItems": true
+          },
+          "verification": {
+            "type": "object",
+            "properties": {
+              "mode": {
+                "enum": [
+                  "automated",
+                  "review_only"
+                ]
+              },
+              "checks": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "check_id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+                    },
+                    "argv": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "minItems": 1,
+                      "uniqueItems": true
+                    },
+                    "cwd": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "timeout_sec": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "ac_refs": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "minItems": 0,
+                      "uniqueItems": true
+                    },
+                    "sec_refs": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "minItems": 0,
+                      "uniqueItems": true
+                    }
+                  },
+                  "required": [
+                    "check_id",
+                    "argv",
+                    "cwd",
+                    "timeout_sec",
+                    "ac_refs",
+                    "sec_refs"
+                  ],
+                  "additionalProperties": false
+                },
+                "minItems": 0,
+                "uniqueItems": true
+              },
+              "quality_check_refs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 0,
+                "uniqueItems": true
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              },
+              "review_criteria": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 1,
+                "uniqueItems": true
+              }
+            },
+            "required": [
+              "mode",
+              "checks",
+              "quality_check_refs"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "task_id",
+          "title",
+          "description",
+          "depends_on",
+          "target_files",
+          "ac_refs",
+          "sec_refs",
+          "standard_refs",
+          "profile",
+          "complexity",
+          "kind",
+          "contract_refs",
+          "verification"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "schema_version",
+    "plan_revision",
+    "ticket_id",
+    "execution_strategy",
+    "base_commit",
+    "quality_contract_ref",
+    "tasks"
+  ],
+  "additionalProperties": false
+}
