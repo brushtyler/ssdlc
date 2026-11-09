@@ -582,3 +582,13 @@ credentials or AI API keys are granted to this profile, and untrusted verificati
 containers do not receive the AGY store. Missing credentials fail before starting
 an interactive login. A newer host token can replace the project copy on a later
 invocation after an explicit host reauthentication.
+
+Design retries now save each architect draft and security critique immediately in
+`02-design/rounds/<session-id>/`, registering both in the artifact manifest. When
+approval is withheld, the controller prints a bounded excerpt of the actual
+critique and its full report path, followed by either the next round number or an
+explicit exhaustion message. Repeating design creates a new session directory;
+previous round evidence is retained. Semantic task-plan rejections likewise print
+the reviewer feedback and archived report path. These logs add no model calls and
+do not change retry limits or approval criteria. Controllers already running from
+a pinned checkout retain their original logging behavior.

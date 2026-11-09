@@ -34,7 +34,7 @@ from ssdlc_planning import PlanRepair
 
 from ssdlc_tasks import (
     PlanError, TaskError, ResourceLimitError, TaskPlanValidator, TaskScheduler, atomic_json,
-    confined, file_hash, git, ticket_lock, validate_document,
+    confined, file_hash, git, ticket_lock, validate_document, log_retry_reason,
 )
 
 
@@ -1984,6 +1984,8 @@ class SSDLCOrchestrator:
         max_rounds = int(os.environ.get("SSDLC_MAX_DESIGN_ROUNDS", "3"))
 
         dialogue_log: List[str] = ["# Pair Design & STRIDE Threat Modeling Transcript\n"]
+        round_directory = self.dir_design / "rounds" / uuid.uuid4().hex
+        round_directory.mkdir(parents=True, exist_ok=True)
         current_adr = ""
         current_threat_model = ""
         approved = False
@@ -2025,6 +2027,9 @@ class SSDLCOrchestrator:
                 f"02-design-arch-r{rnd}",
                 reasoning_effort=arch_effort,
             )
+            round_adr = round_directory / f"adr-round-{rnd}.md"
+            round_adr.write_text(current_adr, encoding="utf-8")
+            self.record_artifact(str(round_adr.relative_to(self.ssdlc_root)), round_adr)
             dur = time.time() - t0
             self.record_ledger(
                 CostAndTelemetryEntry(
@@ -2070,6 +2075,9 @@ class SSDLCOrchestrator:
                 f"02-design-sec-r{rnd}",
                 reasoning_effort=sec_effort,
             )
+            round_review = round_directory / f"security-review-round-{rnd}.md"
+            round_review.write_text(current_threat_model, encoding="utf-8")
+            self.record_artifact(str(round_review.relative_to(self.ssdlc_root)), round_review)
             dur = time.time() - t0
             status_tag = (
                 "APPROVED"
@@ -2099,6 +2107,9 @@ class SSDLCOrchestrator:
                 approved = True
                 print(f"    [OK] Pair Design converged and APPROVED in round {rnd}.")
                 break
+            decision = f"next round {rnd + 1}/{max_rounds}" if rnd < max_rounds else "attempt limit exhausted; no next round"
+            print(f"[02-design] Round {rnd}/{max_rounds}: REVISION_REQUIRED (explicit approval not received); {decision}.", flush=True)
+            log_retry_reason("02-design", current_threat_model, round_review)
 
         adr_path = self.dir_design / "adr.md"
         tm_path = self.dir_design / "threat-model.md"

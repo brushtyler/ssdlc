@@ -66,6 +66,15 @@ def file_hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def log_retry_reason(label: str, report: str, path: Path, max_chars: int = 3000) -> None:
+    """Expose the actual critique, with a bounded excerpt and full evidence path."""
+    text = report.strip() or '(Reviewer returned an empty report.)'
+    print(f'[{label}] Full report: {path}', flush=True)
+    print(text[:max_chars], flush=True)
+    if len(text) > max_chars:
+        print(f'[{label}] Excerpt truncated; see the full report above.', flush=True)
+
+
 def atomic_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix='.' + path.name, dir=path.parent)

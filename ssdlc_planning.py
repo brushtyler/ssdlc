@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 
-from ssdlc_tasks import PlanError, atomic_json, digest, file_hash, parse_plan_output
+from ssdlc_tasks import PlanError, atomic_json, digest, file_hash, parse_plan_output, log_retry_reason
 
 
 class PlanRepair:
@@ -68,6 +68,8 @@ class PlanRepair:
                 if record:
                     previous = {field: (self.root / record[field]).read_text()
                                 for field in ('candidate', 'diagnostics', 'review') if field in record}
+                    if not previous:
+                        print('[task-plan] Previous invocation was reserved but no result was captured; retry consumes a new slot.', flush=True)
                 record = {'attempt': len(session['attempts']) + 1, 'status': 'RESERVED', 'repair_kind': repair_kind}
                 session['attempts'].append(record)
                 atomic_json(self.path, session)
@@ -106,6 +108,9 @@ class PlanRepair:
             approved = report.strip().endswith('TASK_PLAN_STATUS: APPROVED')
             record['status'] = 'APPROVED' if approved else 'REJECTED'
             atomic_json(self.path, session)
+            if not approved:
+                print(f"[task-plan] Candidate {record['attempt']}: semantic review requested changes; a retry requires remaining allowance and budget.", flush=True)
+                log_retry_reason('task-plan', report, self.root / record['review'])
             self.budget()
             if approved:
                 return plan
