@@ -912,7 +912,10 @@ class OrchestratorBootstrapTests(RepositoryTests):
         with patch.dict(os.environ, {'SSDLC_ENABLE_TASK_BREAKDOWN': 'true'}):
             orch = self.make_orchestrator()
             self.seed_inputs(orch)
+            orch.state['status'] = 'PLAN_READY'
+            orch._save_state()
             def generate(prompt, **kwargs):
+                self.assertEqual(orch.state['status'], 'IN_PROGRESS')
                 (kwargs['cwd'] / 'app.py').write_text('value = 1\n')
                 return 'Done', 0
             with patch('orchestrator.SquadDispatcher.dispatch_role', return_value=('codex', 'fake', 'low', 'test')), patch('orchestrator.EngineRunner.run_codex', side_effect=generate) as engine, patch('orchestrator.EngineRunner.run_sandboxed_cmd', return_value=('Ran 1 test\nOK', '', 0)):

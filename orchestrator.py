@@ -1721,6 +1721,7 @@ class SSDLCOrchestrator:
         )
         self.state["current_phase"] = "03-dev"
         self.state["current_step"] = "task-development"
+        self.state["status"] = "IN_PROGRESS"
         self._save_state()
         result = scheduler.run(ordered, feedback)
         self.state["tasks_status"] = result["tasks"]
