@@ -5,10 +5,11 @@ import os
 from pathlib import Path
 import re
 import tempfile
-from dataclasses import fields
+import time
+from dataclasses import dataclass, field, fields
 
 from ssdlc_catalogues import requirement_catalogue
-from ssdlc_findings import TrustedContext, NormalizedFinding, validate_report
+from ssdlc_findings import TrustedContext, NormalizedFinding, FindingsError, validate_report, assess_report
 from ssdlc_tasks import TaskError, confined
 
 
@@ -336,3 +337,283 @@ UNTRUSTED_DATA_INSTRUCTION = (
 def untrusted_data(label, value):
     """JSON string encoding keeps attacker-supplied delimiter lines inside data."""
     return json.dumps({'label': label, 'untrusted_data': value}, ensure_ascii=True)
+
+
+@dataclass
+class EvaluationRequest:
+    gate: str
+    engine: str
+    model: str
+    ordinal: int
+    attempt: int
+    reviewed_commit: str
+    system_prompt: str
+    user_prompt: str
+    context: TrustedContext
+    evidence: list
+    fingerprint: str
+    verdict_parser: object
+    reasoning_effort: str = 'medium'
+    controls: dict = field(default_factory=dict)
+
+
+@dataclass
+class EvaluationResult:
+    outcome_class: str
+    approved: bool
+    verdict: object = None
+    assessment: object = None
+    diagnostics: list = field(default_factory=list)
+    artifact_refs: dict = field(default_factory=dict)
+    summary: str = ''
+    response_text: str = ''
+
+
+class GateEvaluator:
+    """A disk-derived, create-exclusive invocation ladder for one reviewer.
+
+    Registry and history collections are live controller-owned views, used only
+    to verify registrations and make reconciliation idempotent.
+    """
+    def __init__(self, *, gate, base_dir, ssdlc_root, invoke, check_budget,
+                 record_artifact, record_ledger, record_gate, verify_source,
+                 artifacts=None, ledger=None, gates=None, now=None):
+        self.gate = gate
+        self.now = now or time.monotonic
+        self.root = Path(ssdlc_root)
+        self.base = _artifact_path(Path(base_dir), self.root)
+        self.invoke = invoke
+        self.check_budget = check_budget
+        self.record_artifact = record_artifact
+        self.record_ledger = record_ledger
+        self.record_gate = record_gate
+        self.verify_source = verify_source
+        self.artifacts = artifacts if artifacts is not None else {}
+        self.ledger = ledger if ledger is not None else []
+        self.gates = gates if gates is not None else []
+
+    def _path(self, name):
+        return _artifact_path(self.directory / name, self.root)
+
+    def _files(self):
+        return sorted(_artifact_path(p, self.root) for p in self.directory.rglob('*')
+                      if p.is_file() and not p.name.startswith('.gate-'))
+
+    def _hashes(self):
+        return {str(p.relative_to(self.directory)): _digest(p.read_bytes()) for p in self._files()}
+
+    def _register(self, reconcile=True):
+        # Verify *all* existing registrations before reconciling any missing one.
+        prefix = str(self.directory.relative_to(self.root)) + '/'
+        for ref, meta in list(self.artifacts.items()):
+            if ref.startswith(prefix):
+                path = _artifact_path(self.root / ref, self.root)
+                if not path.is_file() or _digest(path.read_bytes()) != meta['sha256']:
+                    raise TaskError('Retained gate artifact missing or changed')
+        if not reconcile:
+            return
+        for path in self._files():
+            ref = str(path.relative_to(self.root))
+            if ref not in self.artifacts:
+                self.record_artifact(ref, path)
+
+    def _write(self, name, value):
+        data = value.encode() if isinstance(value, str) else canon(value)
+        write_or_verify(self._path(name), data, root=self.root)
+        path = self._path(name)
+        ref = str(path.relative_to(self.root))
+        meta = self.artifacts.get(ref)
+        if meta and meta['sha256'] != _digest(path.read_bytes()):
+            raise TaskError('Registered artifact hash mismatch')
+        if not meta:
+            self.record_artifact(ref, path)
+
+    def _read(self, name):
+        return json.loads(self._path(name).read_text())
+
+    def _integrity(self):
+        self._register(reconcile=False)
+        self.verify_source()
+        self._register()
+        if self._read('input.json') != self.metadata:
+            raise TaskError('Gate input snapshot changed')
+        verify_evidence(self.entries)
+
+    def _ledger(self, ordinal, outcome, telemetry=None):
+        if any(e.get('details', {}).get('identity') == self.identity and
+               e.get('details', {}).get('ordinal') == ordinal for e in self.ledger):
+            return
+        details = dict(gate=self.gate, engine=self.request.engine, model=self.request.model,
+                       attempt=self.request.attempt, identity=self.identity, ordinal=ordinal,
+                       outcome_class=outcome, artifact_hashes=self._hashes())
+        self.record_ledger(details, telemetry or {})
+        if telemetry is not None:
+            try:
+                self.check_budget()
+            except TaskError:
+                self.record_gate(f'{self.gate.upper()}_EVALUATION', False,
+                                 f'budget exhausted; evaluation {self.identity} open')
+                raise
+
+    def _finish(self, outcome, *, verdict=None, assessment=None, diagnostics=(), response=''):
+        summary = f'{outcome}; evaluation {self.identity}'
+        self._write('telemetry.json', {'identity': self.identity, 'invocations': [
+            self._read(p.name) for p in self._files() if re.fullmatch(r'invocation-\d.json', p.name)]})
+        data = dict(outcome_class=outcome, approved=outcome == 'approved', verdict=verdict,
+                    diagnostics=list(diagnostics), summary=summary,
+                    gate=self.gate, engine=self.request.engine, model=self.request.model,
+                    attempt=self.request.attempt, reviewed_commit=self.request.reviewed_commit,
+                    fingerprint=self.request.fingerprint, identity=self.identity,
+                    evidence_catalogue_sha256=_digest(canon(self.metadata)),
+                    manifest=self._hashes())
+        self._write('outcome.json', data)
+        return self._result(data)
+
+    def _result(self, data):
+        ref = str(self._path('outcome.json').relative_to(self.root))
+        if not any(self.identity in str(e.get('details', '')) for e in self.gates):
+            self.record_gate(f'{self.gate.upper()}_EVALUATION', data['approved'], data['summary'] + '; ' + ref)
+        responses = sorted(self.directory.glob('response-*.md'))
+        assessment = (assess_report(self._read('report.json'), self.request.context)
+                      if self._path('assessment.json').exists() else None)
+        return EvaluationResult(data['outcome_class'], data['approved'], data.get('verdict'),
+                                assessment, data.get('diagnostics', []), {ref: _digest(self._path('outcome.json').read_bytes())},
+                                data['summary'], responses[-1].read_text() if responses else '')
+
+    def evaluate(self, request):
+        self.request = request
+        if request.gate != self.gate:
+            raise TaskError('Evaluator gate mismatch')
+        slot = slot_key(request.gate, request.engine, request.model, request.ordinal,
+                        request.attempt, request.reviewed_commit)
+        self.identity = evaluation_identity(slot, request.fingerprint)
+        self.directory = _artifact_path(self.base / 'evaluations' / slot[:16], self.root)
+        self.entries = []
+        self.metadata = dict(gate=request.gate, engine=request.engine, model=request.model,
+                             ordinal=request.ordinal, attempt=request.attempt,
+                             reviewed_commit=request.reviewed_commit, fingerprint=request.fingerprint,
+                             identity=self.identity, evidence=[],
+                             system_prompt_sha256=_digest(request.system_prompt.encode()),
+                             user_prompt_sha256=_digest(request.user_prompt.encode()))
+        try:
+            if self.directory.exists():
+                self._register(reconcile=False)
+                self.verify_source()
+                self._register()
+            if self._path('input.json').exists():
+                old = self._read('input.json')
+                self.verify_source()
+                verify_evidence(old['evidence'])
+                if old['identity'] != self.identity:
+                    self._ledger(0, 'integrity_blocked')
+                    raise GateTerminalError('integrity_blocked', self.identity,
+                                            'Evaluation slot already used with different inputs; use a new gate attempt')
+            for index, evidence in enumerate(request.evidence):
+                digest = _digest(Path(evidence['source']).read_bytes())
+                destination = self._path(f'evidence/{index}-{digest[:16]}.dat')
+                entry = capture_evidence(evidence['ref'], evidence['source'], destination,
+                                         registered_hash=evidence.get('registered_hash'), root=self.root)
+                self.entries.append(entry)
+            self.metadata['evidence'] = self.entries
+            self._write('input.json', self.metadata)
+            nonce = self.identity[:16]
+            user = request.user_prompt + '\n' + untrusted_data('trusted context', dict(
+                commit=request.reviewed_commit, task_ids=sorted(request.context.known_task_ids),
+                obligations=sorted(request.context.obligation_ids), evidence=sorted(request.context.evidence_refs)))
+            user += '\n' + untrusted_data('gate findings schema', json.loads(
+                (Path(__file__).parent / 'schemas' / 'gate-findings.schema.json').read_text()))
+            user += (f'\nEmit exactly one JSON report inside these whole-line markers:\n'
+                     f'-----BEGIN SSDLC GATE REPORT {nonce}-----\n'
+                     f'-----END SSDLC GATE REPORT {nonce}-----\n'
+                     'Use schema_version 1.0, source_gate, reviewed_commit, findings; include a human report and final verdict after the frame.')
+            self._write('prompt-1.json', dict(system=request.system_prompt, user=user))
+            self._integrity()
+            if self._path('outcome.json').exists():
+                outcome = self._read('outcome.json')
+                for name, digest in outcome['manifest'].items():
+                    if not self._path(name).is_file() or _digest(self._path(name).read_bytes()) != digest:
+                        raise TaskError('Outcome manifest integrity mismatch')
+                return self._result(outcome)
+        except GateTerminalError:
+            raise
+        except (TaskError, OSError, ValueError) as exc:
+            raise GateTerminalError('integrity_blocked', self.identity, str(exc)) from exc
+
+        reservations = list(self.directory.glob('reservation-*.json'))
+        if len(reservations) > 2:
+            raise GateTerminalError('interrupted', self.identity, 'Invocation allowance exhausted')
+        plan = None
+        for ordinal in (1, 2):
+            response_path = self._path(f'response-{ordinal}.md')
+            reservation = self._path(f'reservation-{ordinal}.json')
+            if reservation.exists() and not response_path.exists():
+                self._ledger(ordinal, 'interrupted')
+                result = self._finish('interrupted', diagnostics=[{'code': 'unknown_result'}])
+                raise GateTerminalError(result.outcome_class, self.identity, result.diagnostics)
+            if not response_path.exists():
+                try:
+                    self._integrity()
+                except (TaskError, OSError) as exc:
+                    self._ledger(ordinal, 'integrity_blocked')
+                    return self._finish('integrity_blocked', diagnostics=[{'code': 'input_changed', 'message': str(exc)}])
+                self.check_budget()
+                prompt = self._read(f'prompt-{ordinal}.json')
+                self._write(f'reservation-{ordinal}.json', dict(identity=self.identity, ordinal=ordinal,
+                            kind='initial' if ordinal == 1 else 'correction', prompt_sha256=_digest(canon(prompt))))
+                started = self.now()
+                try:
+                    text, cost, tin, tout, trace = self.invoke(request, prompt['system'], prompt['user'])
+                except Exception as exc:
+                    self._ledger(ordinal, 'interrupted')
+                    self._finish('interrupted', diagnostics=[{'code': 'engine_error', 'message': str(exc)}])
+                    raise GateTerminalError('interrupted', self.identity, str(exc)) from exc
+                self._write(f'response-{ordinal}.md', text)
+                self._write(f'invocation-{ordinal}.json', dict(cost_usd=cost, tokens_in=tin, tokens_out=tout,
+                            trace_user=trace, duration_sec=self.now() - started))
+            text = response_path.read_text()
+            telemetry_path = self._path(f'invocation-{ordinal}.json')
+            telemetry = self._read(telemetry_path.name) if telemetry_path.exists() else {}
+            try:
+                self._integrity()
+            except (TaskError, OSError) as exc:
+                self._ledger(ordinal, 'integrity_blocked', telemetry)
+                return self._finish('integrity_blocked', diagnostics=[{'code': 'input_changed', 'message': str(exc)}])
+            try:
+                obj = extract_report(text, nonce)
+                verdict = request.verdict_parser(text)
+                if verdict is None:
+                    _fail('verdict_invalid', 'Exact final verdict required')
+                if text.rfind(f'-----END SSDLC GATE REPORT {nonce}-----') > text.rfind(text.strip().splitlines()[-1]):
+                    _fail('verdict_position', 'Verdict must follow frame')
+                report = bind_report(obj, self.gate, request.context)
+                assessment = assess_report(obj, request.context)
+                if ordinal == 2:
+                    record = correction_is_conservative(plan['original_obj'], plan['original_verdict'], obj, verdict, first_diagnostics)
+                    record.update(baseline_source='framed_json' if plan['original_obj'] is not None else 'verdict_only',
+                                  comparison='conservative')
+                    self._write('correction-record.json', record)
+                approved, reasons = decide(verdict, assessment, request.controls, True)
+                outcome = 'approved' if approved else 'rejected_substantive'
+                self._write('diagnostics-' + str(ordinal) + '.json', [])
+                self._write('report.json', report.to_dict() if hasattr(report, 'to_dict') else obj)
+                self._write('assessment.json', assessment.to_dict())
+                self._ledger(ordinal, outcome, telemetry)
+                return self._finish(outcome, verdict=verdict, assessment=assessment, response=text)
+            except (ProtocolError, FindingsError) as exc:
+                diagnostics = list(exc.diagnostics)
+                self._write(f'diagnostics-{ordinal}.json', diagnostics)
+                self._ledger(ordinal, 'protocol_error', telemetry)
+                if ordinal == 2:
+                    if not self._path('correction-record.json').exists():
+                        self._write('correction-record.json', {'failed': diagnostics})
+                    return self._finish('protocol_error', diagnostics=diagnostics, response=text)
+                first_diagnostics = diagnostics
+                try:
+                    plan = correction_plan(text, diagnostics, nonce=nonce, verdict_parser=request.verdict_parser)
+                except ProtocolError as refusal:
+                    self._write('correction-record.json', {'refused': list(refusal.diagnostics)})
+                    return self._finish('protocol_error', diagnostics=refusal.diagnostics, response=text)
+                self._write('prompt-2.json', dict(system=request.system_prompt,
+                            user=user + '\n' + untrusted_data('protocol correction',
+                                 {key: plan[key] for key in ('instruction', 'original_response', 'diagnostics')})))
+        raise GateTerminalError('protocol_error', self.identity, 'Invocation allowance exhausted')

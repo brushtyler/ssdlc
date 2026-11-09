@@ -32,6 +32,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ssdlc_planning import PlanRepair
 from ssdlc_design import DesignSession
+from ssdlc_gate_reports import (GateEvaluator, EvaluationRequest, GateTerminalError,
+    build_trusted_context, fingerprint, UNTRUSTED_DATA_INSTRUCTION, untrusted_data)
 from ssdlc_catalogues import CatalogueError, requirement_catalogue
 from ssdlc_controller import assert_controller, controller_snapshot
 
@@ -1408,6 +1410,7 @@ class SSDLCOrchestrator:
         sync_remote: Optional[bool] = None,
         issue_id: Optional[int] = None,
     ):
+        self._gate_terminal = None
         self.repo_root = repo_root.resolve()
         self.isolation = ProjectRuntimeIsolation(self.repo_root)
         self.iso_meta = self.isolation.activate()
@@ -2489,7 +2492,108 @@ class SSDLCOrchestrator:
             raise TaskError('Review diff differs from the verified cumulative checkpoint')
         return self.worktree_dir, diff_limit
 
+    def _gate_plan(self):
+        path = self.dir_design / 'plan.json'
+        if not path.is_file() or '02-design/plan.json' not in self.state.get('artifacts', {}):
+            raise TaskError('Gate requires a registered task plan')
+        phase, step = self.state.get('current_phase'), self.state.get('current_step')
+        try:
+            return self._ensure_task_plan()
+        finally:
+            self.state.update(current_phase=phase, current_step=step)
+            self._save_state()
+
+    def _stop_on_terminal_gate(self):
+        if self._gate_terminal is not None:
+            phase, outcome = self._gate_terminal
+            raise GateTerminalError(outcome, diagnosis=f'Terminal gate outcome in {phase}')
+
+    def _task_review_gate(self, attempt, review_models, effort, engine, system, user, diff):
+        plan = self._gate_plan()
+        wt, limit = self._verified_task_review_input(diff)
+        head = self.state['task_verified_head']
+        evidence = []
+        inventory = [('ev/requirements', '01-po/requirements.md'), ('ev/plan', '02-design/plan.json'),
+                     ('ev/quality-contract', '00-recon/quality-contract.json'), ('ev/diff', '03-dev/implementation.diff')]
+        for ref, name in [('ev/adr', '02-design/adr.md'), ('ev/threat-model', '02-design/threat-model.md')]:
+            if (self.ssdlc_root / name).exists():
+                inventory.append((ref, name))
+        for ref, name in inventory:
+            path = self.ssdlc_root / name
+            meta = self.state.get('artifacts', {}).get(name, {})
+            evidence.append(dict(ref=ref, source=str(path), registered_hash=meta.get('sha256')))
+        requirements = (self.dir_po / 'requirements.md').read_text()
+        quality = json.loads((self.dir_recon / 'quality-contract.json').read_text())
+        context = build_trusted_context(head, plan, requirements, quality, [e['ref'] for e in evidence])
+        system += '\n' + UNTRUSTED_DATA_INSTRUCTION
+        catalogue = requirement_catalogue(requirements)
+        definitions = [(d['id'], hashlib.sha256(d['definition'].encode()).hexdigest()) for d in catalogue['definitions']]
+        definitions += [(s['standard_id'], hashlib.sha256(json.dumps(s, sort_keys=True).encode()).hexdigest()) for s in quality.get('standards', [])]
+        fp = fingerprint(hashlib.sha256(diff.encode()).hexdigest(), file_hash(self.dir_design / 'plan.json'),
+                         definitions, [(e['ref'], file_hash(Path(e['source']))) for e in evidence],
+                         hashlib.sha256(system.encode()).hexdigest())
+        run = self.dir_review / 'runs' / uuid.uuid4().hex
+        run.mkdir(parents=True)
+        atomic_json(run / 'inputs.json', dict(verified_head=head, review_cwd=str(wt), diff_chars=len(diff),
+                    diff_char_budget=limit, system_prompt=system, user_prompt=user, review_models=review_models))
+        self.record_artifact(str((run / 'inputs.json').relative_to(self.ssdlc_root)), run / 'inputs.json')
+        results, terminals = [], []
+
+        def verify():
+            if self.state.get('task_verified_head') != head:
+                raise TaskError('Verified checkpoint changed during review; approval withheld')
+            try:
+                self._verified_task_review_input((self.dir_dev / 'implementation.diff').read_text())
+            except TaskError as exc:
+                raise TaskError('Verified checkpoint changed during review; approval withheld') from exc
+
+        def invoke(request, sys_text, user_text):
+            return EngineRunner.invoke_role(request.engine, request.model, sys_text, user_text, wt,
+                       self.project_id, self.ticket_id, f'04-review-a{attempt}', sandbox='read-only', reasoning_effort=effort)
+
+        def ledger(details, telemetry):
+            outcome = details['outcome_class']
+            status = {'integrity_blocked': 'INPUT_CHANGED', 'interrupted': 'ENGINE_ERROR',
+                      'protocol_error': 'INVALID_VERDICT', 'approved': 'APPROVED',
+                      'rejected_substantive': 'CHANGES_REQUESTED'}.get(outcome, outcome)
+            self.record_ledger(CostAndTelemetryEntry(f'04-review-a{attempt}', 'Code Reviewer', details['engine'],
+                    details['model'], status, telemetry.get('duration_sec', 0), reasoning_effort=effort,
+                    details=details, **{k: v for k, v in telemetry.items() if k != 'duration_sec'}))
+
+        for index, model in enumerate(review_models, 1):
+            effective_engine, effective_model = model.split(':', 1) if ':' in model and not model.startswith('http') else (engine, model)
+            evaluator = GateEvaluator(gate='review', base_dir=self.dir_review, ssdlc_root=self.ssdlc_root,
+                invoke=invoke, check_budget=self.check_budget_circuit_breaker, record_artifact=self.record_artifact,
+                record_ledger=ledger, record_gate=self.record_gate, verify_source=verify,
+                artifacts=self.state['artifacts'], ledger=self.state['ledger'], gates=self.state['gate_history'])
+            try:
+                result = evaluator.evaluate(EvaluationRequest('review', effective_engine, effective_model, index,
+                    attempt, head, system, user, context, evidence, fp, parse_review_verdict, effort))
+                results.append(result)
+                raw = result.response_text
+                if result.outcome_class not in ('approved', 'rejected_substantive'):
+                    terminals.append(GateTerminalError(result.outcome_class, evaluator.identity, result.diagnostics))
+            except GateTerminalError as exc:
+                terminals.append(exc)
+                responses = sorted(evaluator.directory.glob('response-*.md'))
+                raw = responses[-1].read_text() if responses else str(exc)
+            path = run / f'reviewer-{index}.md'
+            path.write_text(raw)
+            self.record_artifact(str(path.relative_to(self.ssdlc_root)), path)
+        approved = len(results) == len(review_models) and all(r.approved for r in results)
+        report = '\n\n'.join(r.response_text + '\n' + r.summary for r in results)
+        for name in (f'review-report-a{attempt}.md', 'review-report.md'):
+            path = self.dir_review / name
+            path.write_text(report)
+            self.record_artifact(str(path.relative_to(self.ssdlc_root)), path)
+        self.record_gate(f'CODE_REVIEW_A{attempt}', approved,
+                         '; '.join(r.summary + '; ' + ', '.join(r.artifact_refs) for r in results))
+        if terminals:
+            raise terminals[0]
+        return approved, report
+
     def run_phase_review(self, attempt: int = 1) -> Tuple[bool, str]:
+        self._gate_terminal = None
         risk_tier = self.state.get("risk_tier", "M")
         dev_profile = self.state.get("dev_profile", "ALGORITHMIC")
         review_models, rev_effort = SquadDispatcher.resolve_review_models(risk_tier, attempt=attempt)
@@ -2577,6 +2681,10 @@ class SSDLCOrchestrator:
             f"THREAT MODEL:\n{tm_text}\n\n"
             f"GIT DIFF TO REVIEW:\n```diff\n{diff_text if self._task_mode() else diff_text[:60000]}\n```"
         )
+
+        if self._task_mode():
+            return self._task_review_gate(attempt, review_models, rev_effort, review_engine,
+                                          sys_prompt, user_prompt, diff_text)
 
         review_cwd = self.worktree_dir if self._task_mode() else self.repo_root
         review_run = self.dir_review / 'runs' / uuid.uuid4().hex
@@ -2725,6 +2833,7 @@ class SSDLCOrchestrator:
         return overall_ok, "\n".join(logs)
 
     def run_phase_qa(self, test_cmd: Optional[str] = None, attempt: int = 1) -> Tuple[bool, str]:
+        self._gate_terminal = None
         risk_tier = self.state.get("risk_tier", "M")
         dev_profile = self.state.get("dev_profile", "ALGORITHMIC")
         qa_engine, qa_model, qa_effort, qa_reason = SquadDispatcher.dispatch_role(
@@ -2806,6 +2915,8 @@ class SSDLCOrchestrator:
         llm_qa_ok = qa_verdict == 'PASSED'
         input_changed = self._task_mode() and (git(qa_cwd, 'rev-parse', 'HEAD') != self.state['task_verified_head']
                                                or bool(git(qa_cwd, 'status', '--porcelain')))
+        if input_changed:
+            self._gate_terminal = ("05-qa", "integrity_blocked")
         final_qa_ok = det_ok and llm_qa_ok and not input_changed
         raw_path = qa_run / 'response.md'
         raw_path.write_text(qa_out)
@@ -2841,6 +2952,7 @@ class SSDLCOrchestrator:
     # PHASE 5b: AppSec Red-Teamer & Supply-Chain / SCA Auditor
     # ------------------------------------------------------------------
     def run_phase_appsec(self, attempt: int = 1) -> Tuple[bool, str]:
+        self._gate_terminal = None
         risk_tier = self.state.get("risk_tier", "M")
         dev_profile = self.state.get("dev_profile", "ALGORITHMIC")
         appsec_engine, appsec_model, appsec_effort, appsec_reason = SquadDispatcher.dispatch_role(
@@ -3340,6 +3452,7 @@ To **REJECT** and send feedback back to the team:
 
                 if attempt > 1 or start_idx <= self.PHASE_ORDER.index("04-review"):
                     rev_ok, rev_report = self.run_phase_review(attempt=attempt)
+                    self._stop_on_terminal_gate()
                     self.check_budget_circuit_breaker()
                     if not rev_ok:
                         feedback = f"Code Reviewer rejected the diff (Attempt {attempt}):\n{rev_report}"
@@ -3349,6 +3462,7 @@ To **REJECT** and send feedback back to the team:
 
                 if attempt > 1 or start_idx <= self.PHASE_ORDER.index("05-qa"):
                     qa_ok, qa_report = self.run_phase_qa(test_cmd=test_cmd, attempt=attempt)
+                    self._stop_on_terminal_gate()
                     self.check_budget_circuit_breaker()
                     if not qa_ok:
                         feedback = f"QA Gate rejected the implementation (Attempt {attempt}):\n{qa_report}"
@@ -3363,6 +3477,7 @@ To **REJECT** and send feedback back to the team:
                 )
                 if run_appsec:
                     appsec_ok, appsec_report = self.run_phase_appsec(attempt=attempt)
+                    self._stop_on_terminal_gate()
                     self.check_budget_circuit_breaker()
                     if not appsec_ok:
                         feedback = f"AppSec Red-Teamer rejected the implementation (Attempt {attempt}):\n{appsec_report}"
