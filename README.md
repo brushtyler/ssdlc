@@ -572,3 +572,13 @@ To exercise the failure path safely with a temporary limit of 32 tasks:
 ```bash
 python3 tests/docker_pid_smoke.py --image ssdlc-runner:bootstrap-test
 ```
+
+AGY authentication in Docker uses a dedicated profile instead of the verifier
+profile. Only the existing host token at
+`~/.gemini/antigravity-cli/antigravity-oauth-token` is inherited into a private
+project copy under `.ssdlc/.runtime/agy_auth/` (token permissions 0600). The AGY
+container can refresh that copy; the host store is unchanged. No Claude/Codex
+credentials or AI API keys are granted to this profile, and untrusted verification
+containers do not receive the AGY store. Missing credentials fail before starting
+an interactive login. A newer host token can replace the project copy on a later
+invocation after an explicit host reauthentication.

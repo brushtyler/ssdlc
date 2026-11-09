@@ -567,6 +567,7 @@ class EngineRunner:
         verification_scratch: Optional[Path] = None,
         verification_env: Optional[Dict[str, str]] = None,
         stdin: bool = False,
+        auth_profile: Optional[str] = None,
     ) -> List[str]:
         """
         Wraps a CLI/test invocation in a fresh ephemeral container where:
@@ -579,6 +580,8 @@ class EngineRunner:
           - Strips AI API keys when pass_ai_keys=False (e.g., when running untrusted unit tests).
         """
         repo_root = EngineRunner._find_repo_root(cwd)
+        if auth_profile not in (None, "agy"):
+            raise TaskError("Unsupported role authentication profile")
         runtime_dir = repo_root / ".ssdlc" / ".runtime"
         runtime_dir.mkdir(parents=True, exist_ok=True)
         ssdlc_home = Path(__file__).resolve().parent
@@ -676,7 +679,22 @@ class EngineRunner:
 
         # agy Gemini Flash auth & ephemeral tmpfs mounts
         host_gemini = Path.home() / ".gemini"
-        if pass_ai_keys and host_gemini.exists():
+        if auth_profile == "agy":
+            # AGY is an AI role, not an untrusted verifier. Give it only its own
+            # copied OAuth store, writable for refresh without touching host auth.
+            host_token = host_gemini / "antigravity-cli" / "antigravity-oauth-token"
+            agy_home = runtime_dir / "agy_auth"
+            token = agy_home / "antigravity-cli" / "antigravity-oauth-token"
+            if not host_token.is_file() and not token.is_file():
+                raise TaskError("AGY authentication is unavailable; configure host login before selecting agy")
+            token.parent.mkdir(parents=True, exist_ok=True)
+            os.chmod(agy_home, 0o700)
+            os.chmod(token.parent, 0o700)
+            if host_token.is_file() and (not token.exists() or host_token.stat().st_mtime > token.stat().st_mtime):
+                shutil.copy2(host_token, token)
+            os.chmod(token, 0o600)
+            docker_cmd.extend(["-v", f"{agy_home}:/root/.gemini:rw"])
+        elif pass_ai_keys and host_gemini.exists():
             docker_cmd.extend([
                 "-v", f"{host_gemini}:/root/.gemini:ro",
                 "--tmpfs", "/root/.gemini/antigravity-cli/brain:rw",
@@ -944,7 +962,7 @@ class EngineRunner:
         ]
         if EngineRunner._should_spawn_role_container():
             cmd = EngineRunner._wrap_in_role_container(
-                cmd, cwd=cwd, writable_worktree=None, pass_ai_keys=False
+                cmd, cwd=cwd, writable_worktree=None, pass_ai_keys=False, auth_profile="agy"
             )
         proc = EngineRunner._run_role_command(
             cmd,
