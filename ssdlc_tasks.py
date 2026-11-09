@@ -25,6 +25,12 @@ class TaskError(RuntimeError):
     """An execution or recovery condition requiring explicit handling."""
 
 
+class ResourceLimitError(TaskError):
+    """A container hit a resource limit; code correction is not indicated."""
+
+    category = 'ENVIRONMENT_RESOURCE'
+
+
 class PlanError(TaskError):
     """A plan or contract cannot be safely executed."""
 

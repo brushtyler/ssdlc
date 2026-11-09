@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 import time
 import urllib.error
 import urllib.request
@@ -32,7 +33,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from ssdlc_planning import PlanRepair
 
 from ssdlc_tasks import (
-    PlanError, TaskError, TaskPlanValidator, TaskScheduler, atomic_json,
+    PlanError, TaskError, ResourceLimitError, TaskPlanValidator, TaskScheduler, atomic_json,
     confined, file_hash, git, ticket_lock, validate_document,
 )
 
@@ -582,7 +583,9 @@ class EngineRunner:
         runtime_dir.mkdir(parents=True, exist_ok=True)
         ssdlc_home = Path(__file__).resolve().parent
 
-        pids_limit = os.environ.get("SSDLC_CONTAINER_PIDS_LIMIT", "512")
+        pids_limit = os.environ.get("SSDLC_CONTAINER_PIDS_LIMIT", "1024")
+        if not pids_limit.isdigit() or int(pids_limit) < 16:
+            raise TaskError("SSDLC_CONTAINER_PIDS_LIMIT must be a finite integer >= 16")
         mem_limit = os.environ.get("SSDLC_CONTAINER_MEMORY", "4g")
         cpus_limit = os.environ.get("SSDLC_CONTAINER_CPUS", "2")
 
@@ -590,6 +593,9 @@ class EngineRunner:
             "docker",
             "run",
             "--rm",
+            "--init",
+            "--name",
+            "ssdlc-role-" + uuid.uuid4().hex,
             "--security-opt",
             "no-new-privileges:true",
             "--pids-limit",
@@ -599,7 +605,7 @@ class EngineRunner:
             "--cpus",
             str(cpus_limit),
             "--entrypoint",
-            inner_cmd[0],
+            "/bin/sh",
             "-w",
             str(cwd.resolve()),
             "-v",
@@ -708,15 +714,67 @@ class EngineRunner:
             if val:
                 docker_cmd.extend(["-e", f"{env_key}={val}"])
 
-        docker_cmd.append(EngineRunner.IMAGE_NAME)
-        docker_cmd.extend(inner_cmd[1:])
+        name = docker_cmd[docker_cmd.index("--name") + 1]
+        marker = "__SSDLC_RESOURCE_" + name + "__"
+        # Shell builtins still work at the PID limit. Read counters while the
+        # cgroup exists, before --rm removes it, without modifying CLI stdout.
+        wrapper = ('"$@"; rc=$?; '
+                   'for f in pids.current pids.max pids.peak pids.events memory.peak memory.events; do '
+                   'if [ -r "/sys/fs/cgroup/$f" ]; then '
+                   'while read -r key value; do '
+                   'if [ -n "$value" ]; then '
+                   f'printf "{marker} %s.%s=%s\\n" "$f" "$key" "$value" >&2; '
+                   'else '
+                   f'printf "{marker} %s=%s\\n" "$f" "$key" >&2; '
+                   'fi; done < "/sys/fs/cgroup/$f"; fi; done; exit "$rc"')
+        docker_cmd.extend([EngineRunner.IMAGE_NAME, "-c", wrapper, "ssdlc-role", *inner_cmd])
         return docker_cmd
+
+    @staticmethod
+    def _run_role_command(cmd, *, cwd, env, timeout, input=None):
+        """Execute once; preserve resource evidence even for zero-exit PID failures."""
+        docker = cmd[:2] == ["docker", "run"] and "--name" in cmd
+        name = cmd[cmd.index("--name") + 1] if docker else None
+        timed_out = False
+        proc = None
+        try:
+            proc = subprocess.run(cmd, cwd=str(cwd), env=env, capture_output=True,
+                                  text=True, timeout=timeout, input=input)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            if name:
+                subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=15)
+            raise
+        finally:
+            if name:
+                metrics = {}
+                marker = "__SSDLC_RESOURCE_" + name + "__ "
+                if proc is not None:
+                    lines = (proc.stderr or "").splitlines(keepends=True)
+                    for line in lines:
+                        if line.startswith(marker):
+                            key, separator, value = line[len(marker):].strip().partition("=")
+                            if separator:
+                                metrics[key] = value
+                    proc.stderr = "".join(line for line in lines if not line.startswith(marker))
+                path = EngineRunner._find_repo_root(cwd) / ".ssdlc/.runtime/resources" / (name + ".json")
+                failed = any(int(metrics.get(key, "0")) > 0 for key in
+                             ("pids.events.max", "memory.events.oom", "memory.events.oom_kill"))
+                atomic_json(path, {"container": name, "cwd": str(cwd), "timed_out": timed_out,
+                                   "exit_code": None if proc is None else proc.returncode,
+                                   "telemetry_available": bool(metrics), "counters": metrics,
+                                   "resource_failure": failed})
+                if proc is not None:
+                    proc.resource_failure = failed
+                    proc.resource_evidence = str(path)
+        return proc
 
     @staticmethod
     def run_sandboxed_cmd(
         cmd: List[str],
         cwd: Path,
         timeout: int = 300,
+        _resource_retry: bool = True,
     ) -> Tuple[str, str, int]:
         """
         Executes a deterministic test or scanner command inside the read-only role container
@@ -747,9 +805,15 @@ class EngineRunner:
                           "CLAUDE_CONFIG_DIR", "GITHUB_TOKEN", "GH_TOKEN", "GITLAB_TOKEN"}
                 env = {k: v for k, v in os.environ.items() if k not in hidden}
                 env.update(settings)
-            proc = subprocess.run(
-                exec_cmd, cwd=str(cwd), env=env, capture_output=True, text=True, timeout=timeout,
-            )
+            started = time.monotonic()
+            proc = EngineRunner._run_role_command(exec_cmd, cwd=cwd, env=env, timeout=timeout)
+            if getattr(proc, "resource_failure", False):
+                remaining = int(timeout - (time.monotonic() - started))
+                if _resource_retry and remaining > 0:
+                    print(f"[resources] Verification hit a container limit; retrying once in a fresh container. Evidence: {proc.resource_evidence}", flush=True)
+                    out, err, rc = EngineRunner.run_sandboxed_cmd(cmd, cwd, remaining, _resource_retry=False)
+                    return out, f"Environment resource retry; first-attempt evidence: {proc.resource_evidence}\n" + err, rc
+                return proc.stdout or "", (proc.stderr or "") + f"\nENVIRONMENT_RESOURCE: {proc.resource_evidence}", 125
         return proc.stdout or "", proc.stderr or "", proc.returncode
 
     @staticmethod
@@ -881,14 +945,14 @@ class EngineRunner:
             cmd = EngineRunner._wrap_in_role_container(
                 cmd, cwd=cwd, writable_worktree=None, pass_ai_keys=False
             )
-        proc = subprocess.run(
+        proc = EngineRunner._run_role_command(
             cmd,
             cwd=str(cwd),
             env=os.environ.copy(),
-            capture_output=True,
-            text=True,
             timeout=timeout,
         )
+        if getattr(proc, "resource_failure", False):
+            raise ResourceLimitError(f"ENVIRONMENT_RESOURCE: container limit reached; code correction not requested. Evidence: {proc.resource_evidence}")
         combined = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
         return combined.strip(), proc.returncode
 
@@ -923,15 +987,15 @@ class EngineRunner:
                 cmd, cwd=cwd, writable_worktree=writable_worktree, stdin=True
             )
         dev_timeout = int(os.environ.get("SSDLC_DEV_TIMEOUT", "2400"))
-        proc = subprocess.run(
+        proc = EngineRunner._run_role_command(
             cmd,
             input=prompt,
             cwd=str(cwd),
             env=os.environ.copy(),
-            capture_output=True,
-            text=True,
             timeout=dev_timeout,
         )
+        if getattr(proc, "resource_failure", False):
+            raise ResourceLimitError(f"ENVIRONMENT_RESOURCE: container limit reached; code correction not requested. Evidence: {proc.resource_evidence}")
         combined = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
         # Successful stdout is the phase result; stderr contains tool transcripts.
         return (proc.stdout or "").strip() if proc.returncode == 0 else combined.strip(), proc.returncode
@@ -979,15 +1043,15 @@ class EngineRunner:
                 stdin=True,
             )
         dev_timeout = int(os.environ.get("SSDLC_DEV_TIMEOUT", "2400"))
-        proc = subprocess.run(
+        proc = EngineRunner._run_role_command(
             cmd,
             input=prompt,
             cwd=str(cwd),
             env=env,
-            capture_output=True,
-            text=True,
             timeout=dev_timeout,
         )
+        if getattr(proc, "resource_failure", False):
+            raise ResourceLimitError(f"ENVIRONMENT_RESOURCE: container limit reached; code correction not requested. Evidence: {proc.resource_evidence}")
         combined = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
         cost_usd = 0.0
         tokens_in = 0

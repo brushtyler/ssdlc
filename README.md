@@ -547,3 +547,28 @@ their old bound unless explicitly extended:
 The explicit extension is recorded in the planning session without resetting
 history or input fingerprints. The supported semantic allowance is 0–4; exhaustion
 still stops rather than approving an unresolved plan.
+
+Role containers use `--init` and a finite PID/thread limit of 1024 by default
+(`SSDLC_CONTAINER_PIDS_LIMIT`, minimum 16). Explicit existing overrides remain in
+force. Configuration is read at controller startup; changing project.env does not
+modify an already running controller or container.
+
+Before normal container exit/removal, a shell wrapper collects cgroup-v2 PID and
+memory counters using builtins, without requiring additional forks or mixing
+metrics into CLI stdout. Per-invocation evidence is saved by the controller under
+`.ssdlc/.runtime/resources/ssdlc-role-*.json`. Missing counters, including abrupt
+termination before collection, are marked unavailable rather than reported as
+measured zero. Controller timeouts remove only their own named container.
+
+A measured PID/OOM resource event blocks AI output even if the CLI exited zero;
+it raises `ENVIRONMENT_RESOURCE`, preserving the source for reconciliation instead
+of asking the model to correct code. Read-only verification gets at most one retry
+in a fresh container within the remaining timeout, retaining both resource records.
+A repeated limit hit returns exit code 125. Developer invocations are not repeated
+automatically, and attempt counters are not reset.
+
+To exercise the failure path safely with a temporary limit of 32 tasks:
+
+```bash
+python3 tests/docker_pid_smoke.py --image ssdlc-runner:bootstrap-test
+```
