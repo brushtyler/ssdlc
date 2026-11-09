@@ -28,6 +28,27 @@ class TaskError(RuntimeError):
 class PlanError(TaskError):
     """A plan or contract cannot be safely executed."""
 
+    def __init__(self, message: str, diagnostics: list[dict] | None = None):
+        super().__init__(message)
+        self.diagnostics = diagnostics or [{'code': 'INVALID_PLAN', 'message': message}]
+
+
+def parse_plan_output(output: str) -> dict:
+    """Accept JSON or one JSON/unlabelled fenced block, never choose among alternatives."""
+    text = output.strip()
+    fences = re.findall(r'^```([^\n`]*)\n(.*?)^```[ \t]*$', text, re.M | re.S)
+    if fences:
+        if len(fences) != 1 or fences[0][0].strip().lower() not in ('', 'json'):
+            raise PlanError('Ambiguous fenced plan output', [{'code': 'AMBIGUOUS_OUTPUT', 'field': '$'}])
+        text = fences[0][1].strip()
+    try:
+        value = json.loads(text)
+    except ValueError as exc:
+        raise PlanError(str(exc), [{'code': 'INVALID_JSON', 'field': '$', 'message': str(exc)}]) from exc
+    if not isinstance(value, dict):
+        raise PlanError('Plan must be an object', [{'code': 'INVALID_SCHEMA', 'field': '$'}])
+    return value
+
 
 def digest(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()).hexdigest()
@@ -65,8 +86,8 @@ def validate_document(name: str, document: Any) -> None:
     schema = json.loads((SCHEMA_DIR / f'{name}.schema.json').read_text())
     errors = sorted(Draft202012Validator(schema).iter_errors(document), key=lambda e: str(list(e.path)))
     if errors:
-        error = errors[0]
-        raise PlanError(f'{name} at {list(error.path)}: {error.message}')
+        issues = [{'code': 'INVALID_SCHEMA', 'field': list(error.path), 'message': error.message} for error in errors]
+        raise PlanError(f'{name}: {errors[0].message}', issues)
 
 
 def confined(root: Path, relative: str, *, protect: bool = True) -> Path:
@@ -118,6 +139,20 @@ class TaskPlanValidator:
     def validate(self, plan: dict) -> list[dict]:
         validate_document('quality-contract', self.quality)
         validate_document('plan', plan)
+        issues = []
+        for task in plan['tasks']:
+            refs = set(task['ac_refs'] + task['sec_refs'])
+            checked = {ref for c in task['verification']['checks'] for ref in c['ac_refs'] + c['sec_refs']}
+            missing = sorted(refs - checked)
+            if task['verification']['mode'] == 'automated' and missing:
+                issues.append({'code': 'MISSING_VERIFICATION_REF', 'task_id': task['task_id'],
+                               'field': 'verification.checks', 'missing_refs': missing})
+            unknown = sorted(refs - self.requirements)
+            if unknown:
+                issues.append({'code': 'UNKNOWN_REQUIREMENT_REF', 'task_id': task['task_id'],
+                               'field': 'ac_refs/sec_refs', 'unknown_refs': unknown})
+        if issues:
+            raise PlanError('Invalid task requirement/check mappings', issues)
         if plan['base_commit'] != self.quality['base_commit']:
             raise PlanError('Plan and quality contract have different base commits')
         if not any(ref.startswith('AC-') for ref in self.requirements):

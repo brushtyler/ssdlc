@@ -513,3 +513,23 @@ The selected image must contain `requirements.txt` dependencies to run the suite
 Validation passed with 41 tests in the separate `ssdlc-runner:bootstrap-test` image;
 the existing `ssdlc-runner:latest` image was preserved. The Docker test also covers
 initializing a project while the toolkit itself is mounted read-only.
+
+Task planning supports an initial candidate and at most two repairs. Schema and
+requirement/check mapping errors are returned to the planner as structured
+feedback; semantic review can also reject a valid JSON candidate. Attempts,
+outputs, diagnostics, reviews and hashes are kept in `02-design/task-planning/`.
+Reservations survive crashes and do not reset the limit. Changed inputs or altered
+planning evidence require explicit intervention. Repair never relaxes validation
+or substitutes requirement labels for behavioral tests.
+
+To retry planning without repeating approved PO/design work or executing code:
+
+```bash
+./ssdlc plan --ticket TKT-001
+```
+
+This checks the registered upstream hashes and design approval and requires that
+execution has not started. Success records `PLAN_READY`; development can then be
+resumed with `run --from-phase 03-dev`. Exhausted repair sessions are not silently
+reset by the `plan` command. A single fenced JSON block may have a prose preamble;
+multiple candidate blocks are rejected as ambiguous.
