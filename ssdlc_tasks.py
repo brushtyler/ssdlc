@@ -5,6 +5,8 @@ This bootstrap deliberately rejects subgoals and automatic plan migrations.
 """
 from __future__ import annotations
 
+from collections import deque
+from collections.abc import Collection, Mapping
 import contextlib
 import copy
 import fcntl
@@ -319,22 +321,38 @@ class TaskJournal:
                     stream.flush()
                     os.fsync(stream.fileno())
                 data = data[:boundary]
-            for line in data.splitlines():
-                try:
-                    event = json.loads(line)
-                    signature = event.pop('sha256')
-                    if (signature != digest(event) or event['sequence'] != self.sequence + 1
-                            or event['previous'] != self.previous):
-                        raise ValueError('broken hash chain')
-                except (ValueError, KeyError, TypeError) as exc:
-                    raise TaskError('Corrupt task journal; refusing recovery') from exc
-                self.sequence, self.previous = event['sequence'], signature
-                state = event['state']
+            state, self.sequence, self.previous = self._replay(data)
         if state is None and self.snapshot.exists():
             raise TaskError('Task journal is missing; snapshot cannot authorize completed work')
         if state is not None:
             atomic_json(self.snapshot, state)
         return state
+
+    @staticmethod
+    def _replay(data: bytes) -> tuple[dict | None, int, str]:
+        """Verify the hash chain and return its last state and append position."""
+        state = None
+        sequence, previous = 0, ''
+        for line in data.splitlines():
+            try:
+                event = json.loads(line)
+                signature = event.pop('sha256')
+                if (signature != digest(event) or event['sequence'] != sequence + 1
+                        or event['previous'] != previous):
+                    raise ValueError('broken hash chain')
+            except (ValueError, KeyError, TypeError) as exc:
+                raise TaskError('Corrupt task journal; refusing recovery') from exc
+            sequence, previous = event['sequence'], signature
+            state = event['state']
+        return state, sequence, previous
+
+    def peek(self) -> dict | None:
+        """Read the journal state without repairing files or changing append position."""
+        if not self.path.exists():
+            return None
+        data = self.path.read_bytes()
+        data = data[:data.rfind(b'\n') + 1]
+        return self._replay(data)[0]
 
     def append(self, kind: str, state: dict) -> None:
         event = {'sequence': self.sequence + 1, 'previous': self.previous, 'event': kind, 'state': state}
@@ -380,6 +398,95 @@ class TaskScheduler:
     def _save(self, event: str) -> None:
         self.journal.append(event, self.state)
 
+    def _plan_index(self) -> dict[str, dict]:
+        """Index the upstream-validated plan with consistent malformed-plan errors."""
+        try:
+            return {task['task_id']: task for task in self.plan['tasks']}
+        except (KeyError, TypeError) as exc:
+            raise TaskError('Malformed plan') from exc
+
+    def _closure(self, roots: set[str]) -> tuple[list[str], dict[str, int]]:
+        tasks = self._plan_index()
+        order = {tid: index for index, tid in enumerate(tasks)}
+        reverse = {tid: [] for tid in tasks}
+        try:
+            for tid, task in tasks.items():
+                for dependency in task['depends_on']:
+                    if dependency not in tasks:
+                        raise TaskError('Plan has unknown dependency')
+                    reverse[dependency].append(tid)
+        except (KeyError, TypeError) as exc:
+            raise TaskError('Malformed plan') from exc
+        visited = set(roots)
+        pending = deque(roots)
+        while pending:
+            for dependent in reverse[pending.popleft()]:
+                if dependent not in visited:
+                    visited.add(dependent)
+                    pending.append(dependent)
+        return [tid for tid in tasks if tid in visited], order
+
+    def _require_all_completed(self, state: dict) -> None:
+        tasks = self._plan_index()
+        for tid in tasks:
+            if tid not in state['tasks']:
+                raise TaskError(f"Task '{tid}' has no scheduler state")
+        for tid in state['tasks']:
+            if tid not in tasks:
+                raise TaskError(f"State task '{str(tid)[:80]}' is not in the plan")
+        for tid in tasks:
+            status = state['tasks'][tid].get('status')
+            if status != 'COMPLETED':
+                raise TaskError(f"Cannot invalidate: task '{tid}' is {status}; "
+                                'only fully COMPLETED plans can be invalidated')
+
+    def invalidate(self, task_ids, reason) -> list[str]:
+        """Invalidate selected tasks and their dependents in one journal event.
+
+        SHA-256 chaining is integrity-only, not authentication; edits to preexisting
+        ignored-file contents are not detected. Plan DAG validity is an upstream
+        precondition. Discard the instance after an exception.
+        Rollback: a journal containing TASKS_INVALIDATED is not guaranteed to load
+        in pre-change code; restore the pre-change journal and snapshot from backup.
+        """
+        if (not isinstance(task_ids, Collection)
+                or isinstance(task_ids, (str, bytes, bytearray, Mapping)) or not task_ids):
+            raise TaskError('task_ids must be a non-empty collection of task ID strings (not a string or mapping)')
+        ids = list(task_ids)
+        if not isinstance(reason, str) or not reason.strip():
+            raise TaskError('reason must be a non-empty string')
+        if any(not isinstance(tid, str) or not tid for tid in ids):
+            raise TaskError('task_ids must contain only non-empty strings')
+        known = self._plan_index()
+        unknown = sorted(set(ids) - known.keys())
+        if unknown:
+            raise TaskError(f'Unknown task ID: {unknown[0][:80]!r}')
+        roots = set(ids)
+        closure, order = self._closure(roots)
+        with ticket_lock(self.directory / 'scheduler.lock'):
+            peeked = self.journal.peek()
+            if peeked is None:
+                raise TaskError('No scheduler state to invalidate')
+            inputs = digest({'plan': self.plan, 'quality': self.quality, 'context': self.context})
+            if peeked['inputs_sha256'] != inputs:
+                raise TaskError('Inputs changed: explicit plan migration/invalidation is required')
+            self._require_all_completed(peeked)
+            state = self.journal.load()
+            self.state = state
+            for record in state['tasks'].values():
+                if 'protected_snapshot' in record and self._protected() != record['protected_snapshot']:
+                    raise TaskError('Protected worktree paths changed; reconciliation required')
+                if not self._evidence_valid(record):
+                    raise TaskError('Completed task evidence is missing or altered')
+            self._assert_clean()
+            self.state = copy.deepcopy(state)
+            for tid in closure:
+                self.state['tasks'][tid]['status'] = 'INVALIDATED'
+            self.state.setdefault('invalidations', []).append(
+                {'roots': sorted(roots, key=order.__getitem__), 'closure': closure, 'reason': reason.strip()})
+            self._save('TASKS_INVALIDATED')
+        return closure
+
     def _changed(self) -> list[str]:
         out = git(self.wt, '-c', 'status.renames=false', 'status', '--porcelain=v1', '-z', '--untracked-files=all')
         return [line[3:] for line in out.split('\x00') if line]
@@ -403,6 +510,13 @@ class TaskScheduler:
     def _assert_tree(self) -> None:
         if git(self.wt, 'rev-parse', 'HEAD') != self.state['expected_head']:
             raise TaskError('Unexpected worktree HEAD; reconcile external changes before resuming')
+
+    def _assert_clean(self) -> None:
+        self._assert_tree()
+        if self._ignored() != self.state['ignored_paths']:
+            raise TaskError('Ignored worktree files changed; explicit reconciliation required')
+        if self._changed():
+            raise TaskError('Interrupted or externally modified worktree is dirty; preserve and reconcile it before resuming')
 
     def _source_signature(self, changed: list[str]) -> str:
         contents = {}
@@ -473,6 +587,12 @@ class TaskScheduler:
             raise TaskError('Bootstrap supports automated tasks only; subgoals/review_only require later increments')
         self.guard()
         inputs = digest({'plan': self.plan, 'quality': self.quality, 'context': self.context})
+        peeked = self.journal.peek()
+        if peeked is not None:
+            invalid = [tid for tid, rec in peeked['tasks'].items() if rec.get('status') == 'INVALIDATED']
+            if invalid:
+                raise TaskError('Invalidated work cannot be run until a future revalidation API exists: '
+                                + ', '.join(t[:80] for t in invalid))
         state = self.journal.load()
         if state is None:
             if self._changed() or git(self.wt, 'rev-parse', 'HEAD') != self.plan['base_commit']:
@@ -491,11 +611,7 @@ class TaskScheduler:
                 raise TaskError('Protected worktree paths changed; reconciliation required')
             if record['status'] == 'COMMIT_INTENT':
                 self._complete_intent(task, record)
-        self._assert_tree()
-        if self._ignored() != state['ignored_paths']:
-            raise TaskError('Ignored worktree files changed; explicit reconciliation required')
-        if self._changed():
-            raise TaskError('Interrupted or externally modified worktree is dirty; preserve and reconcile it before resuming')
+        self._assert_clean()
         if feedback:
             # Targeted bounce belongs to Step 3. Never silently skip rejected completed tasks.
             raise TaskError('Review feedback requires explicit invalidation, unavailable in the bootstrap scheduler')
