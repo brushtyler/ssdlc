@@ -610,5 +610,25 @@ class AdvisorySchemaTests(unittest.TestCase):
                 validate_advisory(advisory, artifacts)
 
 
+class PromptTransportTests(unittest.TestCase):
+    def test_large_prompts_use_stdin_and_codex_traces_do_not_enter_phase_result(self):
+        prompt = 'x' * 200000
+        for engine in ('codex', 'claude'):
+            with self.subTest(engine=engine), patch.object(EngineRunner, '_should_spawn_role_container', return_value=False), patch('orchestrator.subprocess.run') as run:
+                output = 'phase result' if engine == 'codex' else json.dumps({'result': 'phase result'})
+                run.return_value = subprocess.CompletedProcess([], 0, output, 'tool transcript')
+                result = getattr(EngineRunner, 'run_' + engine)(prompt, Path.cwd())
+                self.assertEqual(result[0], 'phase result')
+                self.assertEqual(run.call_args.kwargs['input'], prompt)
+                self.assertNotIn(prompt, run.call_args.args[0])
+
+    def test_docker_preserves_piped_stdin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / '.ssdlc').mkdir()
+            cmd = EngineRunner._wrap_in_role_container(['codex', 'exec', '-'], root, stdin=True)
+            self.assertEqual(cmd[:3], ['docker', 'run', '-i'])
+
+
 if __name__ == '__main__':
     unittest.main()

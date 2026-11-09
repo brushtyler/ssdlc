@@ -551,6 +551,7 @@ class EngineRunner:
         pass_ai_keys: bool = True,
         verification_scratch: Optional[Path] = None,
         verification_env: Optional[Dict[str, str]] = None,
+        stdin: bool = False,
     ) -> List[str]:
         """
         Wraps a CLI/test invocation in a fresh ephemeral container where:
@@ -592,6 +593,8 @@ class EngineRunner:
             "-v",
             f"{ssdlc_home}:/opt/ssdlc:ro",
         ]
+        if stdin:
+            docker_cmd.insert(2, "-i")
         if pass_ai_keys:
             docker_cmd.extend([
                 "-v", f"{runtime_dir}:{runtime_dir}:rw",
@@ -888,14 +891,15 @@ class EngineRunner:
             cmd.extend(["-c", 'model_provider="openrouter"'])
         if model:
             cmd.extend(["-m", model])
-        cmd.append(prompt)
+        cmd.append("-")
         if use_container:
             cmd = EngineRunner._wrap_in_role_container(
-                cmd, cwd=cwd, writable_worktree=writable_worktree
+                cmd, cwd=cwd, writable_worktree=writable_worktree, stdin=True
             )
         dev_timeout = int(os.environ.get("SSDLC_DEV_TIMEOUT", "2400"))
         proc = subprocess.run(
             cmd,
+            input=prompt,
             cwd=str(cwd),
             env=os.environ.copy(),
             capture_output=True,
@@ -903,7 +907,8 @@ class EngineRunner:
             timeout=dev_timeout,
         )
         combined = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
-        return combined.strip(), proc.returncode
+        # Successful stdout is the phase result; stderr contains tool transcripts.
+        return (proc.stdout or "").strip() if proc.returncode == 0 else combined.strip(), proc.returncode
 
     @staticmethod
     def run_claude(
@@ -928,7 +933,7 @@ class EngineRunner:
         if "/" in target_model:
             target_model = target_model.split("/")[-1]
 
-        cmd = ["claude", "-p", prompt, "--model", target_model, "--output-format", "json"]
+        cmd = ["claude", "-p", "--model", target_model, "--output-format", "json"]
         if not read_only:
             cmd.append("--dangerously-skip-permissions")
 
@@ -945,10 +950,12 @@ class EngineRunner:
                 cmd,
                 cwd=cwd,
                 writable_worktree=(None if read_only else writable_worktree),
+                stdin=True,
             )
         dev_timeout = int(os.environ.get("SSDLC_DEV_TIMEOUT", "2400"))
         proc = subprocess.run(
             cmd,
+            input=prompt,
             cwd=str(cwd),
             env=env,
             capture_output=True,
