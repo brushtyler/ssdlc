@@ -533,3 +533,17 @@ execution has not started. Success records `PLAN_READY`; development can then be
 resumed with `run --from-phase 03-dev`. Exhausted repair sessions are not silently
 reset by the `plan` command. A single fenced JSON block may have a prose preamble;
 multiple candidate blocks are rejected as ambiguous.
+
+Planning now separates the original candidate plus two structural repair slots
+from two semantic revision slots. A reviewer rejection can therefore be addressed
+even after structural repairs were used. Both allowances and all reservations are
+persistent and subject to the ticket's existing cost cap. Legacy sessions preserve
+their old bound unless explicitly extended:
+
+```bash
+./ssdlc plan --ticket TKT-001 --review-repairs 2
+```
+
+The explicit extension is recorded in the planning session without resetting
+history or input fingerprints. The supported semantic allowance is 0–4; exhaustion
+still stops rather than approving an unresolved plan.

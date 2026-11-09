@@ -1356,7 +1356,7 @@ class SSDLCOrchestrator:
         self.record_artifact("00-recon/quality-contract.json", target)
         return contract
 
-    def _ensure_task_plan(self) -> Dict[str, Any]:
+    def _ensure_task_plan(self, review_repairs=None) -> Dict[str, Any]:
         self.state["task_breakdown"] = True
         self._save_state()
         quality = self._ensure_quality_contract()
@@ -1429,7 +1429,7 @@ class SSDLCOrchestrator:
         repair = PlanRepair(self.dir_design,
                             {"context": context, "schema": schema, "prompt": prompt,
                              "planner": [engine, model, effort], "reviewer": [rev_engine, rev_model, rev_effort]},
-                            validate, generate, review, self.check_budget_circuit_breaker)
+                            validate, generate, review, self.check_budget_circuit_breaker, review_repairs=review_repairs)
         try:
             previous_candidate = self.dir_design / "task-plan-candidate.txt"
             previous_meta = self.state.get('artifacts', {}).get('02-design/task-plan-candidate.txt')
@@ -1450,7 +1450,7 @@ class SSDLCOrchestrator:
         self.record_gate("TASK_PLAN_GATE", True, "Validated plan and independent semantic review")
         return plan
 
-    def resume_task_planning(self) -> Path:
+    def resume_task_planning(self, review_repairs=None) -> Path:
         """Resume only planning against sealed upstream artifacts; never execute code."""
         with ticket_lock(self.ssdlc_root / "ticket.lock"):
             self.state = self._load_or_init_state()
@@ -1469,10 +1469,11 @@ class SSDLCOrchestrator:
                 path = self.ssdlc_root / name
                 if not meta or not path.is_file() or file_hash(path) != meta['sha256']:
                     raise PlanError(f"Planning input is missing, unapproved or changed: {name}")
+            self.state.pop("failure", None)
             self.state.update(current_phase="02-design", current_step="task-plan", status="IN_PROGRESS")
             self._save_state()
             try:
-                self._ensure_task_plan()
+                self._ensure_task_plan(review_repairs=review_repairs)
             except Exception as exc:
                 self.state.update(status="FAILED", failure={"phase": "task-plan", "message": str(exc)})
                 self._save_state()
@@ -3231,6 +3232,7 @@ def main() -> int:
     p_plan = sub.add_parser("plan", help="Resume task planning using approved requirements and design only")
     p_plan.add_argument("--ticket", required=True)
     p_plan.add_argument("--repo", "-r", default=".")
+    p_plan.add_argument("--review-repairs", type=int, choices=range(5), default=None, help="Explicitly extend the persisted semantic repair allowance (0-4)")
 
     p_app = sub.add_parser("approve", help="Supervisor sign-off: commit worktree changes, merge, and prune worktree")
     p_app.add_argument("ticket", help="Ticket ID")
@@ -3260,7 +3262,7 @@ def main() -> int:
 
     if args.subcommand == "plan":
         orch = SSDLCOrchestrator(repo_path, args.ticket, sync_remote=False)
-        print(orch.resume_task_planning())
+        print(orch.resume_task_planning(review_repairs=args.review_repairs))
         return 0
 
     if args.subcommand == "run":

@@ -49,6 +49,38 @@ class PlanRepairTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(json.loads(self.calls[0]['candidate']), {'ok': False})
 
+    def test_structural_repairs_do_not_exhaust_semantic_revision_allowance(self):
+        self.answers = ['{"ok": false}', '{"ok": false}', '{"ok": true}', '{"ok": true}']
+        verdicts = iter(['TASK_PLAN_STATUS: REVISION_REQUIRED', 'TASK_PLAN_STATUS: APPROVED'])
+        self.repair(review=lambda _: next(verdicts)).run()
+        self.assertEqual(len(self.calls), 4)
+        self.assertIn('REVISION_REQUIRED', self.calls[-1]['review'])
+
+    def test_semantic_limit_persists_and_requires_explicit_extension(self):
+        self.answers = ['{"ok": true}']
+        reject = lambda _: 'TASK_PLAN_STATUS: REVISION_REQUIRED'
+        for _ in range(2):
+            with self.assertRaisesRegex(PlanError, 'Semantic.*exhausted'):
+                self.repair(review=reject).run()
+        self.assertEqual(len(self.calls), 3)
+        self.repair(review_repairs=3).run()
+        self.assertEqual(len(self.calls), 4)
+        state = json.loads((self.root/'task-planning/session.json').read_text())
+        self.assertEqual(state['policy_updates'][0]['previous_review_repairs'], 2)
+        self.assertEqual(state['limits']['review_repairs'], 3)
+
+    def test_legacy_limit_is_not_silently_increased(self):
+        self.answers = ['{"ok": true}']
+        self.repair().run()
+        path = self.root/'task-planning/session.json'
+        state = json.loads(path.read_text())
+        del state['limits']
+        path.write_text(json.dumps(state))
+        self.repair().run()
+        self.assertEqual(json.loads(path.read_text())['limits']['review_repairs'], 0)
+        with self.assertRaisesRegex(PlanError, 'between 0 and 4'):
+            self.repair(review_repairs=99)
+
     def test_valid_first_candidate_needs_no_repair(self):
         self.answers = ['{"ok": true}']
         self.assertTrue(self.repair().run()['ok'])
