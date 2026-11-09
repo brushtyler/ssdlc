@@ -5,6 +5,7 @@ This bootstrap deliberately rejects subgoals and automatic plan migrations.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from collections import deque
 from collections.abc import Collection, Mapping
 import contextlib
@@ -524,6 +525,19 @@ def git(repo: Path, *args: str) -> str:
     return proc.stdout.rstrip('\n')
 
 
+@dataclass
+class RevalidationResult:
+    passed: list[str]
+    failed: list[dict]
+    blocked: list[dict]
+    unchanged: list[str]
+    finalized_run: int | None = None
+
+    @property
+    def complete(self):
+        return not self.failed and not self.blocked
+
+
 class TaskScheduler:
     """Bootstrap executor: strict manifests, existing routing, no recursive work."""
     def __init__(self, worktree: Path, directory: Path, plan: dict, quality: dict,
@@ -636,6 +650,191 @@ class TaskScheduler:
                 {'roots': sorted(roots, key=order.__getitem__), 'closure': closure, 'reason': reason.strip()})
             self._save('TASKS_INVALIDATED')
         return closure
+
+    def _require_revalidatable(self, state):
+        tasks = self._plan_index()
+        if set(tasks) != set(state['tasks']):
+            raise TaskError('Cannot revalidate: plan and state task sets differ')
+        for tid, record in state['tasks'].items():
+            if record.get('status') not in ('COMPLETED', 'INVALIDATED'):
+                raise TaskError(f"Cannot revalidate: task '{tid}' is {record.get('status')}")
+        if state['inputs_sha256'] != digest({'plan': self.plan, 'quality': self.quality,
+                                             'context': self.context}):
+            raise TaskError('Inputs changed: explicit plan migration/invalidation is required')
+
+    def _validate_revalidation_graph(self, state):
+        tasks = self._plan_index()
+        remaining = {}
+        for tid, task in tasks.items():
+            dependencies = task['depends_on']
+            if any(dep not in tasks for dep in dependencies):
+                raise TaskError('Plan has unknown dependency')
+            remaining[tid] = set(dependencies)
+            for dep in dependencies:
+                if (state['tasks'][tid]['status'] == 'COMPLETED'
+                        and state['tasks'][dep]['status'] != 'COMPLETED'):
+                    raise TaskError(f"Inconsistent state: task '{tid}' is COMPLETED but "
+                                    f"dependency '{dep}' is {state['tasks'][dep]['status']}")
+        order = []
+        while remaining:
+            tid = next((tid for tid, deps in remaining.items() if not deps), None)
+            if tid is None:
+                raise TaskError('Plan dependency graph is not acyclic')
+            order.append(tid)
+            del remaining[tid]
+            for deps in remaining.values():
+                deps.discard(tid)
+        return order
+
+    def revalidate(self) -> RevalidationResult:
+        """Restore invalidated tasks using verification only, preserving provenance.
+
+        Hashes and fingerprints are unkeyed integrity checks, not authentication.
+        Ignored-file contents are not verified. The lock does not exclude arbitrary
+        external writers; TOCTOU windows remain. Integrity coverage is I1-I5:
+        original checks, failed-attempt checks and diffs, global preflight logs,
+        and revalidation checks. Uncovered artifacts include developer.log,
+        manifest.json, successful implementation.diff, unreferenced partial logs,
+        interrupted-tail backups and quality-contract baseline logs.
+        Discard the instance after any exception. For rollback restore the prior
+        journal and snapshot from backup; older code may not validate this evidence.
+        """
+        with ticket_lock(self.directory / 'scheduler.lock'):
+            self.guard()
+            peeked = self.journal.peek()
+            if peeked is None:
+                raise TaskError('No scheduler state to revalidate')
+            self._require_revalidatable(peeked)
+            self.state = copy.deepcopy(self.journal.load())
+            self._require_revalidatable(self.state)
+            order = self._validate_revalidation_graph(self.state)
+            for tid, record in self.state['tasks'].items():
+                numbers, directories = set(), set()
+                for attempt in record.get('revalidations', []):
+                    n, directory = attempt['attempt'], attempt['dir']
+                    if n in numbers or directory in directories:
+                        raise TaskError(f"Duplicate revalidation attempt {n} for task '{tid}'")
+                    numbers.add(n)
+                    directories.add(directory)
+                if ('protected_snapshot' in record
+                        and self._protected() != record['protected_snapshot']):
+                    raise TaskError('Protected worktree paths changed; reconciliation required')
+            problems = self._inventory_problems(self.state)
+            if problems:
+                problem = problems[0]
+                raise TaskError(f"Evidence invalid for task '{problem['task_id']}' check "
+                                f"'{problem['check_id']}': {problem['reason']} ({problem['path']})")
+            self._assert_clean()
+            head = self.state['expected_head']
+            tree = git(self.wt, 'rev-parse', 'HEAD^{tree}')
+            protected, ignored = self._protected(), self._ignored()
+            tasks = self._plan_index()
+            visit = [tid for tid in order if self.state['tasks'][tid]['status'] == 'INVALIDATED']
+            result = RevalidationResult([], [], [], [tid for tid in order if tid not in visit])
+            runs = self.state.get('revalidation_runs', [])
+            if not visit:
+                if any(a['status'] == 'RUNNING' for record in self.state['tasks'].values()
+                       for a in record.get('revalidations', [])):
+                    raise TaskError('Completed task has a RUNNING revalidation attempt')
+                for open_run in runs:
+                    if open_run['status'] == 'RUNNING':
+                        open_run['status'] = 'COMPLETE'
+                        open_run['finalized_on_recovery'] = True
+                        open_run['cursor'] = dict(task_id=None, attempt=None, check_id=None,
+                                                  head=head, tree=tree, dir=None)
+                        self._save('REVALIDATION_FINISHED')
+                        result.finalized_run = open_run['run']
+                return result
+            # An incomplete invocation is never resumed in its old evidence directory.
+            opened = False
+            for run in runs:
+                if run['status'] == 'RUNNING':
+                    run['status'] = 'INTERRUPTED'
+                    opened = True
+            for record in self.state['tasks'].values():
+                for attempt in record.get('revalidations', []):
+                    if attempt['status'] == 'RUNNING':
+                        attempt['status'] = 'INTERRUPTED'
+                        opened = True
+            if opened:
+                self._save('REVALIDATION_INTERRUPTED')
+            run = dict(run=max((r['run'] for r in runs), default=0) + 1,
+                       head=head, tree=tree, roots=visit, status='RUNNING', blocked={})
+            self.state.setdefault('revalidation_runs', []).append(run)
+
+            def save(event, tid=None, attempt=None, check_id=None):
+                run['cursor'] = dict(task_id=tid, attempt=attempt['attempt'] if attempt else None,
+                                     check_id=check_id, head=head, tree=tree,
+                                     dir=attempt['dir'] if attempt else None)
+                self._save(event)
+
+            save('REVALIDATION_STARTED')
+            for tid in visit:
+                record = self.state['tasks'][tid]
+                blocked = [dep for dep in tasks[tid]['depends_on']
+                           if self.state['tasks'][dep]['status'] != 'COMPLETED']
+                if blocked:
+                    result.blocked.append(dict(task_id=tid, blocked_by=blocked))
+                    run['blocked'][tid] = blocked
+                    save('REVALIDATION_TASK_BLOCKED', tid)
+                    continue
+                attempts = record.setdefault('revalidations', [])
+                n = max((a['attempt'] for a in attempts), default=0) + 1
+                while os.path.lexists(self.directory / tid / f'revalidate-{n}'):
+                    n += 1
+                directory = self.directory / tid / f'revalidate-{n}'
+                attempt = dict(attempt=n, run=run['run'], status='RUNNING', head=head,
+                               tree=tree, dir=str(directory.relative_to(self.directory)),
+                               started_checks=[], checks=[])
+                attempts.append(attempt)
+                save('REVALIDATION_TASK_STARTED', tid, attempt)
+
+                def before(index, check_id):
+                    attempt['started_checks'].append(dict(index=index, check_id=check_id))
+                    save('REVALIDATION_CHECK_STARTED', tid, attempt, check_id)
+
+                def gate(index=None, check=None):
+                    check_id = check['check_id'] if check else None
+                    if (git(self.wt, 'rev-parse', 'HEAD') != head or self._changed()
+                            or self._protected() != protected or self._ignored() != ignored):
+                        raise _VerifierMutation('Verifier changed worktree', tid, check_id)
+                    problems = self._inventory_problems(self.state)
+                    if problems:
+                        p = problems[0]
+                        raise _EvidenceChanged(f"Evidence changed for task {p['task_id']!r}: {p['reason']}",
+                                               tid, check_id, p['path'])
+                    self._assert_evidence_dir(directory, tid, check_id)
+
+                try:
+                    self._make_attempt_dir(directory)
+                    checks = self._verify(tasks[tid], attempt, directory,
+                                          event='REVALIDATION_CHECK_FINISHED',
+                                          before_check=before, after_check=gate, exclusive=True)
+                    gate()
+                except _RevalidationStop as exc:
+                    attempt['status'] = 'ABORTED'
+                    attempt['abort'] = dict(kind=exc.kind, check_id=exc.check_id,
+                                            path=exc.path, message=str(exc))
+                    run['status'] = 'ABORTED'
+                    save('REVALIDATION_ABORTED', tid, attempt, exc.check_id)
+                    raise
+                if ([c['check_id'] for c in checks] == self._expected_check_ids(tid)
+                        and all(c['exit_code'] == 0 and not c['empty_suite'] for c in checks)):
+                    attempt['status'] = 'PASSED'
+                    record['restored_by'] = n
+                    record['status'] = 'COMPLETED'
+                    result.passed.append(tid)
+                    save('REVALIDATION_TASK_PASSED', tid, attempt)
+                else:
+                    attempt['status'] = 'FAILED'
+                    diagnostics = [dict(c, outcome=('empty_suite' if c['empty_suite'] else
+                                   f"exit:{c['exit_code']}" if c['exit_code'] else 'passed')) for c in checks]
+                    result.failed.append(dict(task_id=tid, attempt=n,
+                                              evidence_dir=attempt['dir'], checks=diagnostics))
+                    save('REVALIDATION_TASK_FAILED', tid, attempt)
+            run['status'] = 'COMPLETE' if result.complete else 'INCOMPLETE'
+            save('REVALIDATION_FINISHED')
+            return result
 
     def _changed(self) -> list[str]:
         out = git(self.wt, '-c', 'status.renames=false', 'status', '--porcelain=v1', '-z', '--untracked-files=all')

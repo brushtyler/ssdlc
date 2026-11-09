@@ -10,7 +10,7 @@ from unittest.mock import patch
 from orchestrator import EngineRunner, SSDLCOrchestrator
 from ssdlc_tasks import (
     PlanError, TaskError, DevelopmentBlocked, TaskJournal, TaskPlanValidator, TaskScheduler,
-    atomic_json, confined, file_hash, git, ticket_lock, validate_document,
+    atomic_json, confined, digest, file_hash, git, ticket_lock, validate_document,
 )
 
 
@@ -1252,6 +1252,275 @@ class RevalidateTests(SchedulerTests):
                     return result
             return 'Ran 1 test\nOK', '', 0
         return verify
+
+    def invalidated_chain(self):
+        scheduler = self.completed_chain()
+        scheduler.invalidate(['A'], 'precaution')
+        scheduler.developer = self.fail_dev
+        scheduler.verifier = self.scripted_verifier()
+        return scheduler
+
+    def test_all_pass_ordered(self):
+        scheduler = self.invalidated_chain()
+        head = git(self.wt, 'rev-parse', 'HEAD')
+        count = git(self.wt, 'rev-list', '--count', 'HEAD')
+        sources = {p: (self.wt / p).read_bytes() for p in ('a.py', 'b.py', 'c.py', 'd.py')}
+        result = scheduler.revalidate()
+        self.assertEqual(result.passed, ['A', 'B', 'C'])
+        self.assertEqual(result.unchanged, ['D'])
+        self.assertTrue(result.complete)
+        self.assertEqual(len(self.verifier_calls), 6)
+        self.assertEqual(git(self.wt, 'rev-parse', 'HEAD'), head)
+        self.assertEqual(git(self.wt, 'rev-list', '--count', 'HEAD'), count)
+        self.assertEqual(sources, {p: (self.wt / p).read_bytes() for p in sources})
+        for tid in result.passed:
+            attempt = scheduler.state['tasks'][tid]['revalidations'][0]
+            self.assertEqual(attempt['head'], head)
+            self.assertEqual(attempt['tree'], git(self.wt, 'rev-parse', 'HEAD^{tree}'))
+            self.assertTrue((scheduler.directory / attempt['dir']).is_dir())
+
+    def test_start_marker_ordering(self):
+        scheduler = self.invalidated_chain()
+        observed = []
+        def verify(*args):
+            events = [json.loads(line) for line in scheduler.journal.path.read_text().splitlines()]
+            self.assertEqual(events[-1]['event'], 'REVALIDATION_CHECK_STARTED')
+            run = events[-1]['state']['revalidation_runs'][-1]
+            cursor = run['cursor']
+            observed.append((cursor['task_id'], cursor['check_id']))
+            return 'Ran 1 test\nOK', '', 0
+        scheduler.verifier = verify
+        scheduler.revalidate()
+        expected = [(tid, cid) for tid in ('A', 'B', 'C')
+                    for cid in scheduler._expected_check_ids(tid)]
+        self.assertEqual(observed, expected)
+        events = [json.loads(line) for line in scheduler.journal.path.read_text().splitlines()]
+        self.assertEqual(sum(e['event'] == 'REVALIDATION_CHECK_STARTED' for e in events), len(expected))
+        for tid in ('A', 'B', 'C'):
+            attempt = scheduler.state['tasks'][tid]['revalidations'][0]
+            self.assertEqual([c['check_id'] for c in attempt['started_checks']],
+                             scheduler._expected_check_ids(tid))
+        self.scheduler(self.fail_dev, self.fail_ver).run(self.plan['tasks'])
+
+    def test_b_fails_c_blocked(self):
+        scheduler = self.invalidated_chain()
+        before = copy.deepcopy(scheduler.state['tasks']['D'])
+        scheduler.verifier = self.scripted_verifier([None, None, lambda: ('failed', '', 1)])
+        result = scheduler.revalidate()
+        self.assertEqual(result.passed, ['A'])
+        self.assertEqual([f['task_id'] for f in result.failed], ['B'])
+        self.assertEqual(result.blocked, [dict(task_id='C', blocked_by=['B'])])
+        self.assertFalse(result.complete)
+        check = result.failed[0]['checks'][0]
+        self.assertEqual(check['outcome'], 'exit:1')
+        self.assertEqual(file_hash(scheduler.directory / check['log_ref']), check['sha256'])
+        self.assertEqual(len(self.verifier_calls), 4)
+        self.assertEqual(scheduler.state['tasks']['D'], before)
+
+    def test_later_success_recovers(self):
+        scheduler = self.invalidated_chain()
+        scheduler.verifier = self.scripted_verifier([None, None, lambda: ('failed', '', 1)])
+        scheduler.revalidate()
+        old = scheduler.state['tasks']['B']['revalidations'][0]['checks'][0]
+        scheduler.verifier = self.scripted_verifier()
+        result = scheduler.revalidate()
+        self.assertEqual(result.passed, ['B', 'C'])
+        self.assertEqual(len(self.verifier_calls), 4)
+        self.assertEqual(scheduler.state['tasks']['B']['restored_by'], 2)
+        self.assertEqual(file_hash(scheduler.directory / old['log_ref']), old['sha256'])
+
+    def test_provenance_and_logs_preserved(self):
+        scheduler = self.invalidated_chain()
+        before = copy.deepcopy(scheduler.state)
+        prefix = scheduler.journal.path.read_bytes()
+        logs = {p: p.read_bytes() for p in scheduler.directory.rglob('*') if p.is_file()
+                and p.suffix in ('.log', '.diff')}
+        scheduler.revalidate()
+        self.assertTrue(scheduler.journal.path.read_bytes().startswith(prefix))
+        for tid, record in before['tasks'].items():
+            for key, value in record.items():
+                if key != 'status':
+                    self.assertEqual(scheduler.state['tasks'][tid][key], value)
+        self.assertTrue(all(p.read_bytes() == data for p, data in logs.items()))
+
+    def assert_revalidation_refused(self, scheduler):
+        scheduler.verifier = self.fail_ver
+        before = scheduler.journal.path.read_bytes() if scheduler.journal.path.exists() else None
+        with self.assertRaises(TaskError):
+            scheduler.revalidate()
+        after = scheduler.journal.path.read_bytes() if scheduler.journal.path.exists() else None
+        self.assertEqual(before, after)
+
+    def test_refusals_before_any_check(self):
+        scheduler = self.scheduler(self.fail_dev, self.fail_ver)
+        self.assert_revalidation_refused(scheduler)
+        scheduler = self.invalidated_chain()
+        baseline = copy.deepcopy(scheduler.state)
+        for status in ('PENDING', 'RUNNING', 'FAILED'):
+            self.journaled_state(lambda state: state['tasks']['A'].update(status=status))
+            self.assert_revalidation_refused(scheduler)
+            scheduler.state = copy.deepcopy(baseline)
+            scheduler._save('TEST_RESTORE')
+        for field in ('plan', 'quality', 'context'):
+            value = getattr(scheduler, field)
+            setattr(scheduler, field, dict(value, changed=True))
+            self.assert_revalidation_refused(scheduler)
+            setattr(scheduler, field, value)
+        source = self.wt / 'a.py'
+        data = source.read_bytes()
+        source.write_text('dirty')
+        self.assert_revalidation_refused(scheduler)
+        source.write_bytes(data)
+        refs = [baseline['tasks'][tid]['checks'][0]['log_ref'] for tid in ('A', 'D')]
+        refs.append(baseline['preflights'][0]['checks'][0]['log_ref'])
+        for ref in refs:
+            log = scheduler.directory / ref
+            data = log.read_bytes()
+            for tamper in ('alter', 'delete'):
+                if tamper == 'alter':
+                    log.write_text('tampered')
+                else:
+                    log.unlink()
+                self.assert_revalidation_refused(scheduler)
+                log.write_bytes(data)
+        self.assertEqual(scheduler.journal.peek()['tasks']['A']['status'], 'INVALIDATED')
+        protected = self.wt / '.agents'
+        protected.mkdir()
+        (protected / 'changed').write_text('protected')
+        self.assert_revalidation_refused(scheduler)
+        (protected / 'changed').unlink()
+        protected.rmdir()
+        ignored = self.wt / '.ssdlc' / 'new-ignored'
+        ignored.parent.mkdir(exist_ok=True)
+        ignored.write_text('ignored')
+        self.assert_revalidation_refused(scheduler)
+        ignored.unlink()
+        head = git(self.wt, 'rev-parse', 'HEAD')
+        git(self.wt, 'commit', '--allow-empty', '-m', 'external head')
+        self.assert_revalidation_refused(scheduler)
+        # Return this fake repository to its checkpoint without rewriting source.
+        git(self.wt, 'update-ref', 'HEAD', head)
+        scheduler.verifier = self.scripted_verifier()
+        scheduler.revalidate()
+        scheduler.invalidate(['A'], 'again')
+        log = scheduler.directory / scheduler.state['tasks']['A']['revalidations'][0]['checks'][0]['log_ref']
+        data = log.read_bytes()
+        log.unlink()
+        self.assert_revalidation_refused(scheduler)
+        log.write_bytes(data)
+
+    def test_symlink_loop_preflight_refusal(self):
+        scheduler = self.invalidated_chain()
+        ref = scheduler.state['tasks']['D']['checks'][0]['log_ref']
+        log = scheduler.directory / ref
+        log.unlink()
+        log.symlink_to(log.name)
+        with self.assertRaises((RuntimeError, OSError)):
+            confined(scheduler.directory, ref, protect=False)
+        before = scheduler.journal.path.read_bytes()
+        with self.assertRaisesRegex(TaskError, "Evidence invalid for task 'D' check 'CHECK-D'"):
+            scheduler.revalidate()
+        self.assertEqual(self.verifier_calls, [])
+        self.assertEqual(before, scheduler.journal.path.read_bytes())
+
+    def test_inventory_scope_documented(self):
+        scheduler = self.invalidated_chain()
+        for name in ('developer.log', 'manifest.json', 'implementation.diff'):
+            path = scheduler.directory / 'A' / 'attempt-1' / name
+            self.assertTrue(path.exists())
+            path.write_text('outside recorded hash inventory')
+        self.assertTrue(scheduler.revalidate().complete)
+
+    def test_lock_contention(self):
+        scheduler = self.invalidated_chain()
+        with ticket_lock(scheduler.directory / 'scheduler.lock'):
+            self.assert_revalidation_refused(scheduler)
+        def competing():
+            other = self.scheduler(self.fail_dev, self.fail_ver)
+            for action in (lambda: other.invalidate(['A'], 'busy'),
+                           lambda: other.run(self.plan['tasks'])):
+                with self.assertRaisesRegex(TaskError, 'Another process'):
+                    action()
+        scheduler.verifier = self.scripted_verifier([competing])
+        scheduler.revalidate()
+
+    def test_idempotent_after_complete(self):
+        scheduler = self.invalidated_chain()
+        scheduler.revalidate()
+        before = scheduler.journal.path.read_bytes()
+        scheduler.verifier = self.fail_ver
+        result = scheduler.revalidate()
+        self.assertEqual((result.passed, result.failed, result.blocked), ([], [], []))
+        self.assertTrue(result.complete)
+        self.assertEqual(before, scheduler.journal.path.read_bytes())
+        log = scheduler.directory / scheduler.state['tasks']['B']['revalidations'][0]['checks'][0]['log_ref']
+        log.write_text('tampered')
+        self.assert_revalidation_refused(scheduler)
+
+    def test_dependency_graph_errors(self):
+        scheduler = self.invalidated_chain()
+        original = copy.deepcopy(self.plan)
+        for deps in (['unknown'], ['C']):
+            self.plan['tasks'][0]['depends_on'] = deps
+            self.journaled_state(lambda state: state.update(inputs_sha256=digest(
+                dict(plan=self.plan, quality=self.quality, context=scheduler.context))))
+            self.assert_revalidation_refused(scheduler)
+        self.plan.clear()
+        self.plan.update(original)
+        self.journaled_state(lambda state: state.update(inputs_sha256=digest(
+            dict(plan=self.plan, quality=self.quality, context=scheduler.context))))
+        self.journaled_state(lambda state: state['tasks']['C'].update(status='COMPLETED'))
+        self.assert_revalidation_refused(scheduler)
+
+    def test_run_enforces_revalidation_evidence(self):
+        scheduler = self.invalidated_chain()
+        scheduler.revalidate()
+        baseline = copy.deepcopy(scheduler.state)
+        mutations = [
+            lambda a: a.update(status='FAILED'),
+            lambda a: a['checks'].pop(),
+            lambda a: a['checks'].reverse(),
+            lambda a: a['checks'][0].update(check_id='substitute'),
+            lambda a: a['started_checks'].pop(),
+            lambda a: a.update(head='wrong'),
+        ]
+        for mutate in mutations:
+            scheduler.state = copy.deepcopy(baseline)
+            mutate(scheduler.state['tasks']['B']['revalidations'][0])
+            scheduler._save('TEST_TAMPER')
+            with self.assertRaisesRegex(TaskError, 'Completed task evidence'):
+                self.scheduler(self.fail_dev, self.fail_ver).run(self.plan['tasks'])
+            self.assert_revalidation_refused(scheduler)
+        scheduler.state = baseline
+        scheduler._save('TEST_RESTORE')
+        for mutation in ('duplicate', 'missing_restored_by'):
+            scheduler.state = copy.deepcopy(baseline)
+            record = scheduler.state['tasks']['B']
+            if mutation == 'duplicate':
+                record['revalidations'].append(copy.deepcopy(record['revalidations'][0]))
+            else:
+                record['restored_by'] = 999
+            scheduler._save('TEST_TAMPER')
+            with self.assertRaisesRegex(TaskError, 'Completed task evidence'):
+                self.scheduler(self.fail_dev, self.fail_ver).run(self.plan['tasks'])
+            self.assert_revalidation_refused(scheduler)
+        scheduler.state = baseline
+        scheduler._save('TEST_RESTORE')
+        self.scheduler(self.fail_dev, self.fail_ver).run(self.plan['tasks'])
+
+    def test_run_interplay(self):
+        scheduler = self.invalidated_chain()
+        with self.assertRaisesRegex(TaskError, 'revalidation API'):
+            self.scheduler(self.fail_dev, self.fail_ver).run(self.plan['tasks'])
+        scheduler.revalidate()
+        self.scheduler(self.fail_dev, self.fail_ver).run(self.plan['tasks'])
+
+    def test_docstring_states_limitations(self):
+        doc = TaskScheduler.revalidate.__doc__
+        for text in ('unkeyed', 'not authentication', 'Ignored-file contents',
+                     'external writers', 'developer.log', 'manifest.json',
+                     'implementation.diff', 'unreferenced partial logs', 'baseline logs'):
+            self.assertIn(text, doc)
 
     def test_check_plan_equivalence(self):
         scheduler = self.completed_chain()
