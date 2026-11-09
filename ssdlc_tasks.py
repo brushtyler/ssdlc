@@ -587,6 +587,12 @@ class TaskScheduler:
             raise TaskError('Bootstrap supports automated tasks only; subgoals/review_only require later increments')
         self.guard()
         inputs = digest({'plan': self.plan, 'quality': self.quality, 'context': self.context})
+        peeked = self.journal.peek()
+        if peeked is not None:
+            invalid = [tid for tid, rec in peeked['tasks'].items() if rec.get('status') == 'INVALIDATED']
+            if invalid:
+                raise TaskError('Invalidated work cannot be run until a future revalidation API exists: '
+                                + ', '.join(t[:80] for t in invalid))
         state = self.journal.load()
         if state is None:
             if self._changed() or git(self.wt, 'rev-parse', 'HEAD') != self.plan['base_commit']:

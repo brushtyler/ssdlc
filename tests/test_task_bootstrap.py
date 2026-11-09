@@ -376,6 +376,74 @@ class SchedulerTests(RepositoryTests):
         self.assertEqual([json.loads(line)['event'] for line in lines[count:]], ['TASKS_INVALIDATED'])
         self.assertEqual(json.loads(self.file_bytes()[1]), scheduler.state)
 
+    def test_run_refuses_invalidated_state(self):
+        scheduler = self.completed_chain()
+        scheduler.invalidate(['A'], 'reason')
+        state = copy.deepcopy(scheduler.state)
+        before = self.file_bytes()
+        calls = list(self.calls)
+        fresh = self.scheduler(self.fail_dev, self.fail_ver)
+        with self.assertRaisesRegex(TaskError, 'revalidation API') as raised:
+            fresh.run(self.plan['tasks'])
+        self.assertTrue(str(raised.exception).endswith('A, B, C'))
+        self.assertEqual(self.file_bytes(), before)
+        self.assertEqual(scheduler.state, state)
+        self.assertEqual(fresh.journal.peek(), state)
+        self.assertEqual([state['tasks'][tid]['status'] for tid in 'ABCD'],
+                         ['INVALIDATED'] * 3 + ['COMPLETED'])
+        self.assertEqual(self.calls, calls)
+        self.assertEqual(self.tail_artifacts(), [])
+
+    def test_run_refuses_after_snapshot_crash_without_repair(self):
+        scheduler = self.completed_chain()
+        completed = copy.deepcopy(scheduler.state)
+        count = len(self.file_bytes()[0].splitlines())
+        def crash(path, state):
+            if any(rec['status'] == 'INVALIDATED' for rec in state['tasks'].values()):
+                raise OSError('snapshot interrupted')
+            atomic_json(path, state)
+        with patch('ssdlc_tasks.atomic_json', side_effect=crash):
+            with self.assertRaises(OSError):
+                scheduler.invalidate(['A'], 'reason')
+        before = self.file_bytes()
+        self.assertEqual(len(before[0].splitlines()), count + 1)
+        self.assertEqual(json.loads(before[1]), completed)
+        fresh = self.scheduler(self.fail_dev, self.fail_ver)
+        state = fresh.journal.peek()
+        self.assertEqual([state['tasks'][tid]['status'] for tid in 'ABCD'],
+                         ['INVALIDATED'] * 3 + ['COMPLETED'])
+        with self.assertRaisesRegex(TaskError, 'revalidation API'):
+            fresh.run(self.plan['tasks'])
+        self.assertEqual(self.file_bytes(), before)
+        self.assertEqual(fresh.journal.peek(), state)
+        self.assertEqual(self.tail_artifacts(), [])
+
+    def test_run_refuses_invalidated_journal_with_partial_tail(self):
+        scheduler = self.completed_chain()
+        scheduler.invalidate(['A'], 'reason')
+        state = copy.deepcopy(scheduler.state)
+        self.with_partial_tail()
+        before = self.file_bytes()
+        fresh = self.scheduler(self.fail_dev, self.fail_ver)
+        with self.assertRaisesRegex(TaskError, 'revalidation API'):
+            fresh.run(self.plan['tasks'])
+        self.assertEqual(self.file_bytes(), before)
+        self.assertEqual(fresh.journal.peek(), state)
+        self.assertEqual(self.tail_artifacts(), [])
+
+    def test_run_refuses_holds_lock_contention(self):
+        scheduler = self.completed_chain()
+        scheduler.invalidate(['A'], 'reason')
+        self.with_partial_tail()
+        before = self.file_bytes()
+        fresh = self.scheduler(self.fail_dev, self.fail_ver)
+        with patch.object(fresh.journal, 'peek', side_effect=AssertionError('Peek must hold lock')):
+            with ticket_lock(scheduler.directory / 'scheduler.lock'):
+                with self.assertRaisesRegex(TaskError, 'Another process'):
+                    fresh.run(self.plan['tasks'])
+        self.assertEqual(self.file_bytes(), before)
+        self.assertEqual(self.tail_artifacts(), [])
+
     def test_invalidate_rejects_non_completed(self):
         scheduler = self.completed_chain()
         baseline = self.file_bytes()
