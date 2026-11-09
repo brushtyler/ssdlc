@@ -752,6 +752,8 @@ class TaskScheduler:
             for run in runs:
                 if run['status'] == 'RUNNING':
                     run['status'] = 'INTERRUPTED'
+                    run['cursor'] = dict(task_id=None, attempt=None, check_id=None,
+                                         head=run['head'], tree=run['tree'], dir=None)
                     opened = True
             for record in self.state['tasks'].values():
                 for attempt in record.get('revalidations', []):
@@ -808,7 +810,10 @@ class TaskScheduler:
                     self._assert_evidence_dir(directory, tid, check_id)
 
                 try:
-                    self._make_attempt_dir(directory)
+                    try:
+                        self._make_attempt_dir(directory)
+                    except _RevalidationStop as exc:
+                        raise type(exc)('Cannot create evidence directory', tid, path=exc.path) from exc
                     checks = self._verify(tasks[tid], attempt, directory,
                                           event='REVALIDATION_CHECK_FINISHED',
                                           before_check=before, after_check=gate, exclusive=True)
