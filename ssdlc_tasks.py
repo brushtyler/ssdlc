@@ -1320,6 +1320,8 @@ class TaskScheduler:
                 protected = self._protected()
                 prompt = ('Implement only this task, reusing project conventions. Do not commit, change Git metadata, '
                           'or modify protected SSDLC artifacts. Stay within target_files. '
+                          'Finish all source and test edits before starting verification. Do not edit files while '
+                          'a test command is running; the suite checks controller integrity and concurrent edits invalidate it. '
                           'If repair context is supplied, the previous failed candidate is already restored: repair it in place. '
                           'When ready for independent verification, end with TASK_DEV_STATUS: COMPLETE. '
                           'If completion requires changes outside target_files, end with TASK_DEV_STATUS: SCOPE_REQUIRED. '

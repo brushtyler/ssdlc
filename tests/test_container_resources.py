@@ -133,3 +133,41 @@ class ContainerResourceTests(unittest.TestCase):
             self.assertEqual(invoke.call_args_list[-1].args[0], ['docker', 'rm', '-f', name])
             evidence = root/'.ssdlc/.runtime/resources'/(name+'.json')
             self.assertTrue(json.loads(evidence.read_text())['timed_out'])
+
+    def test_timeout_never_exposes_role_argv_in_exception_or_traceback(self):
+        import traceback
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cmd = ['docker', 'run', '--name', 'owned-test', '-e', 'API_KEY=private-test-value', 'image']
+            original = subprocess.TimeoutExpired(cmd, 10, output=b'partial output', stderr=b'partial diagnostic')
+            with patch('orchestrator.subprocess.run', side_effect=[original, subprocess.CompletedProcess([], 0, '', '')]):
+                try:
+                    EngineRunner._run_role_command(cmd, cwd=root, env=None, timeout=10)
+                except subprocess.TimeoutExpired as exc:
+                    self.assertEqual(exc.output, b'partial output')
+                    self.assertEqual(exc.stderr, b'partial diagnostic')
+                    self.assertEqual(exc.cmd, ['ssdlc-role', 'owned-test'])
+                    for rendered in (str(exc), repr(exc), traceback.format_exc()):
+                        self.assertNotIn('private-test-value', rendered)
+                        self.assertNotIn('API_KEY=', rendered)
+                else:
+                    self.fail('Timeout was swallowed')
+
+    def test_failed_cleanup_preserves_sanitized_timeout_and_records_failure(self):
+        import traceback
+        for cleanup_error in (OSError('unavailable'), subprocess.TimeoutExpired(['docker', 'rm'], 15),
+                              subprocess.CalledProcessError(1, ['docker', 'rm'])):
+            with self.subTest(error=type(cleanup_error).__name__), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                cmd = ['docker', 'run', '--name', 'owned-test', '-e', 'API_KEY=private-test-value', 'image']
+                original = subprocess.TimeoutExpired(cmd, 10)
+                with patch('orchestrator.subprocess.run', side_effect=[original, cleanup_error]):
+                    try:
+                        EngineRunner._run_role_command(cmd, cwd=root, env=None, timeout=10)
+                    except subprocess.TimeoutExpired as exc:
+                        self.assertEqual(exc.timeout, 10)
+                        self.assertNotIn('private-test-value', traceback.format_exc())
+                    else:
+                        self.fail('Timeout was swallowed')
+                evidence = root/'.ssdlc/.runtime/resources/owned-test.json'
+                self.assertTrue(json.loads(evidence.read_text())['cleanup_failed'])
