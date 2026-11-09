@@ -2556,6 +2556,8 @@ class SSDLCOrchestrator:
         quality = json.loads((self.dir_recon / 'quality-contract.json').read_text())
         context = build_trusted_context(head, plan, requirements, quality, [e['ref'] for e in evidence])
         system += '\n' + UNTRUSTED_DATA_INSTRUCTION
+        user += '\n' + untrusted_data('approved task plan', plan)
+        user += '\n' + untrusted_data('quality contract', quality)
         catalogue = requirement_catalogue(requirements)
         definitions = [(d['id'], hashlib.sha256(d['definition'].encode()).hexdigest()) for d in catalogue['definitions']]
         definitions += [(s['standard_id'], hashlib.sha256(json.dumps(s, sort_keys=True).encode()).hexdigest()) for s in quality.get('standards', [])]
@@ -2931,6 +2933,8 @@ class SSDLCOrchestrator:
         quality = json.loads((self.dir_recon / 'quality-contract.json').read_text())
         context = build_trusted_context(head, plan, requirements, quality, [e['ref'] for e in evidence])
         system += '\n' + UNTRUSTED_DATA_INSTRUCTION
+        user += '\n' + untrusted_data('approved task plan', plan)
+        user += '\n' + untrusted_data('quality contract', quality)
         definitions = [(d['id'], hashlib.sha256(d['definition'].encode()).hexdigest())
                        for d in requirement_catalogue(requirements)['definitions']]
         definitions += [(s['standard_id'], hashlib.sha256(json.dumps(s, sort_keys=True).encode()).hexdigest())

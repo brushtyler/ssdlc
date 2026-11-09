@@ -793,13 +793,20 @@ AppSec; missing tools and npm dependency scopes without lockfiles are unknown.
 No dependency installation occurs. pip-audit retains its inherited command scope.
 
 Identity binds gate, reviewer engine/model and ordinal, attempt, verified commit
-and the hashes of diff, plan, obligations, evidence and system prompt; it excludes
-paths and timestamps. One protocol correction is allowed, preserving substantive
-findings and any valid verdict. Substantive rejection is final for that evaluation.
+and the hashes of diff, plan, obligations, evidence, both prompts and report schema,
+plus mandatory controls, trusted context and reasoning effort; it excludes paths
+and timestamps. Every task gate receives the approved plan, quality contract and
+expected `source_gate`. One protocol correction is allowed, preserving substantive
+findings and any valid verdict. A single intact frame with a stale nonce is read
+only to preserve its findings during correction; it cannot authorize approval.
+Ambiguous or incomplete delimiters stop correction explicitly. Substantive
+rejection is final for that evaluation.
 Reservations persist before calls: an interrupted call with unknown results stops
 on recovery, and retained responses are verified before reconciliation or reuse.
-Changed inputs cannot reset the allowance. Terminal protocol, integrity and engine
-outcomes stop before developer feedback; substantive rejection retains the existing
+Changed inputs cannot reuse a cached approval or reset the allowance, including
+changed controls with identical scanner logs. Slots archived under an older input
+binding also fail closed; they are not silently upgraded or rerun. Terminal protocol,
+integrity and engine outcomes stop before developer feedback; substantive rejection retains the existing
 repair flow. Legacy tickets retain their existing behavior.
 
 Artifacts live under `<phase>/evaluations/<slot16>/`: input and prompts, captured

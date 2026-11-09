@@ -43,6 +43,7 @@ class ProtocolTests(unittest.TestCase):
 
     def test_frames_and_strict_json(self):
         self.assertEqual(gates.extract_report(framed().replace('\n', '\r\n'), NONCE), report())
+        self.assert_protocol('frame_nonce', gates.extract_report, framed(), None)
         cases = [('', 'frame_missing'), (json.dumps(report()), 'frame_missing'),
                  (framed() + '\n' + framed(), 'frame_duplicate'),
                  (framed() + '\n' + framed(body='{}'), 'frame_duplicate'),

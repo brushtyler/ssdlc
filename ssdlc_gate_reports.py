@@ -42,6 +42,13 @@ def _pairs(pairs):
 
 
 def extract_report(response, nonce):
+    if nonce is None:
+        _fail('frame_nonce', 'Expected frame nonce is required')
+    return _extract_framed_report(response, nonce)
+
+
+def _extract_framed_report(response, nonce=None):
+    """A nonce-less read is only a preservation baseline, never gate approval."""
     if len(response) > 2_000_000:
         _fail('response_too_large', 'Response exceeds protocol limit')
     response = response.replace('\r\n', '\n')
@@ -54,15 +61,19 @@ def extract_report(response, nonce):
     if 0 in counts:
         _fail('frame_unterminated', 'Incomplete report frame')
     lines = response.split('\n')
-    positions = []
+    positions, nonces = [], []
     for marker in (begin, end):
         index = next(i for i, line in enumerate(lines) if marker in line)
         line = lines[index]
-        if not re.fullmatch(r'-----' + marker + r' [^\s]+-----', line):
+        match = re.fullmatch(r'-----' + marker + r' ([^\s]+)-----', line)
+        if not match:
             _fail('frame_inline', 'Frame markers must occupy exact whole lines')
-        if line != f'-----{marker} {nonce}-----':
+        if nonce is not None and match[1] != nonce:
             _fail('frame_nonce', 'Frame nonce mismatch')
         positions.append(index)
+        nonces.append(match[1])
+    if nonces[0] != nonces[1]:
+        _fail('frame_nonce', 'Frame marker nonces disagree')
     first, last = positions
     if first >= last:
         _fail('frame_order', 'Frame end precedes beginning')
@@ -256,8 +267,17 @@ def correction_plan(original_response, diagnostics, *, nonce=None, verdict_parse
     if nonce is not None:
         try:
             original = extract_report(original_response, nonce)
-        except ProtocolError:
-            pass
+        except ProtocolError as exc:
+            if exc.code == 'frame_nonce':
+                try:
+                    original = _extract_framed_report(original_response)
+                except ProtocolError as recovery:
+                    raise ProtocolError('correction_not_preservable',
+                                        'Cannot safely recover nonce-mismatched findings') from recovery
+            elif exc.code in ('frame_inline', 'frame_duplicate', 'frame_unterminated', 'frame_order',
+                              'response_too_large'):
+                raise ProtocolError('correction_not_preservable',
+                                    'Ambiguous framing cannot establish a preservation baseline') from exc
     if original is not None:
         _baseline(original, diagnostics)
     verdict = verdict_parser(original_response) if verdict_parser else None
@@ -369,6 +389,18 @@ class EvaluationResult:
     response_text: str = ''
 
 
+def _request_binding(request, schema):
+    """Bind all decision inputs, including independently computed controls."""
+    context = request.context
+    return dict(version=2, fingerprint=request.fingerprint,
+                system_prompt_sha256=_digest(request.system_prompt.encode()),
+                user_prompt_sha256=_digest(request.user_prompt.encode()),
+                schema_sha256=_digest(canon(schema)), reasoning_effort=request.reasoning_effort,
+                controls=request.controls, context=dict(
+                    commit=context.expected_commit, task_ids=sorted(context.known_task_ids),
+                    obligations=sorted(context.obligation_ids), evidence=sorted(context.evidence_refs)))
+
+
 class GateEvaluator:
     """A disk-derived, create-exclusive invocation ladder for one reviewer.
 
@@ -437,6 +469,8 @@ class GateEvaluator:
         self._register()
         if self._read('input.json') != self.metadata:
             raise TaskError('Gate input snapshot changed')
+        if _digest(canon(_request_binding(self.request, self.schema))) != self.input_fingerprint:
+            raise TaskError('Gate decision inputs changed')
         verify_evidence(self.entries)
 
     def _ledger(self, ordinal, outcome, telemetry=None):
@@ -466,7 +500,7 @@ class GateEvaluator:
                     diagnostics=list(diagnostics), summary=summary,
                     gate=self.gate, engine=self.request.engine, model=self.request.model,
                     attempt=self.request.attempt, reviewed_commit=self.request.reviewed_commit,
-                    fingerprint=self.request.fingerprint, identity=self.identity,
+                    fingerprint=self.input_fingerprint, identity=self.identity,
                     evidence_catalogue_sha256=_digest(canon(self.metadata)),
                     manifest=self._hashes())
         self._write('outcome.json', data)
@@ -489,13 +523,17 @@ class GateEvaluator:
             raise TaskError('Evaluator gate mismatch')
         slot = slot_key(request.gate, request.engine, request.model, request.ordinal,
                         request.attempt, request.reviewed_commit)
-        self.identity = evaluation_identity(slot, request.fingerprint)
+        self.schema = json.loads((Path(__file__).parent / 'schemas' / 'gate-findings.schema.json').read_text())
+        binding = _request_binding(request, self.schema)
+        self.input_fingerprint = _digest(canon(binding))
+        self.identity = evaluation_identity(slot, self.input_fingerprint)
         self.directory = _artifact_path(self.base / 'evaluations' / slot[:16], self.root)
         self.entries = []
         self.metadata = dict(gate=request.gate, engine=request.engine, model=request.model,
                              ordinal=request.ordinal, attempt=request.attempt,
-                             reviewed_commit=request.reviewed_commit, fingerprint=request.fingerprint,
+                             reviewed_commit=request.reviewed_commit, fingerprint=self.input_fingerprint,
                              identity=self.identity, evidence=[],
+                             decision_inputs=json.loads(canon(binding)),
                              system_prompt_sha256=_digest(request.system_prompt.encode()),
                              user_prompt_sha256=_digest(request.user_prompt.encode()))
         try:
@@ -521,10 +559,10 @@ class GateEvaluator:
             self._write('input.json', self.metadata)
             nonce = self.identity[:16]
             user = request.user_prompt + '\n' + untrusted_data('trusted context', dict(
+                source_gate={'review': 'code_review', 'qa': 'qa', 'appsec': 'appsec'}[request.gate],
                 commit=request.reviewed_commit, task_ids=sorted(request.context.known_task_ids),
                 obligations=sorted(request.context.obligation_ids), evidence=sorted(request.context.evidence_refs)))
-            user += '\n' + untrusted_data('gate findings schema', json.loads(
-                (Path(__file__).parent / 'schemas' / 'gate-findings.schema.json').read_text()))
+            user += '\n' + untrusted_data('gate findings schema', self.schema)
             user += (f'\nEmit exactly one JSON report inside these whole-line markers:\n'
                      f'-----BEGIN SSDLC GATE REPORT {nonce}-----\n'
                      f'-----END SSDLC GATE REPORT {nonce}-----\n'
