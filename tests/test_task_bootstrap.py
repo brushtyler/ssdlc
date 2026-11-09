@@ -826,6 +826,34 @@ class SandboxTests(unittest.TestCase):
 
 
 class OrchestratorBootstrapTests(RepositoryTests):
+    def test_controller_baseline_precedes_development_and_detects_committed_change(self):
+        orch = self.make_orchestrator()
+        self.seed_inputs(orch)
+        with patch('orchestrator.__file__', str(self.repo / 'orchestrator.py')):
+            baseline = orch._ensure_controller_contract()
+            self.assertEqual(baseline['snapshot']['head'], self.base)
+            self.assertIn('00-recon/controller-contract.json', orch.state['artifacts'])
+            (self.repo / 'app.py').write_text('value = 9\n')
+            git(self.repo, 'add', 'app.py')
+            git(self.repo, 'commit', '-m', 'unexpected controller change')
+            with patch('orchestrator.EngineRunner.run_codex') as developer:
+                with self.assertRaisesRegex(TaskError, 'controller changed'):
+                    orch._run_task_development()
+                developer.assert_not_called()
+            self.assertFalse(orch.worktree_dir.exists())
+
+    def test_registered_controller_baseline_cannot_be_replaced_or_recaptured(self):
+        orch = self.make_orchestrator()
+        with patch('orchestrator.__file__', str(self.repo / 'orchestrator.py')):
+            orch._ensure_controller_contract()
+            path = orch.dir_recon / 'controller-contract.json'
+            path.write_text('{}')
+            with self.assertRaisesRegex(TaskError, 'changed controller contract'):
+                orch._ensure_controller_contract()
+            path.unlink()
+            with self.assertRaisesRegex(TaskError, 'Missing controller contract'):
+                orch._ensure_controller_contract()
+
     def make_orchestrator(self):
         runtime = self.repo / '.ssdlc/.runtime'
         meta = {'project_id': 'test-project', 'codex_home': str(runtime / 'codex'),
@@ -960,7 +988,9 @@ class OrchestratorBootstrapTests(RepositoryTests):
                     out = json.dumps(planned)
                 else:
                     self.assertEqual(payload['plan'], planned)
-                    out = 'No missing scenarios found.\nTASK_PLAN_STATUS: APPROVED'
+                    self.assertIn('execution_contract', payload['context'])
+                    self.assertEqual(payload['review_history'], [])
+                    out = json.dumps({'verdict': 'APPROVED', 'findings': []})
                 return out, 0, 0, 0, 'test-trace'
             def dispatch(role, *args, **kwargs):
                 return ('openrouter', 'reviewer' if role.endswith('sec') else 'planner', 'low', 'test')

@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "task-plan-review",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "verdict": {
+      "enum": [
+        "APPROVED",
+        "REVISION_REQUIRED"
+      ]
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "finding_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+          },
+          "status": {
+            "enum": [
+              "OPEN",
+              "RESOLVED"
+            ]
+          },
+          "severity": {
+            "enum": [
+              "BLOCKING",
+              "ADVISORY"
+            ]
+          },
+          "category": {
+            "enum": [
+              "PLAN_DEFECT",
+              "ENVIRONMENT_PREREQUISITE",
+              "IMPROVEMENT"
+            ]
+          },
+          "requirement_refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "uniqueItems": true
+          },
+          "task_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "uniqueItems": true
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence": {
+            "type": "string",
+            "minLength": 1
+          },
+          "requested_change": {
+            "type": "string",
+            "minLength": 1
+          },
+          "new_issue_reason": {
+            "enum": [
+              "INITIAL_REVIEW",
+              "INTRODUCED_BY_REVISION",
+              "MISSED_EARLIER"
+            ]
+          },
+          "standard_refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "uniqueItems": true
+          },
+          "quality_check_refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "finding_id",
+          "status",
+          "severity",
+          "category",
+          "requirement_refs",
+          "task_ids",
+          "message",
+          "evidence",
+          "requested_change",
+          "new_issue_reason"
+        ]
+      }
+    }
+  },
+  "required": [
+    "verdict",
+    "findings"
+  ]
+}

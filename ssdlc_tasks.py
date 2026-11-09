@@ -609,6 +609,7 @@ class TaskScheduler:
         results = []
         for index, check in enumerate(checks):
             self.budget()
+            self.guard()
             cwd = confined(self.wt, check['cwd'])
             try:
                 out, err, rc = self.verifier(check['argv'], cwd, check['timeout_sec'])

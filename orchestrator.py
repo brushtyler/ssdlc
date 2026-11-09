@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ssdlc_planning import PlanRepair
+from ssdlc_controller import assert_controller, controller_snapshot
 
 from ssdlc_tasks import (
     PlanError, TaskError, ResourceLimitError, TaskPlanValidator, TaskScheduler, atomic_json,
@@ -1484,12 +1485,14 @@ class SSDLCOrchestrator:
             return plan
         if "02-design/plan.json" in self.state.get("artifacts", {}):
             raise PlanError("Registered task plan disappeared; refusing regeneration")
+        controller = self._ensure_controller_contract()
         engine, model, effort, _ = SquadDispatcher.dispatch_role(
             "02-design-arch", self.state.get("risk_tier", "M"), self.state.get("dev_profile", "ALGORITHMIC")
         )
         context = {"requirements": requirements,
                    "requirement_catalogue": validator.requirement_catalogue,
                    "available_contract_refs": validator.available_contract_refs(),
+                   "execution_contract": controller,
                    "adr": self._read_optional(self.dir_design / "adr.md", "Tier S: lightweight plan"),
                    "threat_model": self._read_optional(self.dir_design / "threat-model.md", "See SEC requirements"),
                    "quality_contract": quality, "repo_context": self._gather_repo_context(),
@@ -1532,14 +1535,30 @@ class SSDLCOrchestrator:
                 f"02-design-task-plan-a{attempt}", "Task Planner", engine, model, "GENERATED",
                 time.time() - t0, cost, tin, tout, trace, effort))
             return out
-        def review(plan):
+        review_schema = (Path(__file__).parent / "schemas" / "task-plan-review.schema.json").read_text()
+        review_prompt = (
+            "Review the entire plan against approved requirements and design in one comprehensive pass. "
+            "Return only JSON matching the supplied review schema. Keep finding_id stable across revisions; "
+            "explicitly resolve or retain every prior open blocker using evidence from the current plan. "
+            "Blocking findings need an exact approved AC/SEC, standard or required quality-check reference, "
+            "concrete evidence and a bounded requested change. "
+            "Optional improvements are ADVISORY and cannot block approval. Do not introduce new scope or require "
+            "implementation detail beyond the approved behavior. Identify new findings as INTRODUCED_BY_REVISION or "
+            "MISSED_EARLIER and explain why in evidence. Review planned behavioral assertions, not code that does not exist yet. "
+            "Reject label-only checks and tests deferred beyond the task implementing the behavior. "
+            "Use the supplied execution_contract for controller prerequisites; never invent environment variables. "
+            "Infrastructure prerequisites belong to ENVIRONMENT_PREREQUISITE, not speculative target code changes.\n" + review_schema)
+        prompt += ("\nUse repair.history to preserve all earlier fixes. Avoid unrelated rewrites during repair. "
+                   "Honor execution_contract: the host harness captures and verifies the executing controller. "
+                   "Do not create controller-capture tasks or assume undeclared environment variables. "
+                   "For crash safety, enumerate persistence boundaries from the approved design and specify "
+                   "the fault injection and expected recovery for each; justify equivalence when grouping boundaries.")
+        def review(plan, history):
             t0 = time.time()
             out, cost, tin, tout, trace = EngineRunner.invoke_role(
                 rev_engine, rev_model,
-                "Review decomposition, missing scenarios and requirement/check coverage. Reject label-only coverage: "
-                "checks must exercise the claimed behavior and implementation tasks must include their tests. "
-                "End with exactly TASK_PLAN_STATUS: APPROVED or TASK_PLAN_STATUS: REVISION_REQUIRED.",
-                json.dumps({"context": context, "plan": plan}), self.repo_root,
+                review_prompt,
+                json.dumps({"context": context, "plan": plan, "review_history": history}), self.repo_root,
                 self.project_id, self.ticket_id, "02-design-task-plan-review", reasoning_effort=rev_effort,
             )
             self.record_ledger(CostAndTelemetryEntry(
@@ -1547,9 +1566,10 @@ class SSDLCOrchestrator:
                 time.time() - t0, cost, tin, tout, trace, rev_effort))
             return out
         repair = PlanRepair(self.dir_design,
-                            {"context": context, "schema": schema, "prompt": prompt,
+                            {"context": context, "schema": schema, "prompt": prompt, "review_prompt": review_prompt,
                              "planner": [engine, model, effort], "reviewer": [rev_engine, rev_model, rev_effort]},
-                            validate, generate, review, self.check_budget_circuit_breaker, review_repairs=review_repairs)
+                            validate, generate, review, self.check_budget_circuit_breaker, review_repairs=review_repairs,
+                            structured_reviews=True)
         try:
             previous_candidate = self.dir_design / "task-plan-candidate.txt"
             previous_meta = self.state.get('artifacts', {}).get('02-design/task-plan-candidate.txt')
@@ -1569,6 +1589,30 @@ class SSDLCOrchestrator:
         self.record_artifact("02-design/plan.json", plan_path)
         self.record_gate("TASK_PLAN_GATE", True, "Validated plan and independent semantic review")
         return plan
+
+    def _ensure_controller_contract(self) -> dict:
+        """Persist the host baseline before planning/development, never inside a task."""
+        name = '00-recon/controller-contract.json'
+        path = self.ssdlc_root / name
+        root = Path(__file__).resolve().parent
+        meta = self.state.get('artifacts', {}).get(name)
+        if path.exists():
+            if not meta or file_hash(path) != meta['sha256']:
+                raise TaskError('Unregistered or changed controller contract')
+            snapshot = json.loads(path.read_text())
+            assert_controller(root, snapshot)
+        else:
+            if meta or (self.dir_dev / 'tasks/task-journal.jsonl').exists():
+                raise TaskError('Missing controller contract; explicit revision required')
+            snapshot = controller_snapshot(root)
+            atomic_json(path, snapshot)
+            self.record_artifact(name, path)
+        return {'artifact_ref': name, 'snapshot': snapshot,
+                'verification_owner': 'host orchestrator, outside target task commands',
+                'guard_points': ['before development', 'before each developer invocation',
+                                 'after each developer invocation', 'before and after each verification check'],
+                'limitations': 'Unkeyed integrity checking at guard boundaries; not authentication or continuous containment. '
+                               'Ignored controller files are excluded. No controller environment variables are required.'}
 
     def resume_task_planning(self, review_repairs=None) -> Path:
         """Resume only planning against sealed upstream artifacts; never execute code."""
@@ -1605,6 +1649,7 @@ class SSDLCOrchestrator:
 
     def _run_task_development(self, feedback: str = "") -> Tuple[Path, List[str]]:
         plan = self._ensure_task_plan()
+        controller = self._ensure_controller_contract()
         quality = json.loads((self.dir_recon / "quality-contract.json").read_text())
         wt = self._ensure_worktree()
         context = {name: self._read_optional(self.ssdlc_root / name) for name in (
@@ -1615,6 +1660,7 @@ class SSDLCOrchestrator:
         protected = {name: dict(meta) for name, meta in self.state.get("artifacts", {}).items()
                      if name.startswith(("00-recon/", "01-po/", "02-design/"))}
         def guard():
+            assert_controller(Path(__file__).resolve().parent, controller['snapshot'])
             validator.validate(plan)
             for name, meta in protected.items():
                 path = self.ssdlc_root / meta["path"]

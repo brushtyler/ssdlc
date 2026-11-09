@@ -452,6 +452,32 @@ anchors receive numeric suffixes. Duplicate JSON keys, non-finite constants and
 multiple candidate objects are rejected. Structural coverage still requires an
 independent semantic review of whether the checks exercise the claimed behavior.
 
+New planning sessions use structured reviews (`schemas/task-plan-review.schema.json`).
+Both planner and reviewer receive the cumulative diagnostic/review history. Findings
+keep stable IDs and explicit OPEN/RESOLVED dispositions; each blocker needs a known
+AC/SEC, standard or quality-check reference, concrete evidence and a requested change. Optional improvements
+are advisory. New findings after the first review must identify an earlier omission
+or a defect introduced by revision. The protocol checks attribution and consistency;
+the independent reviewer still decides whether the evidence actually resolves a defect.
+
+Fresh structured sessions allow at most four semantic repairs, within the existing
+cost circuit breaker. Three consecutive reviews retaining the same blocking IDs stop
+as STAGNATION. Environment prerequisites stop as ENVIRONMENT_PREREQUISITE rather than
+triggering speculative plan rewrites. Invalid reviewer output gets one correction
+on the same candidate, then stops as REVIEW_PROTOCOL if still invalid. Both raw
+responses and diagnostics are retained and hash-checked on resume.
+Neither condition approves a plan. Existing session limits stay unchanged, and changed
+protocols/inputs require an explicit planning revision that preserves old evidence.
+
+Before new planning or first task execution, the host captures and registers
+`00-recon/controller-contract.json`. It binds the actual executing controller path,
+Git HEAD/status and hashes of tracked and nonignored files. The host checks this
+baseline before/after developer invocations and verification checks. A committed
+controller change is detected even when the checkout is clean. Tasks do not invent
+controller environment variables or capture a late baseline. Missing/altered registered
+contracts block execution; this unkeyed integrity check excludes ignored files and
+does not provide authentication or continuous protection against external writers.
+
 Keep the executing SSDLC installation pinned to a reviewed version and use a separate
 checkout as the target when developing SSDLC itself. Start from a clean, committed
 baseline and pass a narrowly scoped goal. A filename alone does not supply its content
