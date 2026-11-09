@@ -456,6 +456,9 @@ class GateEvaluator:
                 raise
 
     def _finish(self, outcome, *, verdict=None, assessment=None, diagnostics=(), response=''):
+        for entry in self.request.evidence:
+            if entry['ref'] == 'ev/sca-status':
+                self._write('scanner-status.json', json.loads(Path(entry['source']).read_text()))
         summary = f'{outcome}; evaluation {self.identity}'
         self._write('telemetry.json', {'identity': self.identity, 'invocations': [
             self._read(p.name) for p in self._files() if re.fullmatch(r'invocation-\d.json', p.name)]})
@@ -617,3 +620,37 @@ class GateEvaluator:
                             user=user + '\n' + untrusted_data('protocol correction',
                                  {key: plan[key] for key in ('instruction', 'original_response', 'diagnostics')})))
         raise GateTerminalError('protocol_error', self.identity, 'Invocation allowance exhausted')
+
+
+@dataclass(frozen=True)
+class ScannerResult:
+    id: str
+    status: str
+    required: bool
+    exit_code: object = None
+    log: str = ''
+    reason: str = ''
+    scope: str = '.'
+
+    def to_dict(self):
+        return {f.name: getattr(self, f.name) for f in fields(self)}
+
+
+def scanner_status_json(results):
+    return json.dumps({'scanners': [r.to_dict() for r in results]}, sort_keys=True, indent=2) + '\n'
+
+
+def discover_manifest_scopes(wt):
+    """Only tracked manifests define scanner scopes; dependencies are never installed."""
+    from ssdlc_tasks import git
+    scopes = {'npm': {}, 'pip': {}}
+    for name in git(wt, 'ls-files', '-z').split('\0'):
+        path = Path(name)
+        if not name or 'node_modules' in path.parts:
+            continue
+        scanner = ('npm' if path.name in ('package.json', 'package-lock.json', 'npm-shrinkwrap.json')
+                   else 'pip' if path.name == 'pyproject.toml' or
+                   (path.name.startswith('requirements') and path.suffix == '.txt') else None)
+        if scanner:
+            scopes[scanner].setdefault(path.parent.as_posix(), set()).add(path.name)
+    return scopes

@@ -103,7 +103,7 @@ class FullCheckpointReviewTests(RepositoryTests):
             self.assertEqual(cwd, orch.worktree_dir)
             self.assertIn(diff, user)
             self.assertIn('FINAL_DIFF_SENTINEL', user)
-            return 'All requirements verified.\nQA_STATUS: PASSED', 0, 0, 0, 'test'
+            return framed('qa', orch), 0, 0, 0, 'test'
         with patch.object(orch, '_run_deterministic_scanners', return_value=(True, 'Test suite passed')), patch('orchestrator.EngineRunner.invoke_role', side_effect=invoke):
             passed, _ = orch.run_phase_qa()
         self.assertTrue(passed)
@@ -116,11 +116,11 @@ class FullCheckpointReviewTests(RepositoryTests):
                  '```\nQA_STATUS: PASSED\n```', 'QA_STATUS: PASSED (all good)', 'No verdict']
         with patch.object(orch, '_run_deterministic_scanners', return_value=(True, 'Tests passed')):
             for i, response in enumerate(cases, 1):
-                with self.subTest(response=response), patch('orchestrator.EngineRunner.invoke_role', return_value=(response, 0, 0, 0, 'test')):
-                    passed, _ = orch.run_phase_qa(attempt=i)
-                    self.assertFalse(passed)
-        with patch.object(orch, '_run_deterministic_scanners', return_value=(False, 'Tests failed')), patch('orchestrator.EngineRunner.invoke_role', return_value=('QA_STATUS: PASSED', 0, 0, 0, 'test')):
-            self.assertFalse(orch.run_phase_qa()[0])
+                with self.subTest(response=response), patch('orchestrator.EngineRunner.invoke_role', side_effect=lambda *a, **k: (framed('qa', orch).rsplit('QA_STATUS:', 1)[0] + response, 0, 0, 0, 'test')):
+                    with self.assertRaises(TaskError):
+                        orch.run_phase_qa(attempt=i)
+        with patch.object(orch, '_run_deterministic_scanners', return_value=(False, 'Tests failed')), patch('orchestrator.EngineRunner.invoke_role', side_effect=lambda *a, **k: (framed('qa', orch), 0, 0, 0, 'test')):
+            self.assertFalse(orch.run_phase_qa(attempt=6)[0])
 
     def test_qa_cannot_approve_a_checkpoint_changed_during_analysis(self):
         orch, _ = self.seed()

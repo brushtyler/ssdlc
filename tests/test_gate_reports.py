@@ -513,3 +513,175 @@ class PipelineBoundaryTests(GateFixture):
         self.assertIn('self.check_budget_circuit_breaker()', pipeline[dev:review])
         self.assertNotIn('current_phase', inspect.getsource(SSDLCOrchestrator.check_budget_circuit_breaker))
         self.assertEqual(pipeline.count('self._stop_on_terminal_gate()'), 3)
+
+
+class VerificationGateTests(GateFixture):
+    def call_gate(self, gate, *, det=True, scanners=None, mutate=False, attempt=1):
+        def invoke(engine, model, system, user, cwd, *args, **kwargs):
+            self.assertEqual(cwd, self.orch.worktree_dir)
+            self.assertEqual(kwargs['sandbox'], 'read-only')
+            self.assertIn(self.diff, user)
+            self.assertIn('FINAL_DIFF_SENTINEL', user)
+            response = framed(gate, self.orch)
+            if mutate:
+                (cwd / 'app.py').write_text('changed during gate')
+            return response, 0, 0, 0, 'fake'
+        with patch.object(self.orch, '_run_deterministic_scanners', return_value=(det, 'deterministic log')), \
+             patch.object(self.orch, '_run_appsec_scans', return_value=scanners or []), \
+             patch.object(self.orch, 'run_phase_dev') as dev, \
+             patch('orchestrator.TaskScheduler') as scheduler, \
+             patch('orchestrator.EngineRunner.invoke_role', side_effect=invoke):
+            result = getattr(self.orch, 'run_phase_' + gate)(attempt=attempt)
+        dev.assert_not_called()
+        scheduler.assert_not_called()
+        return result
+
+    def test_qa_deterministic_failure_cannot_be_overridden(self):
+        self.assertFalse(self.call_gate('qa', det=False)[0])
+        self.assertTrue(self.call_gate('qa', attempt=2)[0])
+
+    def test_qa_checkpoint_precedes_scanners(self):
+        (self.orch.worktree_dir / 'app.py').write_text('dirty')
+        with patch.object(self.orch, '_run_deterministic_scanners') as scan, self.assertRaises(TaskError):
+            self.orch.run_phase_qa()
+        scan.assert_not_called()
+
+    def test_appsec_complete_diff_controls_and_full_logs(self):
+        for attempt, status in enumerate(('failed', 'unknown', 'not_applicable', 'passed'), 1):
+            log = 'L' * 10000 + 'LOG_END'
+            scan = gates.ScannerResult('npm:.', status, status != 'not_applicable', log=log)
+            self.assertEqual(self.call_gate('appsec', scanners=[scan], attempt=attempt)[0],
+                             status in ('passed', 'not_applicable'))
+            self.assertIn(log, (self.orch.dir_appsec / f'supply-chain-sca-a{attempt}.md').read_text())
+        for path in self.orch.dir_appsec.glob('evaluations/*/scanner-status.json'):
+            self.assertIn('LOG_END', path.read_text())
+
+    def test_appsec_mutation_returns_false_and_terminal_flag(self):
+        self.assertFalse(self.call_gate('appsec', mutate=True)[0])
+        self.assertEqual(self.orch.state['ledger'][-1]['status'], 'INPUT_CHANGED')
+        with self.assertRaises(gates.GateTerminalError):
+            self.orch._stop_on_terminal_gate()
+
+    def test_scanner_manifest_scopes_and_tools(self):
+        from ssdlc_tasks import git
+        wt = self.orch.worktree_dir
+        cases = [({}, 'not_applicable'), ({'name': 'empty'}, 'not_applicable')]
+        cases += [({key: {'dep': '1'}}, 'unknown') for key in
+                  ('dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies')]
+        cases += [('malformed', 'unknown'), ([], 'unknown')]
+        for obj, expected in cases:
+            (wt / 'package.json').write_text(obj if isinstance(obj, str) else json.dumps(obj))
+            git(wt, 'add', 'package.json')
+            with patch('orchestrator.EngineRunner.run_sandboxed_cmd') as run:
+                results = self.orch._run_appsec_scans(wt)
+            run.assert_not_called()
+            npm = next(r for r in results if r.id == 'npm:.')
+            self.assertEqual(npm.status, expected)
+            self.assertEqual(npm.required, expected == 'unknown')
+        (wt / 'package.json').write_text('{}')
+        (wt / 'package-lock.json').write_text('{}')
+        nested = wt / 'packages/a'
+        nested.mkdir(parents=True)
+        (nested / 'package.json').write_text('{"dependencies":{"a":"1"}}')
+        (wt / 'requirements-dev.txt').write_text('dep')
+        git(wt, 'add', '.')
+        with patch('orchestrator.shutil.which', return_value=None), \
+             patch('orchestrator.EngineRunner._should_spawn_role_container', return_value=False):
+            results = self.orch._run_appsec_scans(wt)
+        self.assertTrue(all(r.status == 'unknown' for r in results))
+        self.assertIn('npm:packages/a', [r.id for r in results])
+        for rc, expected in ((0, 'passed'), (1, 'failed')):
+            with patch('orchestrator.shutil.which', return_value='/tool'), \
+                 patch('orchestrator.EngineRunner.run_sandboxed_cmd', return_value=('X' * 9000, 'TAIL', rc)) as run:
+                results = self.orch._run_appsec_scans(wt)
+            root = next(r for r in results if r.id == 'npm:.')
+            self.assertEqual(root.status, expected)
+            self.assertEqual(root.log, 'X' * 9000 + 'TAIL')
+            self.assertTrue(all('install' not in call.args[0] for call in run.call_args_list))
+        with patch('orchestrator.shutil.which', return_value='/tool'), \
+             patch('orchestrator.EngineRunner.run_sandboxed_cmd', side_effect=TimeoutError('timeout')):
+            self.assertTrue(all(r.status == 'unknown' for r in self.orch._run_appsec_scans(wt)))
+
+    def test_required_npm_without_lock_blocks_secure_gate(self):
+        from ssdlc_tasks import git
+        wt = self.orch.worktree_dir
+        for attempt, key in enumerate(('dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies'), 1):
+            path = wt / ('packages/a/package.json' if key == 'peerDependencies' else 'package.json')
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({key: {'dep': '1'}}))
+            git(wt, 'add', '.')
+            git(wt, 'commit', '-m', 'dependency manifest')
+            self.orch.state['task_verified_head'] = git(wt, 'rev-parse', 'HEAD')
+            diff = git(wt, 'diff', '--binary', self.orch.state['base_commit'], 'HEAD') + '\n'
+            target = self.orch.dir_dev / 'implementation.diff'
+            target.write_text(diff)
+            self.orch.record_artifact('03-dev/implementation.diff', target)
+            with patch('orchestrator.EngineRunner.run_sandboxed_cmd') as scanner, \
+                 patch('orchestrator.EngineRunner.invoke_role', side_effect=lambda *a, **k: (framed('appsec', self.orch), 0, 0, 0, 'fake')):
+                self.assertFalse(self.orch.run_phase_appsec(attempt=attempt)[0])
+            scanner.assert_not_called()
+
+    def test_scanner_mutation_is_terminal_without_model_call(self):
+        def scan(*a):
+            (self.orch.worktree_dir / 'app.py').write_text('scanner changed source')
+            return True, 'log'
+        with patch.object(self.orch, '_run_deterministic_scanners', side_effect=scan), \
+             patch('orchestrator.EngineRunner.invoke_role') as engine:
+            self.assertFalse(self.orch.run_phase_qa()[0])
+        engine.assert_not_called()
+        self.assertEqual(self.orch.state['ledger'][-1]['status'], 'INPUT_CHANGED')
+        with self.assertRaises(gates.GateTerminalError):
+            self.orch._stop_on_terminal_gate()
+
+    def test_absent_manifests_not_applicable(self):
+        self.assertTrue(all(r.status == 'not_applicable' and not r.required
+                            for r in self.orch._run_appsec_scans(self.orch.worktree_dir)))
+
+    def test_legacy_gates_need_no_frame_and_hook_is_noop(self):
+        self.orch.state['task_breakdown'] = False
+        with patch.dict(os.environ, {'SSDLC_ENABLE_TASK_BREAKDOWN': 'false'}), \
+             patch.object(self.orch, '_run_deterministic_scanners', return_value=(True, 'passed')), \
+             patch('orchestrator.EngineRunner.invoke_role', return_value=('QA_STATUS: PASSED', 0, 0, 0, 'fake')):
+            self.assertTrue(self.orch.run_phase_qa()[0])
+            self.orch._stop_on_terminal_gate()
+        with patch('orchestrator.EngineRunner.invoke_role', return_value=('APPSEC_STATUS: SECURE', 0, 0, 0, 'fake')):
+            self.assertTrue(self.orch.run_phase_appsec()[0])
+        with patch('orchestrator.EngineRunner.invoke_role', return_value=('REVIEW_STATUS: APPROVED', 0, 0, 0, 'fake')):
+            self.assertTrue(self.orch.run_phase_review()[0])
+        self.assertFalse(list(self.orch.ssdlc_root.glob('*/evaluations/*/input.json')))
+
+
+class VerificationPipelineTests(GateFixture):
+    pipeline = _pipeline
+
+    def run_terminal(self, gate, outer):
+        if gate == 'appsec':
+            self.orch.state['risk_tier'] = 'L'
+            self.orch._save_state()
+        captured = []
+        def invoke(*args, **kwargs):
+            phase = self.orch.state['current_phase']
+            current = next(g for g, p in GATE_PHASE.items() if p == phase)
+            if current == gate:
+                captured[:] = [phase, self.orch.state.get('current_step')]
+                return 'No frame', 0, 0, 0, 'fake'
+            return framed(current, self.orch), 0, 0, 0, 'fake'
+        with patch.object(self.orch, '_run_deterministic_scanners', return_value=(True, 'passed')), \
+             patch.object(self.orch, '_run_appsec_scans', return_value=[]), self.assertRaises(gates.GateTerminalError):
+            self.pipeline(invoke, outer=outer)
+        self.developer.assert_called_once_with(feedback='', attempt=1)
+        self.assertEqual(self.engine.call_count, 3 if gate == 'qa' else 4)
+        if outer:
+            assert_terminal_failure(self, self.orch, gate, captured)
+
+    def test_qa_layer_a(self):
+        self.run_terminal('qa', False)
+
+    def test_qa_layer_b(self):
+        self.run_terminal('qa', True)
+
+    def test_appsec_layer_a(self):
+        self.run_terminal('appsec', False)
+
+    def test_appsec_layer_b(self):
+        self.run_terminal('appsec', True)
