@@ -235,6 +235,292 @@ class SchedulerTests(RepositoryTests):
         scheduler.state = state
         return state
 
+    def test_invalidate_a_closure(self):
+        scheduler = self.completed_chain()
+        before = copy.deepcopy(scheduler.state)
+        count = len(self.file_bytes()[0].splitlines())
+        self.assertEqual(scheduler.invalidate(['A'], ' reason '), ['A', 'B', 'C'])
+        lines = self.file_bytes()[0].splitlines()
+        self.assertEqual(len(lines), count + 1)
+        event = json.loads(lines[-1])
+        self.assertEqual(event['event'], 'TASKS_INVALIDATED')
+        self.assertEqual(event['state']['invalidations'][-1],
+                         {'roots': ['A'], 'closure': ['A', 'B', 'C'], 'reason': 'reason'})
+        for tid in ['A', 'B', 'C']:
+            self.assertEqual(scheduler.state['tasks'][tid]['status'], 'INVALIDATED')
+        self.assertEqual(scheduler.state['tasks']['D'], before['tasks']['D'])
+
+    def test_invalidate_b_closure(self):
+        scheduler = self.completed_chain()
+        before = copy.deepcopy(scheduler.state)
+        self.assertEqual(scheduler.invalidate(['B'], 'reason'), ['B', 'C'])
+        for tid in ['A', 'D']:
+            self.assertEqual(scheduler.state['tasks'][tid], before['tasks'][tid])
+
+    def test_invalidate_deterministic(self):
+        scheduler = self.completed_chain()
+        baseline = self.file_bytes()
+        expected = {'roots': ['A', 'C'], 'closure': ['A', 'B', 'C'], 'reason': 'reason'}
+        for ids in (['C', 'A', 'A'], ['A', 'C'], ('C', 'A'), {'A', 'C'}, frozenset(['C', 'A'])):
+            with self.subTest(ids=ids):
+                scheduler.journal.path.write_bytes(baseline[0])
+                scheduler.journal.snapshot.write_bytes(baseline[1])
+                fresh = self.scheduler(self.fail_dev, self.fail_ver)
+                self.assertEqual(fresh.invalidate(ids, 'reason'), expected['closure'])
+                self.assertEqual(fresh.state['invalidations'][-1], expected)
+
+    def test_invalidate_accepts_custom_collection(self):
+        from collections import deque
+        scheduler = self.completed_chain()
+        self.assertEqual(scheduler.invalidate(deque(['B']), 'reason'), ['B', 'C'])
+
+    def test_invalidate_accepts_long_reason(self):
+        scheduler = self.completed_chain()
+        scheduler.invalidate(['A'], '  ' + 'x' * 5000 + '\n')
+        self.assertEqual(scheduler.state['invalidations'][-1]['reason'], 'x' * 5000)
+
+    def test_invalidate_preserves_audit_fields(self):
+        original = self.completed_chain()
+        before = copy.deepcopy(original.state)
+        head = git(self.wt, 'rev-parse', 'HEAD')
+        scheduler = self.scheduler(self.fail_dev, self.fail_ver)
+        scheduler.invalidate(['A'], 'reason')
+        for tid, record in before['tasks'].items():
+            expected = copy.deepcopy(record)
+            if tid in ['A', 'B', 'C']:
+                expected['status'] = 'INVALIDATED'
+            self.assertEqual(scheduler.state['tasks'][tid], expected)
+        self.assertEqual(scheduler.state['expected_head'], before['expected_head'])
+        self.assertEqual(git(self.wt, 'rev-parse', 'HEAD'), head)
+
+    def test_invalidate_rejects_bad_requests_without_byte_change(self):
+        scheduler = self.completed_chain()
+        baseline = self.file_bytes()
+        for damage in (self.with_stale_snapshot, self.with_partial_tail):
+            scheduler.journal.path.write_bytes(baseline[0])
+            scheduler.journal.snapshot.write_bytes(baseline[1])
+            damage()
+            cases = [(ids, 'reason') for ids in
+                     ('A', b'A', None, [], (), {}, {'A': 1}, (x for x in ['A']), [''], [1],
+                      ['Z'], ['../x'], ['A', 'Z'], bytearray(b'A'))]
+            cases += [(['A'], reason) for reason in (None, '', '  ', 5)]
+            for ids, reason in cases:
+                with self.subTest(damage=damage.__name__, ids=ids, reason=reason):
+                    before = self.file_bytes()
+                    fresh = self.scheduler(self.fail_dev, self.fail_ver)
+                    with patch.object(fresh.journal, 'peek', side_effect=AssertionError('peek')), patch.object(
+                            fresh.journal, 'load', side_effect=AssertionError('load')):
+                        with self.assertRaises(TaskError):
+                            fresh.invalidate(ids, reason)
+                    self.assertEqual(self.file_bytes(), before)
+                    self.assertEqual(self.tail_artifacts(), [])
+
+    def test_invalidate_lock_boundary(self):
+        self.completed_chain()
+        scheduler = self.scheduler(self.fail_dev, self.fail_ver)
+        calls = []
+        lock = scheduler.directory / 'scheduler.lock'
+        def wrap(name, original):
+            def checked(*args):
+                calls.append(name)
+                with self.assertRaisesRegex(TaskError, '^Another process is running this ticket$'):
+                    with ticket_lock(lock):
+                        pass
+                return original(*args)
+            return checked
+        with patch.object(scheduler.journal, 'peek', wrap('peek', scheduler.journal.peek)), patch.object(
+                scheduler.journal, 'load', wrap('load', scheduler.journal.load)), patch.object(
+                scheduler, '_save', wrap('save', scheduler._save)):
+            before = self.file_bytes()
+            with ticket_lock(lock):
+                with self.assertRaisesRegex(TaskError, 'Another process'):
+                    scheduler.invalidate(['A'], 'reason')
+            self.assertEqual(calls, [])
+            self.assertEqual(self.file_bytes(), before)
+            scheduler.invalidate(['A'], 'reason')
+            self.assertEqual(calls, ['peek', 'load', 'save'])
+        with ticket_lock(lock):
+            pass
+
+    def test_invalidate_lock_contention(self):
+        scheduler = self.completed_chain()
+        before = self.file_bytes()
+        with ticket_lock(scheduler.directory / 'scheduler.lock'):
+            with self.assertRaisesRegex(TaskError, 'Another process'):
+                scheduler.invalidate(['A'], 'reason')
+        self.assertEqual(self.file_bytes(), before)
+
+    def test_invalidate_snapshot_crash_recovers_full_closure(self):
+        scheduler = self.completed_chain()
+        count = len(self.file_bytes()[0].splitlines())
+        def crash(path, state):
+            if any(rec['status'] == 'INVALIDATED' for rec in state['tasks'].values()):
+                raise OSError('snapshot interrupted')
+            atomic_json(path, state)
+        with patch('ssdlc_tasks.atomic_json', side_effect=crash):
+            with self.assertRaises(OSError):
+                scheduler.invalidate(['A'], 'reason')
+        self.assertEqual(len(self.file_bytes()[0].splitlines()), count + 1)
+        fresh = self.scheduler(self.fail_dev, self.fail_ver)
+        state = fresh.journal.load()
+        self.assertEqual([state['tasks'][tid]['status'] for tid in 'ABCD'],
+                         ['INVALIDATED'] * 3 + ['COMPLETED'])
+        self.assertEqual(json.loads(fresh.journal.snapshot.read_text()), state)
+
+    def test_invalidate_repairs_stale_snapshot_for_valid_request(self):
+        scheduler = self.completed_chain()
+        count = len(self.file_bytes()[0].splitlines())
+        self.with_stale_snapshot()
+        scheduler.invalidate(['A'], 'reason')
+        lines = self.file_bytes()[0].splitlines()
+        self.assertEqual([json.loads(line)['event'] for line in lines[count:]], ['TASKS_INVALIDATED'])
+        self.assertEqual(json.loads(self.file_bytes()[1]), scheduler.state)
+
+    def test_invalidate_rejects_non_completed(self):
+        scheduler = self.completed_chain()
+        baseline = self.file_bytes()
+        cases = [(status, lambda s, status=status: s['tasks']['B'].update(status=status))
+                 for status in ('PENDING', 'FAILED', 'RUNNING', 'VERIFYING', 'COMMIT_INTENT')]
+        cases += [('no scheduler state', lambda s: s['tasks'].pop('B')),
+                  ('not in the plan', lambda s: s['tasks'].update(X={'status': 'COMPLETED'}))]
+        for message, mutate in cases:
+            for damage in (lambda: None, self.with_stale_snapshot, self.with_partial_tail):
+                with self.subTest(message=message, damage=damage.__name__):
+                    scheduler.journal.path.write_bytes(baseline[0])
+                    scheduler.journal.snapshot.write_bytes(baseline[1])
+                    scheduler.state = scheduler.journal.load()
+                    self.journaled_state(mutate)
+                    damage()
+                    before = self.file_bytes()
+                    with self.assertRaisesRegex(TaskError, message) as raised:
+                        self.scheduler(self.fail_dev, self.fail_ver).invalidate(['A'], 'reason')
+                    self.assertIn("'X'" if message == 'not in the plan' else "'B'", str(raised.exception))
+                    self.assertEqual(self.file_bytes(), before)
+                    self.assertEqual(self.tail_artifacts(), [])
+
+    def test_second_invalidate_rejected_invalidate(self):
+        scheduler = self.completed_chain()
+        scheduler.invalidate(['A'], 'reason')
+        for stale in (False, True):
+            if stale:
+                self.with_stale_snapshot()
+            before = self.file_bytes()
+            with self.assertRaisesRegex(TaskError, 'INVALIDATED'):
+                self.scheduler(self.fail_dev, self.fail_ver).invalidate(['A'], 'again')
+            self.assertEqual(self.file_bytes(), before)
+            self.assertEqual(self.tail_artifacts(), [])
+
+    def assert_invalidate_integrity_failure(self, scheduler, message):
+        before = self.file_bytes()
+        with self.assertRaisesRegex(TaskError, message):
+            scheduler.invalidate(['A'], 'reason')
+        self.assertEqual(self.file_bytes(), before)
+        self.assertNotIn(b'TASKS_INVALIDATED', self.file_bytes()[0])
+
+    def test_invalidate_fails_closed_dirty_tree(self):
+        self.completed_chain().journal.load()
+        (self.wt / 'untracked').write_text('external')
+        self.assert_invalidate_integrity_failure(self.scheduler(self.fail_dev, self.fail_ver), 'worktree is dirty')
+
+    def test_invalidate_fails_closed_head_changed(self):
+        self.completed_chain().journal.load()
+        git(self.wt, 'commit', '--allow-empty', '-m', 'external')
+        self.assert_invalidate_integrity_failure(self.scheduler(self.fail_dev, self.fail_ver), 'Unexpected worktree HEAD')
+
+    def test_invalidate_fails_closed_protected_path(self):
+        self.completed_chain().journal.load()
+        (self.wt / '.git').write_text((self.wt / '.git').read_text() + '\n')
+        self.assert_invalidate_integrity_failure(self.scheduler(self.fail_dev, self.fail_ver), 'Protected worktree paths changed')
+
+    def test_invalidate_fails_closed_ignored_file(self):
+        self.completed_chain().journal.load()
+        # Keep the ignored-path check independent of protected metadata.
+        exclude = Path(self.tmp.name) / 'excludes'
+        exclude.write_text('new-ignored\n')
+        with patch.dict(os.environ, {'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'core.excludesFile',
+                                     'GIT_CONFIG_VALUE_0': str(exclude)}):
+            (self.wt / 'new-ignored').write_text('external')
+            self.assert_invalidate_integrity_failure(self.scheduler(self.fail_dev, self.fail_ver), 'Ignored worktree files changed')
+
+    def test_invalidate_fails_closed_plan_fingerprint(self):
+        self.completed_chain().journal.load()
+        self.plan['tasks'][0]['description'] = 'changed'
+        self.assert_invalidate_integrity_failure(self.scheduler(self.fail_dev, self.fail_ver), 'Inputs changed')
+
+    def test_invalidate_fails_closed_quality_fingerprint(self):
+        self.completed_chain().journal.load()
+        self.quality['contract_revision'] += 1
+        self.assert_invalidate_integrity_failure(self.scheduler(self.fail_dev, self.fail_ver), 'Inputs changed')
+
+    def test_invalidate_fails_closed_context_fingerprint(self):
+        self.completed_chain().journal.load()
+        scheduler = self.scheduler(self.fail_dev, self.fail_ver)
+        scheduler.context = {'requirements': 'changed'}
+        self.assert_invalidate_integrity_failure(scheduler, 'Inputs changed')
+
+    def test_invalidate_fails_closed_evidence_on_unrelated_task(self):
+        self.completed_chain().journal.load()
+        (self.completed_scheduler.directory / 'D/attempt-1/check-0.log').write_text('tampered')
+        self.assert_invalidate_integrity_failure(self.scheduler(self.fail_dev, self.fail_ver), 'Completed task evidence is missing or altered')
+
+    def test_invalidate_fails_closed_evidence_in_closure(self):
+        self.completed_chain().journal.load()
+        (self.completed_scheduler.directory / 'A/attempt-1/check-0.log').write_text('tampered')
+        self.assert_invalidate_integrity_failure(self.scheduler(self.fail_dev, self.fail_ver), 'Completed task evidence is missing or altered')
+
+    def test_invalidate_reason_is_data_only(self):
+        scheduler = self.completed_chain()
+        reason = "  double\" single' backslash\\\nλ $(touch PWNED) `touch PWNED2` ../../etc/passwd  "
+        before_files = {p.relative_to(Path(self.tmp.name)) for p in Path(self.tmp.name).rglob('*')}
+        status = git(self.wt, 'status', '--porcelain')
+        count = len(self.file_bytes()[0].splitlines())
+        baseline = self.file_bytes()
+        scheduler.invalidate(['A'], reason)
+        lines = self.file_bytes()[0].splitlines()
+        self.assertEqual(len(lines), count + 1)
+        self.assertEqual(json.loads(lines[-1])['state']['invalidations'][-1]['reason'], reason.strip())
+        self.assertEqual({p.relative_to(Path(self.tmp.name)) for p in Path(self.tmp.name).rglob('*')}, before_files)
+        self.assertEqual(git(self.wt, 'status', '--porcelain'), status)
+        for case in ('unknown', 'state', 'lock'):
+            scheduler.journal.path.write_bytes(baseline[0])
+            scheduler.journal.snapshot.write_bytes(baseline[1])
+            scheduler.state = scheduler.journal.load()
+            if case == 'state':
+                self.journaled_state(lambda s: s['tasks']['B'].update(status='FAILED'))
+            import contextlib
+            with ticket_lock(scheduler.directory / 'scheduler.lock') if case == 'lock' else contextlib.nullcontext():
+                with self.assertRaises(TaskError) as raised:
+                    self.scheduler(self.fail_dev, self.fail_ver).invalidate(['Z'] if case == 'unknown' else ['A'], reason)
+            for fragment in ('double"', "single'", 'backslash\\', 'λ', '$(touch PWNED)', '`touch PWNED2`', '../../etc/passwd'):
+                self.assertNotIn(fragment, str(raised.exception))
+
+    def test_invalidate_rejects_malformed_plan_before_io(self):
+        scheduler = self.scheduler(self.fail_dev, self.fail_ver)
+        for plan in ({}, {'tasks': None}, {'tasks': [{}]}, {'tasks': [None]},
+                     {'tasks': [{'task_id': []}]}):
+            with self.subTest(plan=plan):
+                scheduler.plan = plan
+                with patch.object(scheduler.journal, 'peek', side_effect=AssertionError('peek')):
+                    with self.assertRaisesRegex(TaskError, '^Malformed plan$'):
+                        scheduler.invalidate(['A'], 'reason')
+        for deps, message in ((['Z'], 'Plan has unknown dependency'), (None, 'Malformed plan')):
+            scheduler.plan = {'tasks': [{'task_id': 'A', 'depends_on': deps}]}
+            with self.assertRaisesRegex(TaskError, '^' + message + '$'):
+                scheduler.invalidate(['A'], 'reason')
+
+    def test_invalidate_requires_scheduler_state(self):
+        scheduler = self.scheduler(self.fail_dev, self.fail_ver)
+        with self.assertRaisesRegex(TaskError, '^No scheduler state to invalidate$'):
+            scheduler.invalidate(['T1'], 'reason')
+        self.assertFalse(scheduler.journal.path.exists())
+        self.assertFalse(scheduler.journal.snapshot.exists())
+
+    def test_invalidate_docstring_states_limitations(self):
+        doc = TaskScheduler.invalidate.__doc__
+        for text in ('integrity-only', 'not authentication', 'ignored-file contents are not detected',
+                     'upstream', 'DAG', 'Discard', 'TASKS_INVALIDATED', 'pre-change', 'backup', 'journal and snapshot'):
+            self.assertIn(text, doc)
+
     def test_journal_peek_is_read_only(self):
         scheduler = self.completed_chain()
         expected = copy.deepcopy(scheduler.state)
