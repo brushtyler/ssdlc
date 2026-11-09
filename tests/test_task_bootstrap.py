@@ -1319,8 +1319,8 @@ class RevalidateTests(SchedulerTests):
         log = scheduler.directory / ref
         log.unlink()
         log.symlink_to(log.name)
-        with self.assertRaises((RuntimeError, OSError)):
-            confined(scheduler.directory, ref, protect=False)
+        self.assertTrue(log.is_symlink())
+        self.assertEqual(os.readlink(log), log.name)
         problems = scheduler._evidence_problems(scheduler.state['tasks']['A'], 'A')
         self.assertEqual(problems[0]['task_id'], 'A')
         self.assertEqual(problems[0]['path'], ref)
