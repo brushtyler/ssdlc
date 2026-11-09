@@ -45,6 +45,22 @@ def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def safe_exists(path: Path) -> bool:
+    """Check path existence safely, suppressing PermissionError/OSError for non-root users."""
+    try:
+        return path.exists()
+    except (OSError, PermissionError):
+        return False
+
+
+def safe_is_file(path: Path) -> bool:
+    """Check if path is a file safely, suppressing PermissionError/OSError for non-root users."""
+    try:
+        return path.is_file()
+    except (OSError, PermissionError):
+        return False
+
+
 def parse_review_verdict(report: str) -> Optional[str]:
     """Require one verdict marker and an exact final verdict line."""
     markers = re.findall(r"\bREVIEW_STATUS\s*:", report)
@@ -195,8 +211,10 @@ class ProjectRuntimeIsolation:
 
         # Auto-inherit read-only host auth.json by default if present (unless set to false)
         if os.environ.get("SSDLC_INHERIT_HOST_CODEX_AUTH", "true").lower() == "true":
-            candidates = [Path.home() / ".codex" / "auth.json", Path("/root/.codex/auth.json")]
-            host_auth = next((p for p in candidates if p.exists() and p != (self.codex_home / "auth.json")), None)
+            candidates = [Path.home() / ".codex" / "auth.json"]
+            if hasattr(os, "geteuid") and os.geteuid() == 0:
+                candidates.append(Path("/root/.codex/auth.json"))
+            host_auth = next((p for p in candidates if safe_is_file(p) and p != (self.codex_home / "auth.json")), None)
             proj_auth = self.codex_home / "auth.json"
             if host_auth and (not proj_auth.exists() or host_auth.stat().st_mtime > proj_auth.stat().st_mtime):
                 shutil.copy2(host_auth, proj_auth)
@@ -204,9 +222,11 @@ class ProjectRuntimeIsolation:
 
         # Auto-inherit host Claude auth by default if present (unless set to false)
         if os.environ.get("SSDLC_INHERIT_HOST_CLAUDE_AUTH", "true").lower() == "true":
-            candidates_claude = [Path.home() / ".claude.json", Path("/root/.claude.json")]
+            candidates_claude = [Path.home() / ".claude.json"]
+            if hasattr(os, "geteuid") and os.geteuid() == 0:
+                candidates_claude.append(Path("/root/.claude.json"))
             host_claude_json = next(
-                (p for p in candidates_claude if p.exists() and p != (self.claude_home / ".claude.json")), None
+                (p for p in candidates_claude if safe_is_file(p) and p != (self.claude_home / ".claude.json")), None
             )
             if host_claude_json:
                 for dest in (self.claude_home / ".claude.json", self.runtime_dir / ".claude.json"):
@@ -215,7 +235,7 @@ class ProjectRuntimeIsolation:
                         os.chmod(dest, 0o600)
             host_claude_cred = Path.home() / ".claude" / ".credentials.json"
             proj_claude_cred = self.claude_home / ".credentials.json"
-            if host_claude_cred.is_file() and (
+            if safe_is_file(host_claude_cred) and (
                 not proj_claude_cred.exists()
                 or host_claude_cred.stat().st_mtime > proj_claude_cred.stat().st_mtime
             ):
@@ -223,8 +243,11 @@ class ProjectRuntimeIsolation:
                 os.chmod(proj_claude_cred, 0o600)
 
         # Auto-inherit git user identity from host ~/.gitconfig
-        for hg in (Path("/root/.gitconfig"), Path.home() / ".gitconfig"):
-            if hg.exists() and hg != (self.runtime_dir / ".gitconfig"):
+        gitconfig_candidates = [Path.home() / ".gitconfig"]
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            gitconfig_candidates.append(Path("/root/.gitconfig"))
+        for hg in gitconfig_candidates:
+            if safe_is_file(hg) and hg != (self.runtime_dir / ".gitconfig"):
                 runtime_gc = self.runtime_dir / ".gitconfig"
                 if not runtime_gc.exists() or hg.stat().st_mtime > runtime_gc.stat().st_mtime:
                     shutil.copy2(hg, runtime_gc)
@@ -345,18 +368,24 @@ class SquadDispatcher:
 
     @classmethod
     def has_codex_auth(cls) -> bool:
+        codex_candidates = [Path.home() / ".codex" / "auth.json"]
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            codex_candidates.append(Path("/root/.codex/auth.json"))
         return bool(
-            (Path("/root/.codex/auth.json").exists())
-            or (Path.home() / ".codex" / "auth.json").exists()
+            any(safe_is_file(p) for p in codex_candidates)
             or os.environ.get("SSDLC_INHERIT_HOST_CODEX_AUTH", "true").lower() == "true"
         ) and bool(shutil.which("codex"))
 
     @classmethod
     def has_agy(cls) -> bool:
+        agy_candidates = [
+            Path.home() / ".local" / "bin" / "agy",
+            Path("/opt/host-bin/agy"),
+        ]
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            agy_candidates.append(Path("/root/.local/bin/agy"))
         return bool(
-            (Path.home() / ".local" / "bin" / "agy").exists()
-            or Path("/root/.local/bin/agy").exists()
-            or Path("/opt/host-bin/agy").exists()
+            any(safe_exists(p) for p in agy_candidates)
             or shutil.which("agy")
         )
 
@@ -675,19 +704,19 @@ class EngineRunner:
                 docker_cmd.extend(["-e", f"{key}={value}"])
         if not str(repo_root).startswith("/tmp/"):
             docker_cmd.extend(["--tmpfs", "/tmp:rw,exec,size=512m"])
-        if Path("/usr/local/bin/codex").exists():
+        if safe_exists(Path("/usr/local/bin/codex")):
             docker_cmd.extend(["-v", "/usr/local/bin/codex:/opt/host-bin/codex:ro"])
         host_agy = Path.home() / ".local" / "bin" / "agy"
-        if host_agy.exists():
+        if safe_exists(host_agy):
             docker_cmd.extend(["-v", f"{host_agy}:/opt/host-bin/agy:ro"])
 
         # Auto-mount host subscriptions into container as read-only (zero host pollution)
         # Claude Max auth
         host_claude_json = Path.home() / ".claude.json"
-        if pass_ai_keys and host_claude_json.exists():
+        if pass_ai_keys and safe_is_file(host_claude_json):
             docker_cmd.extend(["-v", f"{host_claude_json}:/root/.claude.json:ro"])
         host_claude_cred = Path.home() / ".claude" / ".credentials.json"
-        if pass_ai_keys and host_claude_cred.exists():
+        if pass_ai_keys and safe_is_file(host_claude_cred):
             docker_cmd.extend([
                 "-v", f"{host_claude_cred}:/root/.claude/.credentials.json:ro",
                 "--tmpfs", "/root/.cache/claude-cli-nodejs:rw",
@@ -698,10 +727,10 @@ class EngineRunner:
 
         # Codex Plus/Pro auth
         host_codex_auth = Path.home() / ".codex" / "auth.json"
-        if pass_ai_keys and host_codex_auth.exists():
+        if pass_ai_keys and safe_is_file(host_codex_auth):
             docker_cmd.extend(["-v", f"{host_codex_auth}:/root/.codex/auth.json:ro"])
         host_codex_ver = Path.home() / ".codex" / "version.json"
-        if pass_ai_keys and host_codex_ver.exists():
+        if pass_ai_keys and safe_is_file(host_codex_ver):
             docker_cmd.extend(["-v", f"{host_codex_ver}:/root/.codex/version.json:ro"])
 
         # agy Gemini Flash auth & ephemeral tmpfs mounts
@@ -712,16 +741,16 @@ class EngineRunner:
             host_token = host_gemini / "antigravity-cli" / "antigravity-oauth-token"
             agy_home = runtime_dir / "agy_auth"
             token = agy_home / "antigravity-cli" / "antigravity-oauth-token"
-            if not host_token.is_file() and not token.is_file():
+            if not safe_is_file(host_token) and not safe_is_file(token):
                 raise TaskError("AGY authentication is unavailable; configure host login before selecting agy")
             token.parent.mkdir(parents=True, exist_ok=True)
             os.chmod(agy_home, 0o700)
             os.chmod(token.parent, 0o700)
-            if host_token.is_file() and (not token.exists() or host_token.stat().st_mtime > token.stat().st_mtime):
+            if safe_is_file(host_token) and (not token.exists() or host_token.stat().st_mtime > token.stat().st_mtime):
                 shutil.copy2(host_token, token)
             os.chmod(token, 0o600)
             docker_cmd.extend(["-v", f"{agy_home}:/root/.gemini:rw"])
-        elif pass_ai_keys and host_gemini.exists():
+        elif pass_ai_keys and safe_exists(host_gemini):
             docker_cmd.extend([
                 "-v", f"{host_gemini}:/root/.gemini:ro",
                 "--tmpfs", "/root/.gemini/antigravity-cli/brain:rw",
