@@ -2204,6 +2204,9 @@ class SSDLCOrchestrator:
                     raise PlanError(f'Design input changed or disappeared: {name}')
             if git(self.repo_root, 'rev-parse', 'HEAD') != self.state['base_commit'] or git(self.repo_root, 'status', '--porcelain'):
                 raise PlanError('Design requires the unchanged clean target baseline')
+            self.state.update(status='IN_PROGRESS', current_phase='02-design', current_step='pair-design')
+            self.state.pop('failure', None)
+            self._save_state()
             try:
                 result = self.run_phase_pair_design(round_limit, import_legacy)
             except Exception as exc:

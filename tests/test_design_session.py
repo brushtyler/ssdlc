@@ -237,6 +237,8 @@ class DesignResumeTests(RepositoryTests):
                         review([finding(status='RESOLVED', evidence='ADR enumerates failed attempts')])])
         payloads = []
         def invoke(engine, model, system, user, *args, **kwargs):
+            self.assertEqual(orch.state['status'], 'IN_PROGRESS')
+            self.assertNotIn('failure', orch.state)
             payload = json.loads(user)
             payloads.append(payload)
             source = payload['context']['source_evidence'][0]
