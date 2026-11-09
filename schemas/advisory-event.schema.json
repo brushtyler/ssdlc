@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "advisory-event",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "event_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "timestamp": {
+      "type": "string",
+      "minLength": 1
+    },
+    "actor": {
+      "type": "string",
+      "minLength": 1
+    },
+    "project_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+    },
+    "ticket_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+    },
+    "proposal_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "event_type": {
+      "enum": [
+        "OBSERVED",
+        "CLASSIFIED",
+        "ACCEPTED",
+        "DEFERRED",
+        "REJECTED",
+        "OBSOLETE",
+        "PROMOTED_TO_FINDING",
+        "IMPLEMENTED",
+        "TICKET_INTENT",
+        "TICKET_LINKED",
+        "EXPORT_INTENT",
+        "EXPORTED",
+        "RECONCILIATION_REQUIRED"
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    },
+    "payload": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema_version",
+    "event_id",
+    "sequence",
+    "timestamp",
+    "actor",
+    "project_id",
+    "ticket_id",
+    "proposal_id",
+    "event_type",
+    "reason",
+    "payload"
+  ],
+  "additionalProperties": false
+}

@@ -6,6 +6,9 @@
 # ==============================================================================
 FROM python:3.12-slim
 
+COPY requirements.txt /opt/ssdlc-image-tools/requirements.txt
+RUN python3 -m pip install --no-cache-dir -r /opt/ssdlc-image-tools/requirements.txt
+
 ENV DEBIAN_FRONTEND=noninteractive \
      PYTHONUNBUFFERED=1 \
     NPM_CONFIG_PREFIX="/opt/ssdlc-image-tools/npm-global" \
