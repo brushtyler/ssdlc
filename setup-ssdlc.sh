@@ -98,12 +98,16 @@ sync_or_update_tools() {
     NPM_CONFIG_PREFIX="${TOOLS_NPM}" npm install -g @openai/codex@latest @anthropic-ai/claude-code@latest || \
       log_warn "npm install failed or partially completed."
     for bin_name in codex claude; do
+      # Check the executable using its absolute host path.
       if [ -x "${TOOLS_NPM}/bin/${bin_name}" ]; then
+        # The target is relative to the link's directory (.tools/bin), not the cwd.
+        # This keeps the same link valid on the host and under /opt/ssdlc in Docker.
         ln -sf "../npm-global/bin/${bin_name}" "${TOOLS_BIN}/${bin_name}"
       fi
     done
   elif command -v docker >/dev/null 2>&1; then
     log_info "Host npm not installed; using Docker container to update codex & claude in ${TOOLS_NPM}..."
+    # Relative links written into the bind mount also work at its host path.
     docker run --rm \
       -v "${TOOLS_DIR}:/opt/ssdlc/.tools" \
       -e NPM_CONFIG_PREFIX="/opt/ssdlc/.tools/npm-global" \
