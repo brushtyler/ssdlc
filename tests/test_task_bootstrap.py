@@ -144,6 +144,13 @@ class ValidatorTests(RepositoryTests):
         for path in (Path(__file__).resolve().parents[1] / 'schemas').glob('*.json'):
             Draft202012Validator.check_schema(json.loads(path.read_text()))
 
+    def test_command_argv_preserves_repeated_options_and_arguments(self):
+        argv = ['python3', '-m', 'unittest', 'discover', '-s', 'tests', '-k', 'first', '-k', 'second']
+        self.plan['tasks'][0]['verification']['checks'][0]['argv'] = argv
+        self.quality['checks'][0]['argv'] = argv
+        self.validator().validate(self.plan)
+        self.assertEqual(self.plan['tasks'][0]['verification']['checks'][0]['argv'], argv)
+
 
 class JournalTests(unittest.TestCase):
     def test_journal_recovers_stale_snapshot_and_partial_tail(self):

@@ -1469,8 +1469,9 @@ class SSDLCOrchestrator:
         self.record_artifact("00-recon/quality-contract.json", target)
         return contract
 
-    def _ensure_task_plan(self, review_repairs=None) -> Dict[str, Any]:
+    def _ensure_task_plan(self, review_repairs=None, recover_review=False) -> Dict[str, Any]:
         self.state["task_breakdown"] = True
+        self.state.update(current_phase='02-design', current_step='task-plan')
         self._save_state()
         quality = self._ensure_quality_contract()
         plan_path = self.dir_design / "plan.json"
@@ -1556,8 +1557,9 @@ class SSDLCOrchestrator:
             "Review the entire plan against approved requirements and design in one comprehensive pass. "
             "Return only JSON matching the supplied review schema. Keep finding_id stable across revisions; "
             "explicitly resolve or retain every prior open blocker using evidence from the current plan. "
-            "Blocking findings need an exact approved AC/SEC, standard or required quality-check reference, "
+            "Open blocking findings need an exact approved AC/SEC, standard or required quality-check reference, "
             "concrete evidence and a bounded requested change. "
+            "Resolved structural/schema diagnostics may have empty obligation references; do not invent IDs to annotate them. "
             "Optional improvements are ADVISORY and cannot block approval. Do not introduce new scope or require "
             "implementation detail beyond the approved behavior. Identify new findings as INTRODUCED_BY_REVISION or "
             "MISSED_EARLIER and explain why in evidence. Review planned behavioral assertions, not code that does not exist yet. "
@@ -1587,6 +1589,8 @@ class SSDLCOrchestrator:
                             validate, generate, review, self.check_budget_circuit_breaker, review_repairs=review_repairs,
                             structured_reviews=True)
         try:
+            if recover_review:
+                repair.recover_rejected_review()
             previous_candidate = self.dir_design / "task-plan-candidate.txt"
             previous_meta = self.state.get('artifacts', {}).get('02-design/task-plan-candidate.txt')
             initial = None
@@ -1630,7 +1634,7 @@ class SSDLCOrchestrator:
                 'limitations': 'Unkeyed integrity checking at guard boundaries; not authentication or continuous containment. '
                                'Ignored controller files are excluded. No controller environment variables are required.'}
 
-    def resume_task_planning(self, review_repairs=None) -> Path:
+    def resume_task_planning(self, review_repairs=None, recover_review=False) -> Path:
         """Resume only planning against sealed upstream artifacts; never execute code."""
         with ticket_lock(self.ssdlc_root / "ticket.lock"):
             self.state = self._load_or_init_state()
@@ -1653,7 +1657,7 @@ class SSDLCOrchestrator:
             self.state.update(current_phase="02-design", current_step="task-plan", status="IN_PROGRESS")
             self._save_state()
             try:
-                self._ensure_task_plan(review_repairs=review_repairs)
+                self._ensure_task_plan(review_repairs=review_repairs, recover_review=recover_review)
             except Exception as exc:
                 self.state.update(status="FAILED", failure={"phase": "task-plan", "message": str(exc)})
                 self._save_state()
@@ -2106,7 +2110,8 @@ class SSDLCOrchestrator:
             'Use analysis for STRIDE assessment, source-contract checks, races and stated limits. '
             'Use task_ids=[] because implementation tasks do not exist yet. '
             'Keep finding_id stable and explicitly resolve or retain every earlier open blocker using evidence. '
-            'Blockers must cite approved AC/SEC, standards or checks and identify a concrete source/design contradiction. '
+            'Open blockers must cite approved AC/SEC, standards or checks and identify a concrete source/design contradiction. '
+            'Resolved schema diagnostics may have empty obligation references; never invent IDs for them. '
             'Classify optional improvements as ADVISORY; do not expand scope or turn documented limitations into blockers. '
             'Explain newly introduced or previously missed findings. Inspect source to verify signatures, state shapes, '
             'all retained evidence and exception boundaries; do not demand implementation code before design approval. '
@@ -3464,6 +3469,7 @@ def main() -> int:
     p_plan.add_argument("--ticket", required=True)
     p_plan.add_argument("--repo", "-r", default=".")
     p_plan.add_argument("--review-repairs", type=int, choices=range(5), default=None, help="Explicitly extend the persisted semantic repair allowance (0-4)")
+    p_plan.add_argument('--recover-review', action='store_true', help='Explicitly revalidate an archived rejected review after a validator fix, preserving attempt counts')
 
     p_design = sub.add_parser('design', help='Resume pair design from its persisted ADR and review history')
     p_design.add_argument('--ticket', required=True)
@@ -3501,7 +3507,7 @@ def main() -> int:
 
     if args.subcommand == "plan":
         orch = SSDLCOrchestrator(repo_path, args.ticket, sync_remote=False)
-        print(orch.resume_task_planning(review_repairs=args.review_repairs))
+        print(orch.resume_task_planning(review_repairs=args.review_repairs, recover_review=args.recover_review))
         return 0
 
     if args.subcommand == 'design':

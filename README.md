@@ -452,6 +452,18 @@ anchors receive numeric suffixes. Duplicate JSON keys, non-finite constants and
 multiple candidate objects are rejected. Structural coverage still requires an
 independent semantic review of whether the checks exercise the claimed behavior.
 
+Command argument arrays preserve order and repetition (for example multiple unittest
+`-k` options); uniqueness applies to IDs and references, not CLI tokens. Only OPEN
+BLOCKING findings require an obligation reference. Resolved schema notes may have
+empty references and cannot block review; supplied references must still be valid.
+
+After fixing a review validator, explicitly recover a captured rejected review with
+`./ssdlc plan --ticket TKT-001 --recover-review`. Recovery revalidates the same candidate
+and raw review, archives the previous session and new input fingerprint, retains all
+attempt reservations/limits, and sends the remaining open findings back to the planner.
+It can recover a REVISION_REQUIRED review only; it never grants approval. Old protocol
+diagnostics remain archived, and the recovery evidence is hash-checked on resume.
+
 New planning sessions use structured reviews (`schemas/task-plan-review.schema.json`).
 Both planner and reviewer receive the cumulative diagnostic/review history. Findings
 keep stable IDs and explicit OPEN/RESOLVED dispositions; each blocker needs a known

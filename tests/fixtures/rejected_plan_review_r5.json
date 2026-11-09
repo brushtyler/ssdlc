@@ -1,0 +1,146 @@
+{
+  "origin": "STEP3A2-REVALIDATE-R5 planning candidate 2",
+  "review": {
+    "verdict": "REVISION_REQUIRED",
+    "findings": [
+      {
+        "finding_id": "SCHEMA-ARGV-UNIQUENESS",
+        "status": "RESOLVED",
+        "severity": "BLOCKING",
+        "category": "PLAN_DEFECT",
+        "requirement_refs": [],
+        "task_ids": [
+          "T1-evidence-foundation",
+          "T2-revalidate-core",
+          "T3-crash-mutation-hardening"
+        ],
+        "message": "The prior rejection for repeated argv elements is resolved.",
+        "evidence": "The commands identified by the prior INVALID_SCHEMA diagnostics are now separate checks. Each filtered unittest command contains one -k argument and one selector. The original diagnostics supplied no finding_id; this ID preserves the resolution recorded in the previous review response.",
+        "requested_change": "None; retain the separate executable checks.",
+        "new_issue_reason": "INITIAL_REVIEW"
+      },
+      {
+        "finding_id": "PLAN-PREFLIGHT-RUN-SCOPE",
+        "status": "OPEN",
+        "severity": "BLOCKING",
+        "category": "PLAN_DEFECT",
+        "requirement_refs": [
+          "AC-3h"
+        ],
+        "standard_refs": [
+          "STD-1"
+        ],
+        "quality_check_refs": [
+          "CHECK-TESTS"
+        ],
+        "task_ids": [
+          "T1-evidence-foundation"
+        ],
+        "message": "T1 requires a new run() refusal outside the approved compatibility behavior.",
+        "evidence": "The unchanged plan still adds and executes test_run_refuses_preflight_evidence_tamper. Approved ADR \u00a72.1-c states that global preflight validation is called only by revalidate(); \u00a72.1-d limits the run() change to passing task_id to _evidence_valid. STD-1 requires preserving public contracts unless approved requirements authorize a change, and the requirements explicitly preserve existing run() behavior alongside AC-3h. Requiring run() to reject altered global preflight logs contradicts that approved boundary. This remains MISSED_EARLIER because the initial review reported argv schema errors without assessing this behavioral assertion.",
+        "requested_change": "Remove the run()-specific global preflight refusal test and its verification command from T1. Retain revalidate() preflight-tamper refusal coverage in T2 and during-operation preflight-tamper coverage in T3.",
+        "new_issue_reason": "MISSED_EARLIER"
+      },
+      {
+        "finding_id": "PLAN-START-MARKER-DEPENDENCY",
+        "status": "OPEN",
+        "severity": "BLOCKING",
+        "category": "PLAN_DEFECT",
+        "requirement_refs": [
+          "AC-3h",
+          "AC-4a",
+          "SEC-1"
+        ],
+        "standard_refs": [
+          "STD-1"
+        ],
+        "quality_check_refs": [
+          "CHECK-TESTS"
+        ],
+        "task_ids": [
+          "T1-evidence-foundation",
+          "T2-revalidate-core",
+          "T3-crash-mutation-hardening"
+        ],
+        "message": "T2 completion and resume assertions depend on check-start markers deferred to T3.",
+        "evidence": "The unchanged T1 implements the approved I5 supporting-evidence validator, which requires ordered started_checks identities to match the expected checks. T2 creates passing revalidation attempts and requires test_run_interplay and test_run_enforces_revalidation_evidence to accept intact restored completion. T3 explicitly adds the per-check REVALIDATION_CHECK_STARTED markers. Consequently, at the T2 boundary the supporting attempts lack evidence required by the shared validator, so successful run() assertions cannot pass as planned. The requirements also prohibit deferring tests beyond the task implementing the behavior. This remains MISSED_EARLIER because the initial review assessed command schema errors rather than this dependency.",
+        "requested_change": "Move durable per-check start-marker recording and its executable ordering assertion into T2 alongside the verification flow. Keep broader interruption and persistence fault tests in T3, and preserve the validator's ordered-marker requirement.",
+        "new_issue_reason": "MISSED_EARLIER"
+      }
+    ]
+  },
+  "plan": {
+    "tasks": [
+      {
+        "task_id": "T1-evidence-foundation"
+      },
+      {
+        "task_id": "T2-revalidate-core"
+      },
+      {
+        "task_id": "T3-crash-mutation-hardening"
+      }
+    ]
+  },
+  "required_ids": [
+    "AC-1",
+    "AC-1a",
+    "AC-1b",
+    "AC-1c",
+    "AC-1d",
+    "AC-1e",
+    "AC-1f",
+    "AC-1g",
+    "AC-1h",
+    "AC-1i",
+    "AC-1j",
+    "AC-2",
+    "AC-2a",
+    "AC-2b",
+    "AC-2c",
+    "AC-2d",
+    "AC-2e",
+    "AC-2f",
+    "AC-2g",
+    "AC-2h",
+    "AC-3",
+    "AC-3a",
+    "AC-3b",
+    "AC-3c",
+    "AC-3d",
+    "AC-3e",
+    "AC-3f",
+    "AC-3g",
+    "AC-3h",
+    "AC-4",
+    "AC-4a",
+    "AC-4b",
+    "AC-4c",
+    "AC-4d",
+    "AC-4e",
+    "AC-4f",
+    "AC-5",
+    "SEC-1",
+    "SEC-10",
+    "SEC-2",
+    "SEC-3",
+    "SEC-4",
+    "SEC-5",
+    "SEC-6",
+    "SEC-7",
+    "SEC-8",
+    "SEC-9"
+  ],
+  "quality": {
+    "standards": [
+      {
+        "standard_id": "STD-1"
+      }
+    ],
+    "checks": [
+      {
+        "check_id": "CHECK-TESTS"
+      }
+    ]
+  }
+}

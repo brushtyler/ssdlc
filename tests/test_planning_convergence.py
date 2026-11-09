@@ -2,6 +2,7 @@ import copy
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from ssdlc_controller import assert_controller, controller_snapshot
@@ -77,6 +78,19 @@ class StructuredReviewTests(unittest.TestCase):
             self.assertEqual(verdict['verdict'], 'REVISION_REQUIRED')
             with self.assertRaisesRegex(PlanError, 'unknown standards or quality checks'):
                 validate_plan_review(raw, self.plan, ['AC-1'], [])
+
+    def test_resolved_structural_note_without_obligation_cannot_block_a_review(self):
+        closed = finding('SCHEMA-ARGV', status='RESOLVED', requirement_refs=[])
+        self.assertEqual(self.validate(report([closed]))['verdict'], 'APPROVED')
+        with self.assertRaisesRegex(PlanError, 'approved requirement or quality obligation'):
+            self.validate(report([{**closed, 'status': 'OPEN'}]))
+
+    def test_real_rejected_review_keeps_both_actual_open_findings(self):
+        fixture = json.loads((Path(__file__).parent/'fixtures/rejected_plan_review_r5.json').read_text())
+        result = validate_plan_review(json.dumps(fixture['review']), fixture['plan'], fixture['required_ids'], [], fixture['quality'])
+        self.assertEqual(result['verdict'], 'REVISION_REQUIRED')
+        self.assertEqual([f['finding_id'] for f in result['findings'] if f['status'] == 'OPEN'],
+                         ['PLAN-PREFLIGHT-RUN-SCOPE', 'PLAN-START-MARKER-DEPENDENCY'])
 
 
 class ConvergenceTests(unittest.TestCase):
@@ -176,6 +190,40 @@ class ConvergenceTests(unittest.TestCase):
             self.repair(reports).run()
         self.assertEqual(len(self.generations), 5)
         self.assertEqual(self.session()['attempts'][-1]['status'], 'REJECTED')
+
+    def test_explicit_review_recovery_preserves_counts_raw_evidence_and_open_blockers(self):
+        answers = [report([finding()])]
+        with patch('ssdlc_planning.validate_plan_review', side_effect=PlanError('Old validator rejects a resolved schema note')):
+            with self.assertRaisesRegex(PlanError, 'Invalid review protocol'):
+                self.repair(answers * 2).run()
+        before = self.session()
+        root = self.root/'task-planning'
+        response = (root/before['attempts'][0]['review']).read_bytes()
+        self.inputs['schema_revision'] = 'fixed-validator'
+        recovered = self.repair([report([finding(status='RESOLVED')])])
+        recovered.recover_rejected_review()
+        intermediate = self.session()
+        self.assertEqual(len(intermediate['attempts']), 1)
+        self.assertEqual(intermediate['attempts'][0]['status'], 'REJECTED')
+        self.assertEqual(intermediate['limits'], before['limits'])
+        self.assertNotIn('failure_kind', intermediate['attempts'][0])
+        self.assertEqual((root/intermediate['attempts'][0]['review']).read_bytes(), response)
+        self.assertEqual(len(intermediate['recoveries']), 1)
+        self.assertEqual(recovered.run(), self.plan)
+        self.assertEqual(len(self.generations), 2)
+        self.assertEqual(self.generations[-1]['history'][0]['assessment']['findings'][0]['status'], 'OPEN')
+        prior = root/self.session()['recoveries'][0]['prior_session_ref']
+        prior.write_text('tampered historical session')
+        with self.assertRaisesRegex(PlanError, 'recovery evidence changed'):
+            self.repair([]).run()
+
+    def test_review_recovery_cannot_convert_a_protocol_failure_into_approval(self):
+        with patch('ssdlc_planning.validate_plan_review', side_effect=PlanError('protocol failure')):
+            with self.assertRaises(PlanError):
+                self.repair([report([])] * 2).run()
+        with self.assertRaisesRegex(PlanError, 'cannot grant approval'):
+            self.repair([]).recover_rejected_review()
+        self.assertEqual(self.session()['attempts'][0]['failure_kind'], 'REVIEW_PROTOCOL')
 
 
 class ControllerIntegrityTests(RepositoryTests):
