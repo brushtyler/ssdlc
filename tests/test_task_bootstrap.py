@@ -192,6 +192,108 @@ class SchedulerTests(RepositoryTests):
             (self.wt / path).write_text(f'value = {attempt}\n')
         return {'output': 'Implemented', 'exit_code': 0, 'model': 'fake', 'engine': 'fake'}
 
+    def completed_chain(self):
+        self.plan['tasks'] = [
+            self.task('A', ['AC-1'], ['SEC-1'], ['a.py']),
+            self.task('B', [], [], ['b.py'], ['A']),
+            self.task('C', [], [], ['c.py'], ['B']),
+            self.task('D', [], [], ['d.py']),
+        ]
+        scheduler = self.scheduler(self.developer)
+        scheduler.run(self.plan['tasks'])
+        # Keep fixture setup separate from fresh schedulers used to instrument locks.
+        self.completed_scheduler = scheduler
+        return scheduler
+
+    def file_bytes(self):
+        journal = self.completed_scheduler.journal
+        return journal.path.read_bytes(), journal.snapshot.read_bytes()
+
+    def tail_artifacts(self):
+        return sorted(self.completed_scheduler.directory.glob('interrupted-tail-*.bin'))
+
+    def with_stale_snapshot(self):
+        journal = self.completed_scheduler.journal
+        first = json.loads(journal.path.read_bytes().splitlines()[0])
+        atomic_json(journal.snapshot, first['state'])
+
+    def with_partial_tail(self):
+        with self.completed_scheduler.journal.path.open('ab') as stream:
+            stream.write(b'{incomplete')
+
+    def fail_dev(self, *args):
+        self.fail('Developer must not be invoked')
+
+    def fail_ver(self, *args):
+        self.fail('Verifier must not be invoked')
+
+    def journaled_state(self, mutator):
+        scheduler = self.completed_scheduler
+        state = copy.deepcopy(scheduler.state)
+        mutator(state)
+        scheduler.journal.append('TEST_STATE', state)
+        scheduler.state = state
+        return state
+
+    def test_journal_peek_is_read_only(self):
+        scheduler = self.completed_chain()
+        expected = copy.deepcopy(scheduler.state)
+        self.with_stale_snapshot()
+        self.with_partial_tail()
+        before = self.file_bytes()
+        # Use a fresh instance with a distinct append position, independently of run().
+        journal = self.scheduler(self.fail_dev, self.fail_ver).journal
+        journal.sequence, journal.previous = 17, 'unchanged'
+        with patch('ssdlc_tasks.atomic_json', side_effect=AssertionError('snapshot write')):
+            self.assertEqual(journal.peek(), expected)
+        self.assertEqual(self.file_bytes(), before)
+        self.assertEqual(self.tail_artifacts(), [])
+        self.assertEqual((journal.sequence, journal.previous), (17, 'unchanged'))
+
+        lines = before[0].splitlines(keepends=True)
+        event = json.loads(lines[0])
+        event['sha256'] = 'broken'
+        lines[0] = (json.dumps(event) + '\n').encode()
+        journal.path.write_bytes(b''.join(lines))
+        broken = self.file_bytes()
+        with self.assertRaisesRegex(TaskError, '^Corrupt task journal; refusing recovery$'):
+            journal.peek()
+        self.assertEqual(self.file_bytes(), broken)
+        self.assertEqual(self.tail_artifacts(), [])
+        self.assertEqual((journal.sequence, journal.previous), (17, 'unchanged'))
+
+        journal.path.unlink()
+        snapshot = journal.snapshot.read_bytes()
+        self.assertIsNone(journal.peek())
+        self.assertFalse(journal.path.exists())
+        self.assertEqual(journal.snapshot.read_bytes(), snapshot)
+        self.assertEqual(self.tail_artifacts(), [])
+        self.assertEqual((journal.sequence, journal.previous), (17, 'unchanged'))
+
+    def test_journal_recovery_refactor_order(self):
+        scheduler = self.completed_chain()
+        journal = self.scheduler(self.fail_dev, self.fail_ver).journal
+        prefix = scheduler.journal.path.read_bytes()
+        corrupt = b'{"sha256": "broken"}\n'
+        tail = b'{incomplete'
+        journal.path.write_bytes(prefix + corrupt + tail)
+        self.with_stale_snapshot()
+        before = self.file_bytes()
+        with self.assertRaisesRegex(TaskError, '^Corrupt task journal; refusing recovery$'):
+            journal.peek()
+        self.assertEqual(self.file_bytes(), before)
+        self.assertEqual(self.tail_artifacts(), [])
+
+        with patch('ssdlc_tasks.atomic_json', side_effect=AssertionError('snapshot write')):
+            with self.assertRaisesRegex(TaskError, '^Corrupt task journal; refusing recovery$'):
+                journal.load()
+        self.assertEqual(journal.path.read_bytes(), prefix + corrupt)
+        self.assertEqual(journal.snapshot.read_bytes(), before[1])
+        artifacts = self.tail_artifacts()
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(artifacts[0].read_bytes(), tail)
+        self.assertEqual(artifacts[0].name, 'interrupted-tail-' + file_hash(artifacts[0]) + '.bin')
+
     def test_checkpoints_resume_and_cumulative_diff(self):
         self.plan['tasks'].append(self.task('T2', [], [], ['second.py'], ['T1']))
         scheduler = self.scheduler(self.developer)
