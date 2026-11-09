@@ -512,18 +512,40 @@ Ogni incremento include i relativi test; la suite non è rinviata alla fine. Per
 
 ## 12. Stato del bootstrap progressivo
 
-È disponibile un primo incremento opt-in degli Step 1 e 2, con implementazione separata in `ssdlc_tasks.py` e integrazione in `orchestrator.py`:
+Stato aggiornato al 9 novembre 2026. Il percorso per task resta **opt-in**: i risultati del bootstrap e dei micro-ticket non equivalgono all'accettazione finale degli Step 1–6.
+
+### Disponibile
 
 - Schemi eseguibili di contratto, piano, manifest, evento advisory e proiezione advisory; validazione di DAG, riferimenti, percorsi, standard applicabili e prove di baseline.
 - Cattura del contratto e della baseline, pianificazione strutturata con review indipendente e percorso leggero per Tier S.
 - Scheduler sequenziale con routing esistente, manifest stretti, stage selettivo, verifiche locali, checkpoint, journal con hash concatenati e snapshot atomici.
-- Ripresa dei checkpoint interrotti senza duplicare generazione/commit; arresto conservativo quando worktree, input o prove richiedono riconciliazione.
+- Ripresa dei checkpoint interrotti senza duplicare generazione/commit; arresto conservativo quando worktree, input o prove richiedono riconciliazione. I tentativi falliti verificabili conservano patch e diagnostica per la riparazione successiva.
 - Scratch/cache isolati, esclusione dei mount delle credenziali dai container di verifica, standard generali per nuove inizializzazioni e conservazione delle evidenze durante approvazione.
 
-La feature resta disabilitata per default. Le verifiche locali usano repository temporanei ed engine simulati; prima della promozione a versione esecutrice servono anche test con Docker reale e modelli effettivi, più review delle modifiche al controller. Il processo di bootstrap non ha avviato una run AI sul repository.
+- Step 3a.1 e 3a.2: API `invalidate()` con invalidazione transitiva e `revalidate()` con sole verifiche, nuove evidenze e recupero delle interruzioni. La rivalidazione non invoca sviluppatori, non crea commit e conserva contatori e provenienza originali.
+- Sessioni persistenti di design e pianificazione con finding cumulativi, limiti e correzione del protocollo; controllo dell'integrità dell'esecutore. Review e QA ricevono il diff cumulativo completo e il worktree verificato, con input archiviati e verdetto finale esplicito.
 
-L'incremento mantiene intenzionalmente vincoli conservativi: niente estensione automatica del manifest, migrazione implicita di ticket esistenti, bounce mirato, ripianificazione automatica, subgoal o task `review_only`. Un feedback di review interrompe la pipeline e conserva le evidenze, senza saltare task respinti. L'approvazione richiede una destinazione pulita e invariata e usa il checkpoint verificato. Invalidazione transitiva, matrice completa dei reviewer, integrazione su destinazione avanzata, routing granulare, limiti globali aggiuntivi e ciclo di vita advisory restano gli incrementi successivi descritti sopra.
+### Incremento Step 3b.1
 
-Per il primo dogfooding scegliere un micro-ticket di questi incrementi, fornendo specifica e criteri di accettazione completi. La versione esecutrice deve essere fissata e separata dal checkout sviluppato; gli schemi advisory disponibili non implicano che il motore advisory sia già operativo.
+Questo incremento introduce `schemas/gate-findings.schema.json` e l'API pura in `ssdlc_findings.py`: validazione contro commit e cataloghi affidabili, attribuzione esplicita e distinzione tra violazioni/regressioni obbligatorie, lacune necessarie, osservazioni incerte e miglioramenti facoltativi. Un finding trasversale o non attribuito resta da valutare; una candidatura alla correzione non autorizza esecuzione e un report vuoto non approva un gate.
 
-Aggiornamento della verifica Docker: smoke test reale superato per sorgente in sola lettura, runtime/credenziali nascosti e scratch isolato scrivibile; suite di 41 test superata nel runner. Corretto il `chmod` non necessario durante `--init-project`, che falliva con toolkit montato in sola lettura. La prova è riproducibile con `python3 tests/docker_smoke.py --image ssdlc-runner:bootstrap-test --suite`. L'immagine di test aggiunge le dipendenze Python al runner esistente senza sostituire `ssdlc-runner:latest`; restano da completare review e validazione con modelli effettivi prima della promozione.
+Il modulo non è ancora collegato agli output delle fasi o al coordinatore e non implementa il bounce. La verifica deterministica controlla la coerenza delle dichiarazioni, non la loro veridicità semantica o l'integrità delle prove oltre all'appartenenza al catalogo fornito dal chiamante.
+
+### Validazione e limiti osservati
+
+Il dogfooding con Docker e modelli effettivi è stato avviato: il ticket Step 3a.2 ha completato i task e superato review, QA e gate di rilascio/documentazione. L'integrazione delle PR #7 e #8 ha superato 283 test locali e nel runner Docker, oltre allo smoke di isolamento e alla review indipendente.
+
+Nel ticket `STEP3B1-GATE-FINDINGS`, design e pianificazione hanno corretto autonomamente finding prima dell'esecuzione. Il secondo developer ha raggiunto il timeout dopo una ripetizione della suite dovuta a modifiche durante i test. Il candidato è stato conservato e sottoposto a recupero operatore esplicito, con verifiche nuove e senza azzerare il tentativo o inventare una risposta finale del modello. Questo caso evidenzia che il recupero automatico dei timeout del developer resta da completare; non dimostra ancora autonomia end-to-end.
+
+La versione esecutrice di ogni run è fissata e separata dal checkout sviluppato. Gli aggiornamenti dell'esecutore durante un recupero sono revisioni esplicite con provenienza, conservazione degli input e dei contatori. La verifica Docker resta riproducibile con `python3 tests/docker_smoke.py --image ssdlc-runner:bootstrap-test --suite`; l'immagine di test non sostituisce `ssdlc-runner:latest`.
+
+### Prossimi incrementi
+
+1. **Step 3b.2 — Report dei gate**: integrare il contratto dei finding in review, QA e AppSec, conservando output grezzi e report immutabili legati a commit/input. Report malformati o attribuzioni insufficienti non autorizzano correzioni automatiche.
+2. **Step 3b.3 — Bounce mirato**: collegare finding, analisi d'impatto, invalidazione, riparazione e rivalidazione topologica; conservare tentativi, contributi e limiti e ripetere i gate globali dopo le modifiche. Implementare un recupero esplicito e tracciato dei candidati interrotti, senza adottare modifiche esterne implicitamente.
+3. **Chiusura Step 3**: completare analisi critica obbligatoria, matrice delle evidenze e consegna su destinazione avanzata con riconciliazione e nuove verifiche sul candidato integrato. Oggi l'approvazione richiede ancora una destinazione pulita e invariata.
+4. **Step 4**: dispatcher per rischio/capacità, matrice indipendente di review per task e interazioni, classificazione dei fallimenti e limiti comuni persistenti per l'intero ticket.
+5. **Step 5**: subgoal sequenziali e ciclo di vita advisory, inclusi registro, proiezioni, deduplicazione e azioni esplicite/idempotenti. Gli schemi advisory disponibili non implicano che il motore sia operativo.
+6. **Step 6**: scenari end-to-end Tier S/M/L, recuperi e concorrenza, confronto dei routing, metriche e attivazione dopo l'accettazione complessiva.
+
+Restano anche i vincoli conservativi da risolvere negli incrementi pertinenti: estensione controllata dei manifest, ripianificazione versionata, migrazione esplicita dei ticket precedenti e task `review_only`. Un feedback di review interrompe ancora la pipeline per task; non viene ignorato e non attiva oggi una riparazione mirata automatica. Ogni incremento mantiene specifica e criteri di accettazione circoscritti, con codice e test nello stesso task.
