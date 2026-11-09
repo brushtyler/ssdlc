@@ -433,6 +433,25 @@ The first implementation increment provides versioned JSON schemas in `schemas/`
 captures a quality contract and baseline, requests a structured plan and independent
 plan review, then executes one task at a time with the existing model routing.
 
+The planner and validator share an explicit requirement catalogue. Define AC/SEC IDs
+in Markdown headings, list entries, the first column of a table, or `AC-1: ...`
+lines. Compact ID-only lists are also supported. IDs are case-sensitive, using
+letters, digits and hyphens; malformed or duplicate definitions block planning.
+Prose references and fenced examples do not create requirements. Every defined ID,
+including parent headings and sub-cases, needs explicit task ownership and local
+check coverage; hierarchy never implies coverage. Undefined prose mentions are
+listed separately in the catalogue for review.
+
+Task and check references use their respective AC/SEC fields. Checks can claim only
+requirements owned by their task. Mapping diagnostics report all detected ownership,
+coverage and contract defects together, with task/check IDs and exact offending
+references. Contract references use actual design filenames and ATX heading anchors
+relative to `02-design`, supplied to the planner (for example `adr.md#interfaces`);
+titles are not filename aliases. Headings inside fenced code are excluded; repeated
+anchors receive numeric suffixes. Duplicate JSON keys, non-finite constants and
+multiple candidate objects are rejected. Structural coverage still requires an
+independent semantic review of whether the checks exercise the claimed behavior.
+
 Keep the executing SSDLC installation pinned to a reviewed version and use a separate
 checkout as the target when developing SSDLC itself. Start from a clean, committed
 baseline and pass a narrowly scoped goal. A filename alone does not supply its content

@@ -1488,6 +1488,8 @@ class SSDLCOrchestrator:
             "02-design-arch", self.state.get("risk_tier", "M"), self.state.get("dev_profile", "ALGORITHMIC")
         )
         context = {"requirements": requirements,
+                   "requirement_catalogue": validator.requirement_catalogue,
+                   "available_contract_refs": validator.available_contract_refs(),
                    "adr": self._read_optional(self.dir_design / "adr.md", "Tier S: lightweight plan"),
                    "threat_model": self._read_optional(self.dir_design / "threat-model.md", "See SEC requirements"),
                    "quality_contract": quality, "repo_context": self._gather_repo_context(),
@@ -1502,6 +1504,14 @@ class SSDLCOrchestrator:
                    "with local regression checks, but must still obey all applicable safety invariants. "
                    "Each claimed requirement must have an actual behavioral check, not merely an added label. "
                    "On repair, fix the reported defects without dropping requirements or weakening checks.")
+        prompt += ("\nThe requirement_catalogue is authoritative: explicitly cover every required_id, including both "
+                   "parent AC headings and defined sub-cases. Parent/child coverage is never implicit. "
+                   "Put AC IDs only in ac_refs and SEC IDs only in sec_refs, for tasks AND checks. "
+                   "Each check's references must be a subset of its owning task's corresponding field; "
+                   "each task reference must have a local executable check. "
+                   "References are exact and case-sensitive; prose mentions are not definitions. "
+                   "Use contract_refs from available_contract_refs, relative to 02-design, e.g. adr.md#heading. "
+                   "ADR document titles are not filenames. Never invent filenames or anchors.")
         rev_engine, rev_model, rev_effort, _ = SquadDispatcher.dispatch_role(
             "02-design-sec", self.state.get("risk_tier", "M"), self.state.get("dev_profile", "ALGORITHMIC")
         )

@@ -19,6 +19,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
+from ssdlc_catalogues import CatalogueError, heading_anchors, requirement_catalogue
+
 SCHEMA_DIR = Path(__file__).resolve().parent / 'schemas'
 PROTECTED = {'.git', '.ssdlc', '.agents', '.codex', '.aws'}
 
@@ -44,13 +46,29 @@ class PlanError(TaskError):
 def parse_plan_output(output: str) -> dict:
     """Accept JSON or one JSON/unlabelled fenced block, never choose among alternatives."""
     text = output.strip()
-    fences = re.findall(r'^```([^\n`]*)\n(.*?)^```[ \t]*$', text, re.M | re.S)
+    fences = list(re.finditer(r'^```([^\n`]*)\n(.*?)^```[ \t]*$', text, re.M | re.S))
     if fences:
-        if len(fences) != 1 or fences[0][0].strip().lower() not in ('', 'json'):
+        if len(fences) != 1 or fences[0][1].strip().lower() not in ('', 'json'):
             raise PlanError('Ambiguous fenced plan output', [{'code': 'AMBIGUOUS_OUTPUT', 'field': '$'}])
-        text = fences[0][1].strip()
+        outside = text[:fences[0].start()] + text[fences[0].end():]
+        for start in re.finditer(r'[\[{]', outside):
+            try:
+                json.JSONDecoder().raw_decode(outside[start.start():])
+            except ValueError:
+                continue
+            raise PlanError('Ambiguous plan output outside fence', [{'code': 'AMBIGUOUS_OUTPUT', 'field': '$'}])
+        text = fences[0][2].strip()
     try:
-        value = json.loads(text)
+        def unique_object(pairs):
+            obj = {}
+            for key, value in pairs:
+                if key in obj:
+                    raise ValueError(f'Duplicate JSON key: {key}')
+                obj[key] = value
+            return obj
+        def invalid_constant(value):
+            raise ValueError(f'Non-finite JSON constant: {value}')
+        value = json.loads(text, object_pairs_hook=unique_object, parse_constant=invalid_constant)
     except ValueError as exc:
         raise PlanError(str(exc), [{'code': 'INVALID_JSON', 'field': '$', 'message': str(exc)}]) from exc
     if not isinstance(value, dict):
@@ -123,7 +141,10 @@ def confined(root: Path, relative: str, *, protect: bool = True) -> Path:
 
 
 def requirement_ids(text: str) -> set[str]:
-    return set(re.findall(r'(?<![\w-])(?:AC|SEC)-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*', text))
+    try:
+        return set(requirement_catalogue(text)['required_ids'])
+    except CatalogueError as exc:
+        raise PlanError(str(exc), exc.diagnostics) from exc
 
 
 def validate_advisory(document: dict, artifacts: Path) -> dict[str, str]:
@@ -149,27 +170,18 @@ def validate_advisory(document: dict, artifacts: Path) -> dict[str, str]:
 class TaskPlanValidator:
     def __init__(self, repo: Path, requirements: str, quality: dict, artifacts: Path | None = None):
         self.repo = repo.resolve()
-        self.requirements = requirement_ids(requirements)
+        try:
+            self.requirement_catalogue = requirement_catalogue(requirements)
+        except CatalogueError as exc:
+            raise PlanError(str(exc), exc.diagnostics) from exc
+        self.requirements = set(self.requirement_catalogue['required_ids'])
         self.quality = quality
         self.artifacts = artifacts
 
     def validate(self, plan: dict) -> list[dict]:
         validate_document('quality-contract', self.quality)
         validate_document('plan', plan)
-        issues = []
-        for task in plan['tasks']:
-            refs = set(task['ac_refs'] + task['sec_refs'])
-            checked = {ref for c in task['verification']['checks'] for ref in c['ac_refs'] + c['sec_refs']}
-            missing = sorted(refs - checked)
-            if task['verification']['mode'] == 'automated' and missing:
-                issues.append({'code': 'MISSING_VERIFICATION_REF', 'task_id': task['task_id'],
-                               'field': 'verification.checks', 'missing_refs': missing})
-            unknown = sorted(refs - self.requirements)
-            if unknown:
-                issues.append({'code': 'UNKNOWN_REQUIREMENT_REF', 'task_id': task['task_id'],
-                               'field': 'ac_refs/sec_refs', 'unknown_refs': unknown})
-        if issues:
-            raise PlanError('Invalid task requirement/check mappings', issues)
+        self._validate_references(plan)
         if plan['base_commit'] != self.quality['base_commit']:
             raise PlanError('Plan and quality contract have different base commits')
         if not any(ref.startswith('AC-') for ref in self.requirements):
@@ -180,7 +192,6 @@ class TaskPlanValidator:
             raise PlanError('Duplicate task_id')
         checks = {c['check_id'] for c in self.quality['checks']}
         standards = {s['standard_id'] for s in self.quality['standards']}
-        covered: set[str] = set()
         for task in tasks.values():
             deps = set(task['depends_on'])
             if not deps <= tasks.keys() or task['task_id'] in deps:
@@ -189,12 +200,6 @@ class TaskPlanValidator:
                 confined(self.repo, path)
                 if path == '.' or (self.repo / path).is_dir():
                     raise PlanError('target_files must name files, not directories')
-            refs = set(task['ac_refs'] + task['sec_refs'])
-            if not refs <= self.requirements:
-                raise PlanError(f'Unknown requirement references: {refs - self.requirements}')
-            if any(not r.startswith('AC-') for r in task['ac_refs']) or any(not r.startswith('SEC-') for r in task['sec_refs']):
-                raise PlanError('AC and SEC references are in the wrong field')
-            covered |= refs
             if not set(task['standard_refs']) <= standards:
                 raise PlanError('Unknown standard reference')
             # Applicable standards cannot be omitted merely by leaving standard_refs empty.
@@ -217,19 +222,8 @@ class TaskPlanValidator:
             ids = [c['check_id'] for c in verify['checks']]
             if len(set(ids)) != len(ids):
                 raise PlanError('Duplicate task check_id')
-            checked = set()
             for check in verify['checks']:
                 self._check_command(check)
-                check_refs = set(check['ac_refs'] + check['sec_refs'])
-                if not check_refs <= refs:
-                    raise PlanError('Check references requirements outside its task')
-                checked |= check_refs
-            if verify['mode'] == 'automated' and not refs <= checked:
-                raise PlanError('Each task requirement needs an executable verification reference')
-            for ref in task['contract_refs']:
-                self._artifact_ref(ref)
-        if covered != self.requirements:
-            raise PlanError(f'Uncovered requirements: {self.requirements - covered}')
         pending = dict(tasks)
         ordered = []
         done: set[str] = set()
@@ -249,6 +243,80 @@ class TaskPlanValidator:
         if any('\x00' in arg for arg in check['argv']):
             raise PlanError('NUL in command arguments')
 
+    def _validate_references(self, plan: dict) -> None:
+        """Report all ownership, coverage and contract defects in one repair round."""
+        issues = []
+        covered = set()
+        for task in plan['tasks']:
+            location = {'task_id': task['task_id']}
+            if task['kind'] != 'task' or task['verification']['mode'] != 'automated':
+                issues.append({**location, 'code': 'UNSUPPORTED_EXECUTION_MODE',
+                               'field': 'kind/verification.mode',
+                               'message': 'Bootstrap requires kind=task and automated verification'})
+            checked = {'ac_refs': set(), 'sec_refs': set()}
+            for owner, prefix, where in [(task, '', location)] + [
+                (check, 'verification.checks.', {**location, 'check_id': check['check_id']})
+                for check in task['verification']['checks']
+            ]:
+                for field, kind in [('ac_refs', 'AC-'), ('sec_refs', 'SEC-')]:
+                    refs = set(owner[field])
+                    unknown = sorted(refs - self.requirements)
+                    if unknown:
+                        issues.append({**where, 'code': 'UNKNOWN_REQUIREMENT_REF',
+                                       'field': prefix + field, 'unknown_refs': unknown})
+                    wrong = sorted(ref for ref in refs if not ref.startswith(kind))
+                    if wrong:
+                        issues.append({**where, 'code': 'WRONG_REQUIREMENT_KIND',
+                                       'field': prefix + field, 'offending_refs': wrong})
+                    valid = {ref for ref in refs & self.requirements if ref.startswith(kind)}
+                    if owner is task:
+                        covered |= valid
+                    else:
+                        outside = sorted(refs - set(task[field]))
+                        if outside:
+                            issues.append({**where, 'code': 'CHECK_REFS_OUTSIDE_TASK',
+                                           'field': prefix + field, 'offending_refs': outside,
+                                           'allowed_refs': sorted(task[field])})
+                        checked[field] |= valid & set(task[field])
+            missing = sorted(set(task['ac_refs'] + task['sec_refs']) - (checked['ac_refs'] | checked['sec_refs']))
+            if task['verification']['mode'] == 'automated' and missing:
+                issues.append({**location, 'code': 'MISSING_VERIFICATION_REF',
+                               'field': 'verification.checks', 'missing_refs': missing})
+            for ref in task['contract_refs']:
+                try:
+                    self._artifact_ref(ref)
+                except PlanError as exc:
+                    issues.append({**location, 'code': 'INVALID_CONTRACT_REF', 'field': 'contract_refs',
+                                   'ref': ref, 'message': str(exc),
+                                   'available_refs': self.available_contract_refs()})
+        missing = sorted(self.requirements - covered)
+        if missing:
+            issues.append({'code': 'UNCOVERED_REQUIREMENTS', 'field': 'tasks', 'missing_refs': missing,
+                           'coverage_policy': self.requirement_catalogue['coverage_policy']})
+        if issues:
+            messages = ['Invalid task requirement/check mappings']
+            if missing:
+                messages.append(f'Uncovered requirements: {missing}')
+            messages.extend(i['message'] for i in issues if 'message' in i)
+            raise PlanError('; '.join(messages), issues)
+
+    def available_contract_refs(self) -> list[str]:
+        """Published design files and anchors, relative to 02-design (no aliases)."""
+        if self.artifacts is None:
+            return []
+        root = self.artifacts / '02-design'
+        refs = []
+        for path in sorted(root.glob('*.md')):
+            # Do not catalogue symlinks that escape the approved artifact directory.
+            try:
+                target = confined(root, path.name, protect=False)
+            except PlanError:
+                continue
+            if target.is_file():
+                refs.append(path.name)
+                refs.extend(path.name + '#' + anchor for anchor in heading_anchors(target.read_text()))
+        return refs
+
     def _artifact_ref(self, ref: str) -> None:
         path, _, anchor = ref.partition('#')
         if self.artifacts is None:
@@ -257,9 +325,7 @@ class TaskPlanValidator:
         if not target.is_file():
             raise PlanError(f'Missing contract: {ref}')
         if anchor:
-            headings = re.findall(r'^#+\s+(.+)$', target.read_text(), re.M)
-            slugs = {re.sub(r'[^\w -]', '', h.lower()).replace(' ', '-') for h in headings}
-            if anchor not in slugs:
+            if anchor not in heading_anchors(target.read_text()):
                 raise PlanError(f'Missing contract anchor: {ref}')
 
     def _validate_quality(self) -> None:

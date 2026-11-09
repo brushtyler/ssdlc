@@ -951,6 +951,11 @@ class OrchestratorBootstrapTests(RepositoryTests):
                 payload = json.loads(user)
                 if args[-1] == '02-design-task-plan':
                     self.assertIn('quality_contract', payload)
+                    validator = TaskPlanValidator(orch.repo_root, requirements.read_text(),
+                                                  payload['quality_contract'], orch.ssdlc_root)
+                    self.assertEqual(payload['requirement_catalogue'], validator.requirement_catalogue)
+                    self.assertEqual(payload['available_contract_refs'], validator.available_contract_refs())
+                    self.assertEqual(payload['requirement_catalogue']['required_ids'], ['AC-1', 'SEC-1'])
                     self.assertIn('additionalProperties', system)
                     out = json.dumps(planned)
                 else:
