@@ -35,7 +35,7 @@ from ssdlc_controller import assert_controller, controller_snapshot
 
 from ssdlc_tasks import (
     PlanError, TaskError, ResourceLimitError, TaskPlanValidator, TaskScheduler, atomic_json,
-    confined, file_hash, git, ticket_lock, validate_document, log_retry_reason,
+    confined, file_hash, git, ticket_lock, validate_document, log_retry_reason, test_suite_is_empty,
 )
 
 
@@ -1461,7 +1461,7 @@ class SSDLCOrchestrator:
             log.write_text(out + "\n" + err)
             contract["baseline"].append({"check_id": check["check_id"], "exit_code": rc,
                                          "log_ref": str(log.relative_to(self.ssdlc_root)), "sha256": sha256_file(log)})
-            if rc or re.search(r"Ran 0 tests\b|\bno tests ran\b|\bcollected 0 items\b", out + err):
+            if rc or test_suite_is_empty(out, err):
                 raise PlanError(f"Baseline check {check['check_id']} failed or ran no tests; inspect {log}")
         atomic_json(target, contract)
         self.record_artifact("00-recon/quality-contract.json", target)

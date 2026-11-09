@@ -2,10 +2,34 @@ import json
 from unittest.mock import patch
 
 from ssdlc_tasks import DevelopmentBlocked, TaskError, diagnostic_excerpt, file_hash, git
+from ssdlc_tasks import test_suite_is_empty as suite_is_empty
 from test_task_bootstrap import RepositoryTests
 
 
 class DevelopmentRepairTests(RepositoryTests):
+    def test_nested_empty_suite_diagnostic_does_not_override_real_unittest_summary(self):
+        stdout = 'Fixture diagnostic:\nRan 0 tests\n\nOK\n'
+        stderr = 'Ran 157 tests in 23.381s\n\nOK\n'
+        self.assertFalse(suite_is_empty(stdout, stderr))
+        result = self.scheduler(self.developer, lambda *args: (stdout, stderr, 0)).run(self.plan['tasks'])
+        self.assertEqual(result['tasks']['T1']['status'], 'COMPLETED')
+
+    def test_genuinely_empty_runner_summaries_still_block(self):
+        for stdout, stderr in [('', 'Ran 0 tests in 0.001s\nOK'), ('collected 0 items', ''),
+                               ('================ no tests ran in 0.01s ================', ''),
+                               ('Ran 3 tests\nOK', 'Ran 0 tests\nOK')]:
+            with self.subTest(stdout=stdout, stderr=stderr):
+                self.assertTrue(suite_is_empty(stdout, stderr))
+
+    def test_positive_final_pytest_summary_overrides_nested_empty_fixture(self):
+        for text in ('collected 0 items\n================ 5 passed in 0.2s ================',
+                     'no tests ran in 0.1s\n5 passed in 0.2s', 'collected 5 items'):
+            with self.subTest(text=text):
+                self.assertFalse(suite_is_empty(text))
+
+    def test_incidental_quoted_empty_suite_text_is_not_a_runner_summary(self):
+        self.assertFalse(suite_is_empty('Assertion message: no tests ran is an example'))
+
     def setUp(self):
         super().setUp()
         self.wt = self.worktree()

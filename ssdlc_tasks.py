@@ -113,6 +113,22 @@ def diagnostic_excerpt(text: str, limit: int) -> str:
     return text[:head] + marker + text[-tail:]
 
 
+def test_suite_is_empty(stdout: str, stderr: str = '') -> bool:
+    """Use the final runner summary, rather than quoted/nested empty-suite output.
+
+    Unittest writes its real summary to stderr. Earlier stdout can contain test
+    fixtures that exercise the empty-suite guard, including their literal logs.
+    """
+    summaries = list(re.finditer(r'^Ran\s+(?P<unittest>\d+)\s+tests?\b[^\n]*$'
+                                r'|^collected\s+(?P<collected>\d+)\s+items?\b[^\n]*$'
+                                r'|^=*\s*(?P<pytest>\d+)\s+(?:passed|failed|skipped|xfailed|xpassed|errors?)\b[^\n]*$'
+                                r'|^(?:=+\s*)?(?P<empty>no tests ran)\b[^\n]*$', stdout + '\n' + stderr, re.M))
+    if not summaries:
+        return False
+    final = summaries[-1]
+    return final['empty'] is not None or (final['unittest'] or final['collected'] or final['pytest']) == '0'
+
+
 def atomic_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix='.' + path.name, dir=path.parent)
@@ -637,7 +653,7 @@ class TaskScheduler:
                 out, err, rc = '', f'Verification timeout: {exc}', 124
             log = attempt_dir / f'check-{index}.log'
             log.write_text(out + '\n' + err)
-            empty = bool(re.search(r'Ran 0 tests\b|\bno tests ran\b|\bcollected 0 items\b', out + err))
+            empty = test_suite_is_empty(out, err)
             results.append({'check_id': check['check_id'], 'exit_code': rc, 'empty_suite': empty,
                             'log_ref': str(log.relative_to(self.directory)), 'sha256': file_hash(log)})
             record['checks'] = results
