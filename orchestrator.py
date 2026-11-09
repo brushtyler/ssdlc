@@ -782,6 +782,7 @@ class EngineRunner:
         docker = cmd[:2] == ["docker", "run"] and "--name" in cmd
         name = cmd[cmd.index("--name") + 1] if docker else None
         timed_out = False
+        cleanup_failed = False
         proc = None
         try:
             proc = subprocess.run(cmd, cwd=str(cwd), env=env, capture_output=True,
@@ -789,7 +790,12 @@ class EngineRunner:
         except subprocess.TimeoutExpired as exc:
             timed_out = True
             if name:
-                subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=15)
+                try:
+                    subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=15, check=True)
+                except (OSError, subprocess.SubprocessError):
+                    # Cleanup failure must not reveal the original credential-bearing
+                    # exception through an implicit chained traceback.
+                    cleanup_failed = True
             # Docker argv contains AI credentials passed with -e. Never expose it
             # through exception messages, repr(), chained tracebacks or state.json.
             raise subprocess.TimeoutExpired(
@@ -812,6 +818,7 @@ class EngineRunner:
                 failed = any(int(metrics.get(key, "0")) > 0 for key in
                              ("pids.events.max", "memory.events.oom", "memory.events.oom_kill"))
                 atomic_json(path, {"container": name, "cwd": str(cwd), "timed_out": timed_out,
+                                   "cleanup_failed": cleanup_failed,
                                    "exit_code": None if proc is None else proc.returncode,
                                    "telemetry_available": bool(metrics), "counters": metrics,
                                    "resource_failure": failed})

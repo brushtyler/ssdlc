@@ -152,3 +152,22 @@ class ContainerResourceTests(unittest.TestCase):
                         self.assertNotIn('API_KEY=', rendered)
                 else:
                     self.fail('Timeout was swallowed')
+
+    def test_failed_cleanup_preserves_sanitized_timeout_and_records_failure(self):
+        import traceback
+        for cleanup_error in (OSError('unavailable'), subprocess.TimeoutExpired(['docker', 'rm'], 15),
+                              subprocess.CalledProcessError(1, ['docker', 'rm'])):
+            with self.subTest(error=type(cleanup_error).__name__), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                cmd = ['docker', 'run', '--name', 'owned-test', '-e', 'API_KEY=private-test-value', 'image']
+                original = subprocess.TimeoutExpired(cmd, 10)
+                with patch('orchestrator.subprocess.run', side_effect=[original, cleanup_error]):
+                    try:
+                        EngineRunner._run_role_command(cmd, cwd=root, env=None, timeout=10)
+                    except subprocess.TimeoutExpired as exc:
+                        self.assertEqual(exc.timeout, 10)
+                        self.assertNotIn('private-test-value', traceback.format_exc())
+                    else:
+                        self.fail('Timeout was swallowed')
+                evidence = root/'.ssdlc/.runtime/resources/owned-test.json'
+                self.assertTrue(json.loads(evidence.read_text())['cleanup_failed'])
