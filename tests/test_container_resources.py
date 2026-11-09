@@ -28,12 +28,14 @@ class ContainerResourceTests(unittest.TestCase):
             with self.subTest(engine=engine), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 (root/'.ssdlc').mkdir()
+                toolkit = root/'toolkit'
+                toolkit.mkdir()
                 def invoke(cmd, **kwargs):
                     name = cmd[cmd.index('--name')+1]
                     marker = '__SSDLC_RESOURCE_' + name + '__ '
                     stdout = 'QA_STATUS: PASSED' if engine == 'codex' else json.dumps({'result': 'QA_STATUS: PASSED'})
                     return subprocess.CompletedProcess(cmd, 0, stdout, marker+'pids.events.max=0\n')
-                with patch.object(EngineRunner, '_should_spawn_role_container', return_value=True), patch('orchestrator.subprocess.run', side_effect=invoke):
+                with patch('orchestrator.__file__', str(toolkit/'orchestrator.py')), patch.object(EngineRunner, '_should_spawn_role_container', return_value=True), patch('orchestrator.subprocess.run', side_effect=invoke):
                     result = getattr(EngineRunner, 'run_'+engine)('Review', root)
                 self.assertEqual(result[0], 'QA_STATUS: PASSED')
                 evidence = list((root/'.ssdlc/.runtime/resources').glob('*.json'))

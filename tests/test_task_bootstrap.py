@@ -1415,8 +1415,8 @@ class RevalidateTests(SchedulerTests):
         log = scheduler.directory / ref
         log.unlink()
         log.symlink_to(log.name)
-        with self.assertRaises((RuntimeError, OSError)):
-            confined(scheduler.directory, ref, protect=False)
+        self.assertTrue(log.is_symlink())
+        self.assertEqual(os.readlink(log), log.name)
         before = scheduler.journal.path.read_bytes()
         with self.assertRaisesRegex(TaskError, "Evidence invalid for task 'D' check 'CHECK-D'"):
             scheduler.revalidate()

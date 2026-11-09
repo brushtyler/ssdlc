@@ -619,6 +619,16 @@ class EngineRunner:
             "-v",
             f"{ssdlc_home}:/opt/ssdlc:ro",
         ]
+        # Linked checkouts point outside their source directory for Git objects
+        # and worktree metadata. Keep that metadata readable, with the same
+        # read-only protection as a normal checkout's .git directory.
+        git_mounts = set()
+        for checkout in (repo_root, ssdlc_home):
+            if (checkout / '.git').is_file():
+                common = Path(git(checkout, 'rev-parse', '--path-format=absolute', '--git-common-dir')).resolve()
+                if common not in git_mounts:
+                    docker_cmd.extend(['-v', f'{common}:{common}:ro'])
+                    git_mounts.add(common)
         if stdin:
             docker_cmd.insert(2, "-i")
         if pass_ai_keys:
