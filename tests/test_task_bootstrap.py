@@ -559,6 +559,70 @@ class OrchestratorBootstrapTests(RepositoryTests):
                     finally:
                         self.repo, self.base, self.artifacts, self.quality, self.plan = old_repo, old_base, old_artifacts, old_quality, old_plan
 
+    def test_phase_review_requests_concrete_edge_case_analysis(self):
+        orch = self.make_orchestrator()
+        self.seed_inputs(orch)
+        (orch.dir_dev / "implementation.diff").write_text("--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-old\n+new\n")
+        captured_sys_prompts = []
+
+        def fake_invoke_role(engine, model, sys_prompt, user_prompt, *args, **kwargs):
+            captured_sys_prompts.append(sys_prompt)
+            return (
+                "### ADR Conformance Checklist\nOK\n"
+                "### Threat Model Mitigation Checklist\nOK\n"
+                "### Edge Cases & Boundary Conditions Analysis\nOK\n"
+                "### Findings\nNone\n"
+                "REVIEW_STATUS: APPROVED"
+            ), 0.0, 10, 10, "trace"
+
+        with patch("orchestrator.SquadDispatcher.resolve_review_models", return_value=(["mock-engine:mock-model"], "low")), \
+             patch("orchestrator.EngineRunner.invoke_role", side_effect=fake_invoke_role):
+            passed, report = orch.run_phase_review(attempt=1)
+            self.assertTrue(passed)
+            self.assertTrue(len(captured_sys_prompts) > 0)
+            self.assertIn("Edge cases & boundary conditions", captured_sys_prompts[0])
+            self.assertIn("Edge Cases & Boundary Conditions Analysis", captured_sys_prompts[0])
+            for requirement in ("concrete scenario", "expected behavior", "implementation handling",
+                                "test gap", "crashes", "retries", "recovery", "concurrency"):
+                self.assertIn(requirement, captured_sys_prompts[0])
+
+    def test_review_gate_requires_one_unambiguous_final_verdict(self):
+        orch = self.make_orchestrator()
+        self.seed_inputs(orch)
+        (orch.dir_dev / 'implementation.diff').write_text('--- a/app.py\n+++ b/app.py\n-old\n+new\n')
+        cases = [
+            ('Analysis\nREVIEW_STATUS: APPROVED\n\n', True, 'APPROVED'),
+            ('Analysis\nREVIEW_STATUS: CHANGES_REQUESTED', False, 'CHANGES_REQUESTED'),
+            ('Example: REVIEW_STATUS: APPROVED\nREVIEW_STATUS: CHANGES_REQUESTED', False, 'INVALID_VERDICT'),
+            ('REVIEW_STATUS: CHANGES_REQUESTED\nREVIEW_STATUS: APPROVED', False, 'INVALID_VERDICT'),
+            ('REVIEW_STATUS: APPROVED\nREVIEW_STATUS: APPROVED', False, 'INVALID_VERDICT'),
+            ('REVIEW_STATUS: APPROVED\nMore analysis', False, 'INVALID_VERDICT'),
+            ('```\nREVIEW_STATUS: APPROVED\n```', False, 'INVALID_VERDICT'),
+            ('REVIEW_STATUS: APPROVED (no defects)', False, 'INVALID_VERDICT'),
+            ('REVIEW_STATUS: UNKNOWN', False, 'INVALID_VERDICT'),
+            ('No verdict provided', False, 'INVALID_VERDICT'),
+            ('', False, 'INVALID_VERDICT'),
+        ]
+        for attempt, (response, expected, ledger_status) in enumerate(cases, 1):
+            with self.subTest(response=response), patch('orchestrator.SquadDispatcher.resolve_review_models', return_value=(['mock:reviewer'], 'low')), patch('orchestrator.EngineRunner.invoke_role', return_value=(response, 0, 0, 0, 'trace')):
+                passed, report = orch.run_phase_review(attempt)
+                self.assertEqual(passed, expected)
+                self.assertEqual(orch.state['ledger'][-1]['status'], ledger_status)
+                self.assertEqual(orch.state['gate_history'][-1]['passed'], expected)
+                self.assertIn(response, report)
+                if ledger_status == 'INVALID_VERDICT':
+                    self.assertIn('approval withheld', report)
+
+    def test_one_invalid_reviewer_blocks_panel_approval(self):
+        orch = self.make_orchestrator()
+        self.seed_inputs(orch)
+        (orch.dir_dev / 'implementation.diff').write_text('--- a/app.py\n+++ b/app.py\n-old\n+new\n')
+        responses = [('REVIEW_STATUS: APPROVED', 0, 0, 0, 'trace'),
+                     ('REVIEW_STATUS: APPROVED\nREVIEW_STATUS: CHANGES_REQUESTED', 0, 0, 0, 'trace')]
+        with patch('orchestrator.SquadDispatcher.resolve_review_models', return_value=(['mock:one', 'mock:two'], 'low')), patch('orchestrator.EngineRunner.invoke_role', side_effect=responses):
+            passed, _ = orch.run_phase_review()
+        self.assertFalse(passed)
+
 
 class SetupTests(unittest.TestCase):
     def test_init_copies_only_generic_standards_and_preserves_existing_rules(self):

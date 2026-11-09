@@ -41,6 +41,18 @@ def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def parse_review_verdict(report: str) -> Optional[str]:
+    """Require one verdict marker and an exact final verdict line."""
+    markers = re.findall(r"\bREVIEW_STATUS\s*:", report)
+    final_line = report.rstrip().splitlines()[-1].strip() if report.strip() else ""
+    if len(markers) != 1:
+        return None
+    for verdict in ("APPROVED", "CHANGES_REQUESTED"):
+        if final_line == f"REVIEW_STATUS: {verdict}":
+            return verdict
+    return None
+
+
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -2268,18 +2280,27 @@ class SSDLCOrchestrator:
             "Audit the Git Diff strictly against:\n"
             "1. The agreed Architecture Decision Record (ADR) — check for design drift.\n"
             "2. The Threat Model — verify every required security mitigation is implemented.\n"
-            "3. Code quality — race conditions, error handling, resource leaks, maintainability."
+            "3. Code quality — race conditions, error handling, resource leaks, maintainability.\n"
+            "4. Edge cases & boundary conditions — verify relevant input validation (null, empty, limits, invalid formats), "
+            "corner cases, unhandled errors, and unexpected failure modes. Include crashes, retries, interrupted execution "
+            "and recovery, and concurrency where applicable.\n"
             f"{specialist_instructions}\n"
             f"{ui_review_rules}\n"
             "Output a structured Markdown review with:\n"
             "- ### ADR Conformance Checklist\n"
             "- ### Threat Model Mitigation Checklist\n"
+            "- ### Edge Cases & Boundary Conditions Analysis\n"
+            "  For each relevant case, identify the concrete scenario, expected behavior, implementation handling "
+            "(with file/symbol references), and the test that demonstrates it or a specific test gap. "
+            "Distinguish observed evidence from assumptions; do not claim tests ran without execution evidence. "
+            "Explain when a category is not applicable instead of filling the section with a generic OK.\n"
             "- ### Specialist Lens Audit (DB / Perf / SRE / UI if active)\n"
             "- ### Findings (Critical / Major / Minor)\n"
             "At the very end, output EXACTLY one of:\n"
-            "REVIEW_STATUS: APPROVED (if zero Critical or Major defects exist)\n"
-            "or\n"
-            "REVIEW_STATUS: CHANGES_REQUESTED (if any Critical or Major defect exists)"
+            "REVIEW_STATUS: APPROVED\n"
+            "REVIEW_STATUS: CHANGES_REQUESTED\n"
+            "Use APPROVED only when there are zero Critical or Major defects; otherwise use CHANGES_REQUESTED. "
+            "Emit the verdict marker once only, as the final standalone line, with no annotations or code fence."
         )
         user_prompt = (
             f"PO REQUIREMENTS:\n{req_text}\n\n"
@@ -2312,7 +2333,8 @@ class SSDLCOrchestrator:
                 reasoning_effort=rev_effort,
             )
             dur = time.time() - t0
-            passed = "REVIEW_STATUS: APPROVED" in rev_out
+            verdict = parse_review_verdict(rev_out)
+            passed = verdict == "APPROVED"
             if not passed:
                 all_approved = False
             self.record_ledger(
@@ -2321,7 +2343,7 @@ class SSDLCOrchestrator:
                     "Code Reviewer",
                     effective_engine,
                     effective_model,
-                    "APPROVED" if passed else "CHANGES_REQUESTED",
+                    verdict or "INVALID_VERDICT",
                     dur,
                     cost,
                     tin,
@@ -2330,7 +2352,8 @@ class SSDLCOrchestrator:
                     reasoning_effort=rev_effort,
                 )
             )
-            combined_reviews.append(f"## Reviewer: `{effective_engine}:{effective_model}` ({'APPROVED' if passed else 'CHANGES_REQUESTED'}, reasoning={rev_effort})\n\n{rev_out}\n\n---\n")
+            verdict_note = "Invalid or ambiguous final verdict; approval withheld.\n\n" if verdict is None else ""
+            combined_reviews.append(f"## Reviewer: `{effective_engine}:{effective_model}` ({verdict or 'INVALID_VERDICT'}, reasoning={rev_effort})\n\n{verdict_note}{rev_out}\n\n---\n")
 
         report_text = "\n".join(combined_reviews)
         rev_path = self.dir_review / f"review-report-a{attempt}.md"
