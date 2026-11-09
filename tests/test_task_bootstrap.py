@@ -342,6 +342,19 @@ class SandboxTests(unittest.TestCase):
         self.assertNotEqual(*seen)
         self.assertTrue(all(not Path(path).exists() for path in seen))
 
+    def test_developer_python_caches_are_redirected_per_invocation(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'PYTEST_ADDOPTS': '--strict-markers'}):
+            root = Path(tmp)
+            (root / '.ssdlc').mkdir()
+            commands = [EngineRunner._wrap_in_role_container(['codex', 'exec', '-'], root, writable_worktree=root) for _ in range(2)]
+            environments = [{cmd[i+1].split('=', 1)[0]: cmd[i+1].split('=', 1)[1]
+                             for i, arg in enumerate(cmd[:-1]) if arg == '-e'} for cmd in commands]
+            for env in environments:
+                self.assertTrue(Path(env['PYTHONPYCACHEPREFIX']).is_relative_to(root / '.ssdlc/.runtime/cache/roles'))
+                self.assertIn('--strict-markers', env['PYTEST_ADDOPTS'])
+                self.assertIn('cache_dir=', env['PYTEST_ADDOPTS'])
+            self.assertNotEqual(environments[0]['PYTHONPYCACHEPREFIX'], environments[1]['PYTHONPYCACHEPREFIX'])
+
     def test_test_container_masks_secrets_and_keeps_worktree_read_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / 'repo'
@@ -559,6 +572,70 @@ class OrchestratorBootstrapTests(RepositoryTests):
                     finally:
                         self.repo, self.base, self.artifacts, self.quality, self.plan = old_repo, old_base, old_artifacts, old_quality, old_plan
 
+    def test_phase_review_requests_concrete_edge_case_analysis(self):
+        orch = self.make_orchestrator()
+        self.seed_inputs(orch)
+        (orch.dir_dev / "implementation.diff").write_text("--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-old\n+new\n")
+        captured_sys_prompts = []
+
+        def fake_invoke_role(engine, model, sys_prompt, user_prompt, *args, **kwargs):
+            captured_sys_prompts.append(sys_prompt)
+            return (
+                "### ADR Conformance Checklist\nOK\n"
+                "### Threat Model Mitigation Checklist\nOK\n"
+                "### Edge Cases & Boundary Conditions Analysis\nOK\n"
+                "### Findings\nNone\n"
+                "REVIEW_STATUS: APPROVED"
+            ), 0.0, 10, 10, "trace"
+
+        with patch("orchestrator.SquadDispatcher.resolve_review_models", return_value=(["mock-engine:mock-model"], "low")), \
+             patch("orchestrator.EngineRunner.invoke_role", side_effect=fake_invoke_role):
+            passed, report = orch.run_phase_review(attempt=1)
+            self.assertTrue(passed)
+            self.assertTrue(len(captured_sys_prompts) > 0)
+            self.assertIn("Edge cases & boundary conditions", captured_sys_prompts[0])
+            self.assertIn("Edge Cases & Boundary Conditions Analysis", captured_sys_prompts[0])
+            for requirement in ("concrete scenario", "expected behavior", "implementation handling",
+                                "test gap", "crashes", "retries", "recovery", "concurrency"):
+                self.assertIn(requirement, captured_sys_prompts[0])
+
+    def test_review_gate_requires_one_unambiguous_final_verdict(self):
+        orch = self.make_orchestrator()
+        self.seed_inputs(orch)
+        (orch.dir_dev / 'implementation.diff').write_text('--- a/app.py\n+++ b/app.py\n-old\n+new\n')
+        cases = [
+            ('Analysis\nREVIEW_STATUS: APPROVED\n\n', True, 'APPROVED'),
+            ('Analysis\nREVIEW_STATUS: CHANGES_REQUESTED', False, 'CHANGES_REQUESTED'),
+            ('Example: REVIEW_STATUS: APPROVED\nREVIEW_STATUS: CHANGES_REQUESTED', False, 'INVALID_VERDICT'),
+            ('REVIEW_STATUS: CHANGES_REQUESTED\nREVIEW_STATUS: APPROVED', False, 'INVALID_VERDICT'),
+            ('REVIEW_STATUS: APPROVED\nREVIEW_STATUS: APPROVED', False, 'INVALID_VERDICT'),
+            ('REVIEW_STATUS: APPROVED\nMore analysis', False, 'INVALID_VERDICT'),
+            ('```\nREVIEW_STATUS: APPROVED\n```', False, 'INVALID_VERDICT'),
+            ('REVIEW_STATUS: APPROVED (no defects)', False, 'INVALID_VERDICT'),
+            ('REVIEW_STATUS: UNKNOWN', False, 'INVALID_VERDICT'),
+            ('No verdict provided', False, 'INVALID_VERDICT'),
+            ('', False, 'INVALID_VERDICT'),
+        ]
+        for attempt, (response, expected, ledger_status) in enumerate(cases, 1):
+            with self.subTest(response=response), patch('orchestrator.SquadDispatcher.resolve_review_models', return_value=(['mock:reviewer'], 'low')), patch('orchestrator.EngineRunner.invoke_role', return_value=(response, 0, 0, 0, 'trace')):
+                passed, report = orch.run_phase_review(attempt)
+                self.assertEqual(passed, expected)
+                self.assertEqual(orch.state['ledger'][-1]['status'], ledger_status)
+                self.assertEqual(orch.state['gate_history'][-1]['passed'], expected)
+                self.assertIn(response, report)
+                if ledger_status == 'INVALID_VERDICT':
+                    self.assertIn('approval withheld', report)
+
+    def test_one_invalid_reviewer_blocks_panel_approval(self):
+        orch = self.make_orchestrator()
+        self.seed_inputs(orch)
+        (orch.dir_dev / 'implementation.diff').write_text('--- a/app.py\n+++ b/app.py\n-old\n+new\n')
+        responses = [('REVIEW_STATUS: APPROVED', 0, 0, 0, 'trace'),
+                     ('REVIEW_STATUS: APPROVED\nREVIEW_STATUS: CHANGES_REQUESTED', 0, 0, 0, 'trace')]
+        with patch('orchestrator.SquadDispatcher.resolve_review_models', return_value=(['mock:one', 'mock:two'], 'low')), patch('orchestrator.EngineRunner.invoke_role', side_effect=responses):
+            passed, _ = orch.run_phase_review()
+        self.assertFalse(passed)
+
 
 class SetupTests(unittest.TestCase):
     def test_init_copies_only_generic_standards_and_preserves_existing_rules(self):
@@ -608,6 +685,26 @@ class AdvisorySchemaTests(unittest.TestCase):
             proposal['id'] = 'AMBIGUOUS'
             with self.assertRaisesRegex(PlanError, 'unqualified'):
                 validate_advisory(advisory, artifacts)
+
+
+class PromptTransportTests(unittest.TestCase):
+    def test_large_prompts_use_stdin_and_codex_traces_do_not_enter_phase_result(self):
+        prompt = 'x' * 200000
+        for engine in ('codex', 'claude'):
+            with self.subTest(engine=engine), patch.object(EngineRunner, '_should_spawn_role_container', return_value=False), patch('orchestrator.subprocess.run') as run:
+                output = 'phase result' if engine == 'codex' else json.dumps({'result': 'phase result'})
+                run.return_value = subprocess.CompletedProcess([], 0, output, 'tool transcript')
+                result = getattr(EngineRunner, 'run_' + engine)(prompt, Path.cwd())
+                self.assertEqual(result[0], 'phase result')
+                self.assertEqual(run.call_args.kwargs['input'], prompt)
+                self.assertNotIn(prompt, run.call_args.args[0])
+
+    def test_docker_preserves_piped_stdin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / '.ssdlc').mkdir()
+            cmd = EngineRunner._wrap_in_role_container(['codex', 'exec', '-'], root, stdin=True)
+            self.assertEqual(cmd[:3], ['docker', 'run', '-i'])
 
 
 if __name__ == '__main__':

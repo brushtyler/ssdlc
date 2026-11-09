@@ -513,3 +513,72 @@ The selected image must contain `requirements.txt` dependencies to run the suite
 Validation passed with 41 tests in the separate `ssdlc-runner:bootstrap-test` image;
 the existing `ssdlc-runner:latest` image was preserved. The Docker test also covers
 initializing a project while the toolkit itself is mounted read-only.
+
+Task planning supports an initial candidate and at most two repairs. Schema and
+requirement/check mapping errors are returned to the planner as structured
+feedback; semantic review can also reject a valid JSON candidate. Attempts,
+outputs, diagnostics, reviews and hashes are kept in `02-design/task-planning/`.
+Reservations survive crashes and do not reset the limit. Changed inputs or altered
+planning evidence require explicit intervention. Repair never relaxes validation
+or substitutes requirement labels for behavioral tests.
+
+To retry planning without repeating approved PO/design work or executing code:
+
+```bash
+./ssdlc plan --ticket TKT-001
+```
+
+This checks the registered upstream hashes and design approval and requires that
+execution has not started. Success records `PLAN_READY`; development can then be
+resumed with `run --from-phase 03-dev`. Exhausted repair sessions are not silently
+reset by the `plan` command. A single fenced JSON block may have a prose preamble;
+multiple candidate blocks are rejected as ambiguous.
+
+Planning now separates the original candidate plus two structural repair slots
+from two semantic revision slots. A reviewer rejection can therefore be addressed
+even after structural repairs were used. Both allowances and all reservations are
+persistent and subject to the ticket's existing cost cap. Legacy sessions preserve
+their old bound unless explicitly extended:
+
+```bash
+./ssdlc plan --ticket TKT-001 --review-repairs 2
+```
+
+The explicit extension is recorded in the planning session without resetting
+history or input fingerprints. The supported semantic allowance is 0–4; exhaustion
+still stops rather than approving an unresolved plan.
+
+Role containers use `--init` and a finite PID/thread limit of 1024 by default
+(`SSDLC_CONTAINER_PIDS_LIMIT`, minimum 16). Explicit existing overrides remain in
+force. Configuration is read at controller startup; changing project.env does not
+modify an already running controller or container.
+
+Before normal container exit/removal, a shell wrapper collects cgroup-v2 PID and
+memory counters using builtins, without requiring additional forks or mixing
+metrics into CLI stdout. Per-invocation evidence is saved by the controller under
+`.ssdlc/.runtime/resources/ssdlc-role-*.json`. Missing counters, including abrupt
+termination before collection, are marked unavailable rather than reported as
+measured zero. Controller timeouts remove only their own named container.
+
+A measured PID/OOM resource event blocks AI output even if the CLI exited zero;
+it raises `ENVIRONMENT_RESOURCE`, preserving the source for reconciliation instead
+of asking the model to correct code. Read-only verification gets at most one retry
+in a fresh container within the remaining timeout, retaining both resource records.
+A repeated limit hit returns exit code 125. Developer invocations are not repeated
+automatically, and attempt counters are not reset.
+
+To exercise the failure path safely with a temporary limit of 32 tasks:
+
+```bash
+python3 tests/docker_pid_smoke.py --image ssdlc-runner:bootstrap-test
+```
+
+AGY authentication in Docker uses a dedicated profile instead of the verifier
+profile. Only the existing host token at
+`~/.gemini/antigravity-cli/antigravity-oauth-token` is inherited into a private
+project copy under `.ssdlc/.runtime/agy_auth/` (token permissions 0600). The AGY
+container can refresh that copy; the host store is unchanged. No Claude/Codex
+credentials or AI API keys are granted to this profile, and untrusted verification
+containers do not receive the AGY store. Missing credentials fail before starting
+an interactive login. A newer host token can replace the project copy on a later
+invocation after an explicit host reauthentication.

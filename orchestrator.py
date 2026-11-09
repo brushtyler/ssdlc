@@ -23,20 +23,35 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from ssdlc_planning import PlanRepair
+
 from ssdlc_tasks import (
-    PlanError, TaskError, TaskPlanValidator, TaskScheduler, atomic_json,
+    PlanError, TaskError, ResourceLimitError, TaskPlanValidator, TaskScheduler, atomic_json,
     confined, file_hash, git, ticket_lock, validate_document,
 )
 
 
 def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_review_verdict(report: str) -> Optional[str]:
+    """Require one verdict marker and an exact final verdict line."""
+    markers = re.findall(r"\bREVIEW_STATUS\s*:", report)
+    final_line = report.rstrip().splitlines()[-1].strip() if report.strip() else ""
+    if len(markers) != 1:
+        return None
+    for verdict in ("APPROVED", "CHANGES_REQUESTED"):
+        if final_line == f"REVIEW_STATUS: {verdict}":
+            return verdict
+    return None
 
 
 def sha256_file(path: Path) -> str:
@@ -551,6 +566,8 @@ class EngineRunner:
         pass_ai_keys: bool = True,
         verification_scratch: Optional[Path] = None,
         verification_env: Optional[Dict[str, str]] = None,
+        stdin: bool = False,
+        auth_profile: Optional[str] = None,
     ) -> List[str]:
         """
         Wraps a CLI/test invocation in a fresh ephemeral container where:
@@ -563,11 +580,15 @@ class EngineRunner:
           - Strips AI API keys when pass_ai_keys=False (e.g., when running untrusted unit tests).
         """
         repo_root = EngineRunner._find_repo_root(cwd)
+        if auth_profile not in (None, "agy"):
+            raise TaskError("Unsupported role authentication profile")
         runtime_dir = repo_root / ".ssdlc" / ".runtime"
         runtime_dir.mkdir(parents=True, exist_ok=True)
         ssdlc_home = Path(__file__).resolve().parent
 
-        pids_limit = os.environ.get("SSDLC_CONTAINER_PIDS_LIMIT", "512")
+        pids_limit = os.environ.get("SSDLC_CONTAINER_PIDS_LIMIT", "1024")
+        if not pids_limit.isdigit() or int(pids_limit) < 16:
+            raise TaskError("SSDLC_CONTAINER_PIDS_LIMIT must be a finite integer >= 16")
         mem_limit = os.environ.get("SSDLC_CONTAINER_MEMORY", "4g")
         cpus_limit = os.environ.get("SSDLC_CONTAINER_CPUS", "2")
 
@@ -575,6 +596,9 @@ class EngineRunner:
             "docker",
             "run",
             "--rm",
+            "--init",
+            "--name",
+            "ssdlc-role-" + uuid.uuid4().hex,
             "--security-opt",
             "no-new-privileges:true",
             "--pids-limit",
@@ -584,7 +608,7 @@ class EngineRunner:
             "--cpus",
             str(cpus_limit),
             "--entrypoint",
-            inner_cmd[0],
+            "/bin/sh",
             "-w",
             str(cwd.resolve()),
             "-v",
@@ -592,16 +616,33 @@ class EngineRunner:
             "-v",
             f"{ssdlc_home}:/opt/ssdlc:ro",
         ]
+        if stdin:
+            docker_cmd.insert(2, "-i")
         if pass_ai_keys:
             docker_cmd.extend([
                 "-v", f"{runtime_dir}:{runtime_dir}:rw",
                 "-v", "ssdlc-shared-uv-cache:/root/.cache/uv",
                 "-v", "ssdlc-shared-npm-cache:/root/.npm",
             ])
+            # Developer agents also run tests. Keep their caches outside source,
+            # just as for the trusted verification runner, without ignoring files.
+            cache_parent = runtime_dir / "cache" / "roles"
+            cache_parent.mkdir(parents=True, exist_ok=True)
+            role_cache = Path(tempfile.mkdtemp(prefix="invocation-", dir=cache_parent))
+            for key, value in {
+                "PYTHONPYCACHEPREFIX": str(role_cache / "pycache"),
+                "PYTEST_ADDOPTS": (os.environ.get("PYTEST_ADDOPTS", "") + f" -o cache_dir={role_cache / 'pytest'}").strip(),
+                "MYPY_CACHE_DIR": str(role_cache / "mypy"),
+                "RUFF_CACHE_DIR": str(role_cache / "ruff"),
+            }.items():
+                docker_cmd.extend(["-e", f"{key}={value}"])
         else:
             # Test code must not read isolated credentials through the repository mount.
             docker_cmd.extend(["--tmpfs", f"{repo_root / '.ssdlc'}:rw,size=16m"])
-            docker_cmd.extend(["--tmpfs", "/opt/ssdlc/.ssdlc:rw,size=16m"])
+            # A pristine, read-only toolkit has no runtime directory to mask;
+            # Docker cannot create a nested mountpoint inside that bind mount.
+            if (ssdlc_home / ".ssdlc").exists():
+                docker_cmd.extend(["--tmpfs", "/opt/ssdlc/.ssdlc:rw,size=16m"])
             if cwd.resolve() != repo_root:
                 docker_cmd.extend(["-v", f"{cwd.resolve()}:{cwd.resolve()}:ro"])
             if verification_scratch is not None:
@@ -641,7 +682,22 @@ class EngineRunner:
 
         # agy Gemini Flash auth & ephemeral tmpfs mounts
         host_gemini = Path.home() / ".gemini"
-        if pass_ai_keys and host_gemini.exists():
+        if auth_profile == "agy":
+            # AGY is an AI role, not an untrusted verifier. Give it only its own
+            # copied OAuth store, writable for refresh without touching host auth.
+            host_token = host_gemini / "antigravity-cli" / "antigravity-oauth-token"
+            agy_home = runtime_dir / "agy_auth"
+            token = agy_home / "antigravity-cli" / "antigravity-oauth-token"
+            if not host_token.is_file() and not token.is_file():
+                raise TaskError("AGY authentication is unavailable; configure host login before selecting agy")
+            token.parent.mkdir(parents=True, exist_ok=True)
+            os.chmod(agy_home, 0o700)
+            os.chmod(token.parent, 0o700)
+            if host_token.is_file() and (not token.exists() or host_token.stat().st_mtime > token.stat().st_mtime):
+                shutil.copy2(host_token, token)
+            os.chmod(token, 0o600)
+            docker_cmd.extend(["-v", f"{agy_home}:/root/.gemini:rw"])
+        elif pass_ai_keys and host_gemini.exists():
             docker_cmd.extend([
                 "-v", f"{host_gemini}:/root/.gemini:ro",
                 "--tmpfs", "/root/.gemini/antigravity-cli/brain:rw",
@@ -679,15 +735,68 @@ class EngineRunner:
             if val:
                 docker_cmd.extend(["-e", f"{env_key}={val}"])
 
-        docker_cmd.append(EngineRunner.IMAGE_NAME)
-        docker_cmd.extend(inner_cmd[1:])
+        name = docker_cmd[docker_cmd.index("--name") + 1]
+        marker = "__SSDLC_RESOURCE_" + name + "__"
+        # Shell builtins still work at the PID limit. Read counters while the
+        # cgroup exists, before --rm removes it, without modifying CLI stdout.
+        wrapper = ('"$@"; rc=$?; '
+                   'for f in pids.current pids.max pids.peak pids.events memory.peak memory.events; do '
+                   'if [ -r "/sys/fs/cgroup/$f" ]; then '
+                   'while read -r key value; do '
+                   'if [ -n "$value" ]; then '
+                   f'printf "{marker} %s.%s=%s\\n" "$f" "$key" "$value" >&2; '
+                   'else '
+                   f'printf "{marker} %s=%s\\n" "$f" "$key" >&2; '
+                   'fi; done < "/sys/fs/cgroup/$f"; fi; done; exit "$rc"')
+        docker_cmd.extend([EngineRunner.IMAGE_NAME, "-c", wrapper, "ssdlc-role", *inner_cmd])
         return docker_cmd
+
+    @staticmethod
+    def _run_role_command(cmd, *, cwd, env, timeout, input=None):
+        """Execute once; preserve resource evidence even for zero-exit PID failures."""
+        cwd = Path(cwd)
+        docker = cmd[:2] == ["docker", "run"] and "--name" in cmd
+        name = cmd[cmd.index("--name") + 1] if docker else None
+        timed_out = False
+        proc = None
+        try:
+            proc = subprocess.run(cmd, cwd=str(cwd), env=env, capture_output=True,
+                                  text=True, timeout=timeout, input=input)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            if name:
+                subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=15)
+            raise
+        finally:
+            if name:
+                metrics = {}
+                marker = "__SSDLC_RESOURCE_" + name + "__ "
+                if proc is not None:
+                    lines = (proc.stderr or "").splitlines(keepends=True)
+                    for line in lines:
+                        if line.startswith(marker):
+                            key, separator, value = line[len(marker):].strip().partition("=")
+                            if separator:
+                                metrics[key] = value
+                    proc.stderr = "".join(line for line in lines if not line.startswith(marker))
+                path = EngineRunner._find_repo_root(cwd) / ".ssdlc/.runtime/resources" / (name + ".json")
+                failed = any(int(metrics.get(key, "0")) > 0 for key in
+                             ("pids.events.max", "memory.events.oom", "memory.events.oom_kill"))
+                atomic_json(path, {"container": name, "cwd": str(cwd), "timed_out": timed_out,
+                                   "exit_code": None if proc is None else proc.returncode,
+                                   "telemetry_available": bool(metrics), "counters": metrics,
+                                   "resource_failure": failed})
+                if proc is not None:
+                    proc.resource_failure = failed
+                    proc.resource_evidence = str(path)
+        return proc
 
     @staticmethod
     def run_sandboxed_cmd(
         cmd: List[str],
         cwd: Path,
         timeout: int = 300,
+        _resource_retry: bool = True,
     ) -> Tuple[str, str, int]:
         """
         Executes a deterministic test or scanner command inside the read-only role container
@@ -718,9 +827,15 @@ class EngineRunner:
                           "CLAUDE_CONFIG_DIR", "GITHUB_TOKEN", "GH_TOKEN", "GITLAB_TOKEN"}
                 env = {k: v for k, v in os.environ.items() if k not in hidden}
                 env.update(settings)
-            proc = subprocess.run(
-                exec_cmd, cwd=str(cwd), env=env, capture_output=True, text=True, timeout=timeout,
-            )
+            started = time.monotonic()
+            proc = EngineRunner._run_role_command(exec_cmd, cwd=cwd, env=env, timeout=timeout)
+            if getattr(proc, "resource_failure", False):
+                remaining = int(timeout - (time.monotonic() - started))
+                if _resource_retry and remaining > 0:
+                    print(f"[resources] Verification hit a container limit; retrying once in a fresh container. Evidence: {proc.resource_evidence}", flush=True)
+                    out, err, rc = EngineRunner.run_sandboxed_cmd(cmd, cwd, remaining, _resource_retry=False)
+                    return out, f"Environment resource retry; first-attempt evidence: {proc.resource_evidence}\n" + err, rc
+                return proc.stdout or "", (proc.stderr or "") + f"\nENVIRONMENT_RESOURCE: {proc.resource_evidence}", 125
         return proc.stdout or "", proc.stderr or "", proc.returncode
 
     @staticmethod
@@ -850,16 +965,16 @@ class EngineRunner:
         ]
         if EngineRunner._should_spawn_role_container():
             cmd = EngineRunner._wrap_in_role_container(
-                cmd, cwd=cwd, writable_worktree=None, pass_ai_keys=False
+                cmd, cwd=cwd, writable_worktree=None, pass_ai_keys=False, auth_profile="agy"
             )
-        proc = subprocess.run(
+        proc = EngineRunner._run_role_command(
             cmd,
             cwd=str(cwd),
             env=os.environ.copy(),
-            capture_output=True,
-            text=True,
             timeout=timeout,
         )
+        if getattr(proc, "resource_failure", False):
+            raise ResourceLimitError(f"ENVIRONMENT_RESOURCE: container limit reached; code correction not requested. Evidence: {proc.resource_evidence}")
         combined = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
         return combined.strip(), proc.returncode
 
@@ -888,22 +1003,24 @@ class EngineRunner:
             cmd.extend(["-c", 'model_provider="openrouter"'])
         if model:
             cmd.extend(["-m", model])
-        cmd.append(prompt)
+        cmd.append("-")
         if use_container:
             cmd = EngineRunner._wrap_in_role_container(
-                cmd, cwd=cwd, writable_worktree=writable_worktree
+                cmd, cwd=cwd, writable_worktree=writable_worktree, stdin=True
             )
         dev_timeout = int(os.environ.get("SSDLC_DEV_TIMEOUT", "2400"))
-        proc = subprocess.run(
+        proc = EngineRunner._run_role_command(
             cmd,
+            input=prompt,
             cwd=str(cwd),
             env=os.environ.copy(),
-            capture_output=True,
-            text=True,
             timeout=dev_timeout,
         )
+        if getattr(proc, "resource_failure", False):
+            raise ResourceLimitError(f"ENVIRONMENT_RESOURCE: container limit reached; code correction not requested. Evidence: {proc.resource_evidence}")
         combined = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
-        return combined.strip(), proc.returncode
+        # Successful stdout is the phase result; stderr contains tool transcripts.
+        return (proc.stdout or "").strip() if proc.returncode == 0 else combined.strip(), proc.returncode
 
     @staticmethod
     def run_claude(
@@ -928,7 +1045,7 @@ class EngineRunner:
         if "/" in target_model:
             target_model = target_model.split("/")[-1]
 
-        cmd = ["claude", "-p", prompt, "--model", target_model, "--output-format", "json"]
+        cmd = ["claude", "-p", "--model", target_model, "--output-format", "json"]
         if not read_only:
             cmd.append("--dangerously-skip-permissions")
 
@@ -945,16 +1062,18 @@ class EngineRunner:
                 cmd,
                 cwd=cwd,
                 writable_worktree=(None if read_only else writable_worktree),
+                stdin=True,
             )
         dev_timeout = int(os.environ.get("SSDLC_DEV_TIMEOUT", "2400"))
-        proc = subprocess.run(
+        proc = EngineRunner._run_role_command(
             cmd,
+            input=prompt,
             cwd=str(cwd),
             env=env,
-            capture_output=True,
-            text=True,
             timeout=dev_timeout,
         )
+        if getattr(proc, "resource_failure", False):
+            raise ResourceLimitError(f"ENVIRONMENT_RESOURCE: container limit reached; code correction not requested. Evidence: {proc.resource_evidence}")
         combined = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
         cost_usd = 0.0
         tokens_in = 0
@@ -1347,7 +1466,7 @@ class SSDLCOrchestrator:
         self.record_artifact("00-recon/quality-contract.json", target)
         return contract
 
-    def _ensure_task_plan(self) -> Dict[str, Any]:
+    def _ensure_task_plan(self, review_repairs=None) -> Dict[str, Any]:
         self.state["task_breakdown"] = True
         self._save_state()
         quality = self._ensure_quality_contract()
@@ -1378,52 +1497,101 @@ class SSDLCOrchestrator:
                   "and reference all required quality checks and applicable standards. Each requirement must map to executable checks. "
                   "Use kind=task and automated verification only: this bootstrap has no subgoal or review_only engine. "
                   "Preserve the supplied base_commit, ticket_id and quality_contract_ref. Do not reduce scope or security constraints.\n" + schema)
-        t0 = time.time()
-        out, cost, tin, tout, trace = EngineRunner.invoke_role(
-            engine, model, prompt, json.dumps(context, indent=2), self.repo_root,
-            self.project_id, self.ticket_id, "02-design-task-plan", reasoning_effort=effort,
-        )
-        self.record_ledger(CostAndTelemetryEntry("02-design-task-plan", "Task Planner", engine, model, "GENERATED", time.time() - t0, cost, tin, tout, trace, effort))
-        self.check_budget_circuit_breaker()
-        raw_plan = self.dir_design / "task-plan-candidate.txt"
-        raw_plan.write_text(out)
-        self.record_artifact("02-design/task-plan-candidate.txt", raw_plan)
-        candidate = out.strip()
-        if candidate.startswith("```json\n") and candidate.endswith("```"):
-            candidate = candidate[len("```json\n"):-3].strip()
-        try:
-            plan = json.loads(candidate)
-            validator.validate(plan)
-            if plan["ticket_id"] != self.ticket_id or plan["base_commit"] != self.state["base_commit"]:
-                raise PlanError("Planner changed ticket identity or base_commit")
-        except (ValueError, PlanError) as exc:
-            self.record_gate("TASK_PLAN_GATE", False, str(exc))
-            raise PlanError(f"Invalid generated plan; inspect {raw_plan}: {exc}") from exc
+        prompt += ("\nEvery implementation task must include its new behavior tests in target_files and run them locally. "
+                   "Do not defer all new tests to a final task. Preparatory tasks may have empty AC/SEC references "
+                   "with local regression checks, but must still obey all applicable safety invariants. "
+                   "Each claimed requirement must have an actual behavioral check, not merely an added label. "
+                   "On repair, fix the reported defects without dropping requirements or weakening checks.")
         rev_engine, rev_model, rev_effort, _ = SquadDispatcher.dispatch_role(
             "02-design-sec", self.state.get("risk_tier", "M"), self.state.get("dev_profile", "ALGORITHMIC")
         )
         if not model or not rev_model or rev_model.split("/")[-1] == model.split("/")[-1]:
             raise PlanError("Task plan needs an independent reviewer")
-        t0 = time.time()
-        review, cost, tin, tout, trace = EngineRunner.invoke_role(
-            rev_engine, rev_model,
-            "Review decomposition, requirement/check coverage and project conventions. Challenge missing scenarios and assumptions. "
-            "End with exactly TASK_PLAN_STATUS: APPROVED or TASK_PLAN_STATUS: REVISION_REQUIRED.",
-            json.dumps({"context": context, "plan": plan}), self.repo_root,
-            self.project_id, self.ticket_id, "02-design-task-plan-review", reasoning_effort=rev_effort,
-        )
-        report = self.dir_design / "task-plan-review.md"
-        report.write_text(review)
-        self.record_artifact("02-design/task-plan-review.md", report)
-        self.record_ledger(CostAndTelemetryEntry("02-design-task-plan-review", "Plan Reviewer", rev_engine, rev_model, "REVIEWED", time.time() - t0, cost, tin, tout, trace, rev_effort))
-        self.check_budget_circuit_breaker()
-        approved = review.strip().endswith("TASK_PLAN_STATUS: APPROVED")
-        self.record_gate("TASK_PLAN_GATE", approved, "Schema, DAG, traceability and independent semantic review")
-        if not approved:
-            raise PlanError("Task plan requires revision; code execution has not started")
+        def validate(plan):
+            validator.validate(plan)
+            if plan["ticket_id"] != self.ticket_id or plan["base_commit"] != self.state["base_commit"]:
+                raise PlanError("Planner changed ticket identity or base_commit")
+        def generate(attempt, inputs, previous):
+            t0 = time.time()
+            out, cost, tin, tout, trace = EngineRunner.invoke_role(
+                engine, model, prompt, json.dumps({**context, "repair": previous} if previous else context, indent=2),
+                self.repo_root, self.project_id, self.ticket_id,
+                "02-design-task-plan", reasoning_effort=effort,
+            )
+            self.record_ledger(CostAndTelemetryEntry(
+                f"02-design-task-plan-a{attempt}", "Task Planner", engine, model, "GENERATED",
+                time.time() - t0, cost, tin, tout, trace, effort))
+            return out
+        def review(plan):
+            t0 = time.time()
+            out, cost, tin, tout, trace = EngineRunner.invoke_role(
+                rev_engine, rev_model,
+                "Review decomposition, missing scenarios and requirement/check coverage. Reject label-only coverage: "
+                "checks must exercise the claimed behavior and implementation tasks must include their tests. "
+                "End with exactly TASK_PLAN_STATUS: APPROVED or TASK_PLAN_STATUS: REVISION_REQUIRED.",
+                json.dumps({"context": context, "plan": plan}), self.repo_root,
+                self.project_id, self.ticket_id, "02-design-task-plan-review", reasoning_effort=rev_effort,
+            )
+            self.record_ledger(CostAndTelemetryEntry(
+                "02-design-task-plan-review", "Plan Reviewer", rev_engine, rev_model, "REVIEWED",
+                time.time() - t0, cost, tin, tout, trace, rev_effort))
+            return out
+        repair = PlanRepair(self.dir_design,
+                            {"context": context, "schema": schema, "prompt": prompt,
+                             "planner": [engine, model, effort], "reviewer": [rev_engine, rev_model, rev_effort]},
+                            validate, generate, review, self.check_budget_circuit_breaker, review_repairs=review_repairs)
+        try:
+            previous_candidate = self.dir_design / "task-plan-candidate.txt"
+            previous_meta = self.state.get('artifacts', {}).get('02-design/task-plan-candidate.txt')
+            initial = None
+            if not repair.path.exists() and previous_meta:
+                if not previous_candidate.is_file() or file_hash(previous_candidate) != previous_meta['sha256']:
+                    raise PlanError('Previous candidate evidence changed or disappeared')
+                initial = previous_candidate.read_text()
+            plan = repair.run(initial_candidate=initial)
+        except PlanError as exc:
+            self.record_gate("TASK_PLAN_GATE", False, str(exc))
+            raise
+        for path in sorted(repair.root.glob("*")):
+            if path.is_file():
+                self.record_artifact(str(path.relative_to(self.ssdlc_root)), path)
         atomic_json(plan_path, plan)
         self.record_artifact("02-design/plan.json", plan_path)
+        self.record_gate("TASK_PLAN_GATE", True, "Validated plan and independent semantic review")
         return plan
+
+    def resume_task_planning(self, review_repairs=None) -> Path:
+        """Resume only planning against sealed upstream artifacts; never execute code."""
+        with ticket_lock(self.ssdlc_root / "ticket.lock"):
+            self.state = self._load_or_init_state()
+            if not self._task_mode():
+                raise PlanError("Planning resume requires task breakdown")
+            if self.worktree_dir.exists() or (self.dir_dev / "tasks/task-journal.jsonl").exists():
+                raise PlanError("Execution already started; explicit plan migration is required")
+            gates = [g for g in self.state.get("gate_history", []) if g['gate'] == 'PAIR_DESIGN_GATE']
+            if not gates or not gates[-1]['passed']:
+                raise PlanError("Design has not been approved")
+            required = ["00-recon/quality-contract.json", "01-po/requirements.md"]
+            if self.state.get("risk_tier") != "S":
+                required += ["02-design/adr.md", "02-design/threat-model.md"]
+            for name in required:
+                meta = self.state.get("artifacts", {}).get(name)
+                path = self.ssdlc_root / name
+                if not meta or not path.is_file() or file_hash(path) != meta['sha256']:
+                    raise PlanError(f"Planning input is missing, unapproved or changed: {name}")
+            self.state.pop("failure", None)
+            self.state.update(current_phase="02-design", current_step="task-plan", status="IN_PROGRESS")
+            self._save_state()
+            try:
+                self._ensure_task_plan(review_repairs=review_repairs)
+            except Exception as exc:
+                self.state.update(status="FAILED", failure={"phase": "task-plan", "message": str(exc)})
+                self._save_state()
+                raise
+            self.state['status'] = 'PLAN_READY'
+            self.state.pop('failure', None)
+            self._save_state()
+            return self.dir_design / 'plan.json'
 
     def _run_task_development(self, feedback: str = "") -> Tuple[Path, List[str]]:
         plan = self._ensure_task_plan()
@@ -2210,18 +2378,27 @@ class SSDLCOrchestrator:
             "Audit the Git Diff strictly against:\n"
             "1. The agreed Architecture Decision Record (ADR) — check for design drift.\n"
             "2. The Threat Model — verify every required security mitigation is implemented.\n"
-            "3. Code quality — race conditions, error handling, resource leaks, maintainability."
+            "3. Code quality — race conditions, error handling, resource leaks, maintainability.\n"
+            "4. Edge cases & boundary conditions — verify relevant input validation (null, empty, limits, invalid formats), "
+            "corner cases, unhandled errors, and unexpected failure modes. Include crashes, retries, interrupted execution "
+            "and recovery, and concurrency where applicable.\n"
             f"{specialist_instructions}\n"
             f"{ui_review_rules}\n"
             "Output a structured Markdown review with:\n"
             "- ### ADR Conformance Checklist\n"
             "- ### Threat Model Mitigation Checklist\n"
+            "- ### Edge Cases & Boundary Conditions Analysis\n"
+            "  For each relevant case, identify the concrete scenario, expected behavior, implementation handling "
+            "(with file/symbol references), and the test that demonstrates it or a specific test gap. "
+            "Distinguish observed evidence from assumptions; do not claim tests ran without execution evidence. "
+            "Explain when a category is not applicable instead of filling the section with a generic OK.\n"
             "- ### Specialist Lens Audit (DB / Perf / SRE / UI if active)\n"
             "- ### Findings (Critical / Major / Minor)\n"
             "At the very end, output EXACTLY one of:\n"
-            "REVIEW_STATUS: APPROVED (if zero Critical or Major defects exist)\n"
-            "or\n"
-            "REVIEW_STATUS: CHANGES_REQUESTED (if any Critical or Major defect exists)"
+            "REVIEW_STATUS: APPROVED\n"
+            "REVIEW_STATUS: CHANGES_REQUESTED\n"
+            "Use APPROVED only when there are zero Critical or Major defects; otherwise use CHANGES_REQUESTED. "
+            "Emit the verdict marker once only, as the final standalone line, with no annotations or code fence."
         )
         user_prompt = (
             f"PO REQUIREMENTS:\n{req_text}\n\n"
@@ -2254,7 +2431,8 @@ class SSDLCOrchestrator:
                 reasoning_effort=rev_effort,
             )
             dur = time.time() - t0
-            passed = "REVIEW_STATUS: APPROVED" in rev_out
+            verdict = parse_review_verdict(rev_out)
+            passed = verdict == "APPROVED"
             if not passed:
                 all_approved = False
             self.record_ledger(
@@ -2263,7 +2441,7 @@ class SSDLCOrchestrator:
                     "Code Reviewer",
                     effective_engine,
                     effective_model,
-                    "APPROVED" if passed else "CHANGES_REQUESTED",
+                    verdict or "INVALID_VERDICT",
                     dur,
                     cost,
                     tin,
@@ -2272,7 +2450,8 @@ class SSDLCOrchestrator:
                     reasoning_effort=rev_effort,
                 )
             )
-            combined_reviews.append(f"## Reviewer: `{effective_engine}:{effective_model}` ({'APPROVED' if passed else 'CHANGES_REQUESTED'}, reasoning={rev_effort})\n\n{rev_out}\n\n---\n")
+            verdict_note = "Invalid or ambiguous final verdict; approval withheld.\n\n" if verdict is None else ""
+            combined_reviews.append(f"## Reviewer: `{effective_engine}:{effective_model}` ({verdict or 'INVALID_VERDICT'}, reasoning={rev_effort})\n\n{verdict_note}{rev_out}\n\n---\n")
 
         report_text = "\n".join(combined_reviews)
         rev_path = self.dir_review / f"review-report-a{attempt}.md"
@@ -3171,6 +3350,11 @@ def main() -> int:
         help="Link run to an existing remote Issue number",
     )
 
+    p_plan = sub.add_parser("plan", help="Resume task planning using approved requirements and design only")
+    p_plan.add_argument("--ticket", required=True)
+    p_plan.add_argument("--repo", "-r", default=".")
+    p_plan.add_argument("--review-repairs", type=int, choices=range(5), default=None, help="Explicitly extend the persisted semantic repair allowance (0-4)")
+
     p_app = sub.add_parser("approve", help="Supervisor sign-off: commit worktree changes, merge, and prune worktree")
     p_app.add_argument("ticket", help="Ticket ID")
     p_app.add_argument("--repo", "-r", default=".", help="Path to Git repository")
@@ -3196,6 +3380,11 @@ def main() -> int:
 
     if args.subcommand == "doctor":
         return cmd_doctor(repo_path)
+
+    if args.subcommand == "plan":
+        orch = SSDLCOrchestrator(repo_path, args.ticket, sync_remote=False)
+        print(orch.resume_task_planning(review_repairs=args.review_repairs))
+        return 0
 
     if args.subcommand == "run":
         sync_remote = args.sync_remote
