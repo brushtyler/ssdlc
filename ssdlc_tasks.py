@@ -10,6 +10,8 @@ from collections.abc import Collection, Mapping
 import contextlib
 import copy
 import fcntl
+import errno
+import stat
 import hashlib
 import json
 import os
@@ -27,6 +29,30 @@ PROTECTED = {'.git', '.ssdlc', '.agents', '.codex', '.aws'}
 
 class TaskError(RuntimeError):
     """An execution or recovery condition requiring explicit handling."""
+
+
+class _RevalidationStop(TaskError):
+    kind = 'stop'
+
+    def __init__(self, msg, task_id=None, check_id=None, path=None):
+        self.task_id, self.check_id, self.path = task_id, check_id, path
+        super().__init__(f"{msg} task {task_id!r} check {check_id!r}: ({path})")
+
+
+class _VerifierMutation(_RevalidationStop):
+    kind = 'mutation'
+
+
+class _EvidenceChanged(_RevalidationStop):
+    kind = 'evidence_changed'
+
+
+class _EvidenceCollision(_RevalidationStop):
+    kind = 'collision'
+
+
+class _EvidencePathError(_RevalidationStop):
+    kind = 'path'
 
 
 class ResourceLimitError(TaskError):
@@ -584,10 +610,10 @@ class TaskScheduler:
             self._require_all_completed(peeked)
             state = self.journal.load()
             self.state = state
-            for record in state['tasks'].values():
+            for tid, record in state['tasks'].items():
                 if 'protected_snapshot' in record and self._protected() != record['protected_snapshot']:
                     raise TaskError('Protected worktree paths changed; reconciliation required')
-                if not self._evidence_valid(record):
+                if not self._evidence_valid(record, tid):
                     raise TaskError('Completed task evidence is missing or altered')
             self._assert_clean()
             self.state = copy.deepcopy(state)
@@ -640,34 +666,184 @@ class TaskScheduler:
     def _ignored(self) -> list[str]:
         return sorted(path for path in git(self.wt, 'ls-files', '--others', '--ignored', '--exclude-standard', '-z').split('\x00') if path)
 
-    def _verify(self, task: dict, record: dict, attempt_dir: Path) -> list[dict]:
-        checks = task['verification']['checks'] + self.quality['checks']
+    def _check_plan(self, task: dict) -> list[dict]:
+        return task['verification']['checks'] + self.quality['checks']
+
+    def _expected_check_ids(self, task_id) -> list[str]:
+        return [check['check_id'] for check in self._check_plan(self._plan_index()[task_id])]
+
+    def _assert_evidence_dir(self, path, task_id=None, check_id=None):
+        try:
+            relative = path.relative_to(self.directory)
+            current = self.directory
+            for part in relative.parts:
+                current = current / part
+                if not stat.S_ISDIR(os.lstat(current).st_mode):
+                    raise _EvidencePathError('Invalid evidence directory', task_id, check_id, str(current))
+        except (OSError, ValueError) as exc:
+            raise _EvidencePathError('Invalid evidence directory', task_id, check_id, str(path)) from exc
+
+    def _make_attempt_dir(self, path):
+        try:
+            path.mkdir(parents=True, exist_ok=False)
+        except FileExistsError as exc:
+            raise _EvidenceCollision('Evidence directory exists', path=str(path)) from exc
+        self._assert_evidence_dir(path)
+
+    def _verify(self, task: dict, record: dict, attempt_dir: Path, event='CHECK_FINISHED',
+                before_check=None, after_check=None, exclusive=False) -> list[dict]:
+        checks = self._check_plan(task)
         results = []
         for index, check in enumerate(checks):
             self.budget()
             self.guard()
             cwd = confined(self.wt, check['cwd'])
+            if before_check is not None:
+                before_check(index, check['check_id'])
             try:
                 out, err, rc = self.verifier(check['argv'], cwd, check['timeout_sec'])
             except subprocess.TimeoutExpired as exc:
                 out, err, rc = '', f'Verification timeout: {exc}', 124
             log = attempt_dir / f'check-{index}.log'
-            log.write_text(out + '\n' + err)
+            if exclusive:
+                self._assert_evidence_dir(attempt_dir, task.get('task_id'), check['check_id'])
+                try:
+                    fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+                    with os.fdopen(fd, 'w') as stream:
+                        stream.write(out + '\n' + err)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    directory_fd = os.open(attempt_dir, os.O_RDONLY | os.O_DIRECTORY)
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
+                except OSError as exc:
+                    if exc.errno == errno.EEXIST:
+                        raise _EvidenceCollision('Evidence log exists', task.get('task_id'),
+                                                 check['check_id'], str(log)) from exc
+                    if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                        raise _EvidencePathError('Invalid evidence path', task.get('task_id'),
+                                                 check['check_id'], str(log)) from exc
+                    raise
+            else:
+                log.write_text(out + '\n' + err)
             empty = test_suite_is_empty(out, err)
             results.append({'check_id': check['check_id'], 'exit_code': rc, 'empty_suite': empty,
                             'log_ref': str(log.relative_to(self.directory)), 'sha256': file_hash(log)})
             record['checks'] = results
-            self._save('CHECK_FINISHED')
+            self._save(event)
+            if after_check is not None:
+                after_check(index, results[-1])
             self.guard()
             self.budget()
         return results
 
-    def _evidence_valid(self, record: dict) -> bool:
-        for result in record.get('checks', []):
-            path = confined(self.directory, result['log_ref'], protect=False)
-            if not path.is_file() or file_hash(path) != result['sha256']:
-                return False
-        return bool(record.get('checks'))
+    def _resolve_evidence(self, ref, expected_sha):
+        try:
+            path = confined(self.directory, ref, protect=False)
+            if not path.is_file():
+                return path, 'missing_file'
+            return path, None if file_hash(path) == expected_sha else 'hash_mismatch'
+        except PlanError:
+            return None, 'unsafe_or_escaping_path'
+        except RuntimeError:
+            return None, 'symlink_loop'
+        except OSError as exc:
+            return None, 'unreadable:' + errno.errorcode.get(exc.errno, str(exc.errno))
+        except (UnicodeDecodeError, ValueError):
+            return None, 'malformed_reference'
+
+    def _evidence_problems(self, record, task_id=None):
+        problems = []
+
+        def problem(reason, check_id=None, path=None):
+            problems.append(dict(task_id=task_id, check_id=check_id, path=path, reason=reason))
+
+        def inspect(item, ref_key='log_ref', sha_key='sha256'):
+            check_id, ref = None, None
+            try:
+                if not isinstance(item, dict):
+                    raise TypeError
+                check_id, ref = item.get('check_id'), item[ref_key]
+                sha = item[sha_key]
+                if not isinstance(ref, str) or not isinstance(sha, str):
+                    raise TypeError
+                _, reason = self._resolve_evidence(ref, sha)
+                if reason:
+                    problem(reason, check_id, ref)
+            except (KeyError, TypeError):
+                problem('malformed_record', check_id, ref)
+
+        try:
+            if not isinstance(record, dict):
+                raise TypeError
+            checks = record.get('checks', [])
+            if not isinstance(checks, list):
+                raise TypeError
+            if not checks:
+                problem('missing_checks')
+            for check in checks:
+                if not isinstance(check, dict):
+                    raise TypeError
+                inspect(check)
+            for attempt in record.get('failed_attempts', []):
+                for check in attempt['checks']:
+                    inspect(check)
+                inspect(attempt, 'diff_ref', 'diff_sha256')
+            numbers, directories = set(), set()
+            attempts = record.get('revalidations', [])
+            for attempt in attempts:
+                number, directory = attempt['attempt'], attempt['dir']
+                if (type(number) is not int or number <= 0 or number in numbers
+                        or not isinstance(directory, str) or directory in directories):
+                    problem('invalid_attempt_identity', path=directory)
+                numbers.add(number)
+                directories.add(directory)
+                for check in attempt['checks']:
+                    inspect(check)
+            if record.get('status') == 'COMPLETED' and record.get('restored_by') is not None:
+                supporting = [a for a in attempts if a['attempt'] == record['restored_by']]
+                if len(supporting) != 1:
+                    problem('invalid_supporting_attempt')
+                else:
+                    attempt = supporting[0]
+                    expected = self._expected_check_ids(task_id)
+                    if (attempt['status'] != 'PASSED'
+                            or [c['check_id'] for c in attempt['checks']] != expected
+                            or [c['check_id'] for c in attempt['started_checks']] != expected
+                            or any(c['exit_code'] != 0 or c['empty_suite'] for c in attempt['checks'])
+                            or attempt['head'] != self.state.get('expected_head') or not attempt['tree']):
+                        problem('invalid_supporting_attempt', path=attempt['dir'])
+        except (PlanError, OSError, RuntimeError, KeyError, TypeError, ValueError, UnicodeDecodeError):
+            problem('malformed_record')
+        return problems
+
+    def _evidence_valid(self, record, task_id=None) -> bool:
+        return not self._evidence_problems(record, task_id)
+
+    def _validate_preflights(self, state):
+        problems = []
+        try:
+            for attempt in state.get('preflights', []):
+                # Empty interrupted preflights are allowed; recorded logs are not optional.
+                checks = attempt['checks']
+                if not isinstance(checks, list):
+                    raise TypeError
+                if checks:
+                    problems.extend(self._evidence_problems({'checks': checks}))
+        except (KeyError, TypeError, ValueError):
+            problems.append(dict(task_id=None, check_id=None, path=None, reason='malformed_record'))
+        return problems
+
+    def _inventory_problems(self, state):
+        problems = []
+        try:
+            for task_id, record in state['tasks'].items():
+                problems.extend(self._evidence_problems(record, task_id))
+        except (KeyError, TypeError, AttributeError):
+            problems.append(dict(task_id=None, check_id=None, path=None, reason='malformed_record'))
+        return problems + self._validate_preflights(state)
 
     def _preflight(self) -> None:
         """Run required checks at the clean checkpoint in the actual task worktree."""
@@ -772,7 +948,7 @@ class TaskScheduler:
         if self._protected() != record['protected_snapshot']:
             raise TaskError('Protected worktree paths changed since task execution')
         head = git(self.wt, 'rev-parse', 'HEAD')
-        if not self._evidence_valid(record):
+        if not self._evidence_valid(record, task['task_id']):
             raise TaskError('Missing verification evidence for checkpoint recovery')
         if head == parent:
             # A crash before git commit: only the exact verified index may be committed.
@@ -837,7 +1013,7 @@ class TaskScheduler:
         for task in ordered:
             record = state['tasks'][task['task_id']]
             if record['status'] == 'COMPLETED':
-                if not self._evidence_valid(record):
+                if not self._evidence_valid(record, task['task_id']):
                     raise TaskError('Completed task evidence is missing or altered')
                 continue
             if any(state['tasks'][dep]['status'] != 'COMPLETED' for dep in task['depends_on']):

@@ -1238,5 +1238,95 @@ class PromptTransportTests(unittest.TestCase):
             self.assertEqual(cmd[:3], ['docker', 'run', '-i'])
 
 
+class RevalidateTests(SchedulerTests):
+    def scripted_verifier(self, actions=()):
+        self.verifier_calls = []
+        actions = iter(actions)
+
+        def verify(argv, cwd, timeout):
+            self.verifier_calls.append((argv, cwd, timeout))
+            action = next(actions, None)
+            if action is not None:
+                result = action()
+                if result is not None:
+                    return result
+            return 'Ran 1 test\nOK', '', 0
+        return verify
+
+    def test_check_plan_equivalence(self):
+        scheduler = self.completed_chain()
+        task = self.plan['tasks'][0]
+        task['verification']['checks'][0].update(argv=['task-check'], timeout_sec=7)
+        directory = scheduler.directory / 'A' / 'probe'
+        directory.mkdir()
+        scheduler.verifier = self.scripted_verifier()
+        record = {}
+        starts, finishes = [], []
+        results = scheduler._verify(task, record, directory,
+                                    before_check=lambda i, cid: starts.append((i, cid)),
+                                    after_check=lambda i, result: finishes.append((i, result)))
+        plan = scheduler._check_plan(task)
+        self.assertEqual(self.verifier_calls,
+                         [(c['argv'], confined(self.wt, c['cwd']), c['timeout_sec']) for c in plan])
+        self.assertEqual([c['check_id'] for c in results], scheduler._expected_check_ids('A'))
+        self.assertEqual(starts, list(enumerate(scheduler._expected_check_ids('A'))))
+        self.assertEqual(finishes, list(enumerate(results)))
+
+    def test_exclusive_log_writes(self):
+        from ssdlc_tasks import _EvidenceCollision
+        scheduler = self.completed_chain()
+        task = self.plan['tasks'][0]
+        prior = scheduler.directory / 'prior.log'
+        prior.write_text('preserve')
+        for shape in ('file', 'symlink', 'fresh'):
+            with self.subTest(shape=shape):
+                directory = scheduler.directory / 'A' / shape
+                scheduler._make_attempt_dir(directory)
+                log = directory / 'check-0.log'
+                def collide():
+                    if shape == 'file':
+                        log.write_text('existing')
+                    elif shape == 'symlink':
+                        log.symlink_to(prior)
+                scheduler.verifier = self.scripted_verifier([collide])
+                if shape == 'fresh':
+                    results = scheduler._verify(task, {}, directory, exclusive=True)
+                    self.assertEqual(file_hash(log), results[0]['sha256'])
+                else:
+                    with self.assertRaises(_EvidenceCollision) as caught:
+                        scheduler._verify(task, {}, directory, exclusive=True)
+                    self.assertEqual(caught.exception.kind, 'collision')
+                    self.assertEqual(caught.exception.check_id, 'CHECK-A')
+                    self.assertEqual(log.read_text(), 'existing' if shape == 'file' else 'preserve')
+                self.assertEqual(prior.read_text(), 'preserve')
+
+    def test_run_refuses_failed_attempt_evidence_tamper(self):
+        # First task verification fails after the global checkpoint passes.
+        scheduler = self.scheduler(self.developer, self.scripted_verifier([
+            None, lambda: ('Ran 1 test\nFAILED', '', 1)]))
+        scheduler.run(self.plan['tasks'])
+        record = scheduler.state['tasks']['T1']
+        self.assertEqual(len(record['failed_attempts']), 1)
+        log = scheduler.directory / record['failed_attempts'][0]['checks'][0]['log_ref']
+        log.write_text('altered')
+        fresh = self.scheduler(self.fail_dev, self.fail_ver)
+        with self.assertRaisesRegex(TaskError, '^Completed task evidence is missing or altered$'):
+            fresh.run(self.plan['tasks'])
+
+    def test_symlink_loop_run_refusal(self):
+        scheduler = self.completed_chain()
+        ref = scheduler.state['tasks']['A']['checks'][0]['log_ref']
+        log = scheduler.directory / ref
+        log.unlink()
+        log.symlink_to(log.name)
+        with self.assertRaises((RuntimeError, OSError)):
+            confined(scheduler.directory, ref, protect=False)
+        problems = scheduler._evidence_problems(scheduler.state['tasks']['A'], 'A')
+        self.assertEqual(problems[0]['task_id'], 'A')
+        self.assertEqual(problems[0]['path'], ref)
+        with self.assertRaisesRegex(TaskError, '^Completed task evidence is missing or altered$'):
+            self.scheduler(self.fail_dev, self.fail_ver).run(self.plan['tasks'])
+
+
 if __name__ == '__main__':
     unittest.main()
