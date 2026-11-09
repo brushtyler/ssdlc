@@ -11,6 +11,23 @@ from ssdlc_tasks import ResourceLimitError, TaskError
 
 
 class ContainerResourceTests(unittest.TestCase):
+    def test_cli_container_calls_accept_string_cwd_and_record_resources(self):
+        for engine in ('codex', 'claude'):
+            with self.subTest(engine=engine), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root/'.ssdlc').mkdir()
+                def invoke(cmd, **kwargs):
+                    name = cmd[cmd.index('--name')+1]
+                    marker = '__SSDLC_RESOURCE_' + name + '__ '
+                    stdout = 'QA_STATUS: PASSED' if engine == 'codex' else json.dumps({'result': 'QA_STATUS: PASSED'})
+                    return subprocess.CompletedProcess(cmd, 0, stdout, marker+'pids.events.max=0\n')
+                with patch.object(EngineRunner, '_should_spawn_role_container', return_value=True), patch('orchestrator.subprocess.run', side_effect=invoke):
+                    result = getattr(EngineRunner, 'run_'+engine)('Review', root)
+                self.assertEqual(result[0], 'QA_STATUS: PASSED')
+                evidence = list((root/'.ssdlc/.runtime/resources').glob('*.json'))
+                self.assertEqual(len(evidence), 1)
+                self.assertTrue(json.loads(evidence[0].read_text())['telemetry_available'])
+
     def test_container_has_init_and_finite_default_pid_limit(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'SSDLC_CONTAINER_PIDS_LIMIT': '1024'}):
             repo = Path(tmp)

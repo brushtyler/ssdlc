@@ -733,6 +733,7 @@ class EngineRunner:
     @staticmethod
     def _run_role_command(cmd, *, cwd, env, timeout, input=None):
         """Execute once; preserve resource evidence even for zero-exit PID failures."""
+        cwd = Path(cwd)
         docker = cmd[:2] == ["docker", "run"] and "--name" in cmd
         name = cmd[cmd.index("--name") + 1] if docker else None
         timed_out = False
