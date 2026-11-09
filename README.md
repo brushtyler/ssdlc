@@ -433,6 +433,105 @@ The first implementation increment provides versioned JSON schemas in `schemas/`
 captures a quality contract and baseline, requests a structured plan and independent
 plan review, then executes one task at a time with the existing model routing.
 
+The planner and validator share an explicit requirement catalogue. Define AC/SEC IDs
+in Markdown headings, list entries, the first column of a table, or `AC-1: ...`
+lines. Compact ID-only lists are also supported. IDs are case-sensitive, using
+letters, digits and hyphens; malformed or duplicate definitions block planning.
+Prose references and fenced examples do not create requirements. Every defined ID,
+including parent headings and sub-cases, needs explicit task ownership and local
+check coverage; hierarchy never implies coverage. Undefined prose mentions are
+listed separately in the catalogue for review.
+
+Task and check references use their respective AC/SEC fields. Checks can claim only
+requirements owned by their task. Mapping diagnostics report all detected ownership,
+coverage and contract defects together, with task/check IDs and exact offending
+references. Contract references use actual design filenames and ATX heading anchors
+relative to `02-design`, supplied to the planner (for example `adr.md#interfaces`);
+titles are not filename aliases. Headings inside fenced code are excluded; repeated
+anchors receive numeric suffixes. Duplicate JSON keys, non-finite constants and
+multiple candidate objects are rejected. Structural coverage still requires an
+independent semantic review of whether the checks exercise the claimed behavior.
+
+Command argument arrays preserve order and repetition (for example multiple unittest
+`-k` options); uniqueness applies to IDs and references, not CLI tokens. Only OPEN
+BLOCKING findings require an obligation reference. Resolved schema notes may have
+empty references and cannot block review; supplied references must still be valid.
+
+After fixing a review validator, explicitly recover a captured rejected review with
+`./ssdlc plan --ticket TKT-001 --recover-review`. Recovery revalidates the same candidate
+and raw review, archives the previous session and new input fingerprint, retains all
+attempt reservations/limits, and sends the remaining open findings back to the planner.
+It can recover a REVISION_REQUIRED review only; it never grants approval. Old protocol
+diagnostics remain archived, and the recovery evidence is hash-checked on resume.
+
+New planning sessions use structured reviews (`schemas/task-plan-review.schema.json`).
+Both planner and reviewer receive the cumulative diagnostic/review history. Findings
+keep stable IDs and explicit OPEN/RESOLVED dispositions; each blocker needs a known
+AC/SEC, standard or quality-check reference, concrete evidence and a requested change. Optional improvements
+are advisory. New findings after the first review must identify an earlier omission
+or a defect introduced by revision. The protocol checks attribution and consistency;
+the independent reviewer still decides whether the evidence actually resolves a defect.
+
+Pair design also persists its session and immutable drafts/reviews under
+`02-design/design-session/`, with a sealed copy of inputs. Both architect and reviewer
+receive cumulative reviews and the latest ADR; relevant tracked source files named
+by recon are supplied with hashes and numbered excerpts (up to four files/80,000
+characters, 50,000 per file). Truncation is explicit. The architect must verify actual
+interfaces, journal state, evidence stores and exception boundaries against source.
+The reviewer returns `schemas/design-review.schema.json`, including a STRIDE analysis,
+stable finding IDs and explicit blocker dispositions. Optional advice cannot block;
+new blockers require approved requirement or quality references and justification.
+
+Fresh design sessions default to five total rounds; `SSDLC_MAX_DESIGN_ROUNDS` can
+set the initial limit. The persisted limit and consumed reservations survive restart.
+Interrupted architect calls consume their reserved round; a captured ADR is reused.
+Reviews allow at most two reserved responses on the same ADR, including uncertain
+calls and one correction for invalid output. An identical ADR with the same unresolved
+blocking IDs stops as STAGNATION; environment prerequisites stop separately. Approval
+requires a valid independent review, never exhaustion of the limit. Changed inputs
+or altered evidence require explicit reconciliation/revision. Canonical `adr.md` and
+`threat-model.md` are published after approval; partial work remains in round evidence.
+
+Resume design only, with an explicit total limit up to eight if needed:
+
+```bash
+./ssdlc design --ticket TKT-001 --rounds 5
+```
+
+This command verifies upstream recon/PO approvals, input hashes and a clean unchanged
+target. It refuses an existing plan/worktree and never starts development. A lower
+limit is rejected; extensions are recorded. Repeating the command does not reset
+rounds. Planning is blocked while a persistent design session lacks approval.
+
+Legacy rounds require explicit import from a specific verified directory; they are
+copied and counted, and their prose critiques remain context rather than an approval:
+
+```bash
+./ssdlc design --ticket TKT-001 --rounds 5 --import-legacy rounds/ROUND_DIRECTORY
+```
+
+For three exhausted legacy rounds this resumes at round four. Omit `--import-legacy`
+on subsequent resumes. The old files remain intact; missing, ambiguous or modified
+source evidence and interrupted imports block rather than starting from scratch.
+
+Fresh structured sessions allow at most four semantic repairs, within the existing
+cost circuit breaker. Three consecutive reviews retaining the same blocking IDs stop
+as STAGNATION. Environment prerequisites stop as ENVIRONMENT_PREREQUISITE rather than
+triggering speculative plan rewrites. Invalid reviewer output gets one correction
+on the same candidate, then stops as REVIEW_PROTOCOL if still invalid. Both raw
+responses and diagnostics are retained and hash-checked on resume.
+Neither condition approves a plan. Existing session limits stay unchanged, and changed
+protocols/inputs require an explicit planning revision that preserves old evidence.
+
+Before new planning or first task execution, the host captures and registers
+`00-recon/controller-contract.json`. It binds the actual executing controller path,
+Git HEAD/status and hashes of tracked and nonignored files. The host checks this
+baseline before/after developer invocations and verification checks. A committed
+controller change is detected even when the checkout is clean. Tasks do not invent
+controller environment variables or capture a late baseline. Missing/altered registered
+contracts block execution; this unkeyed integrity check excludes ignored files and
+does not provide authentication or continuous protection against external writers.
+
 Keep the executing SSDLC installation pinned to a reviewed version and use a separate
 checkout as the target when developing SSDLC itself. Start from a clean, committed
 baseline and pass a narrowly scoped goal. A filename alone does not supply its content
@@ -486,6 +585,57 @@ committing the task twice. Interrupted dirty worktrees, unexpected HEAD changes,
 modified inputs or missing evidence stop with a diagnostic and preserve the work;
 there is no automatic reset of unexplained changes. Existing monolithic tickets need
 an explicit migration; the feature does not adopt their changes silently.
+
+Development runs the required quality checks at the clean checkpoint in the actual
+task worktree before invoking a developer, including on resume with pending work.
+This catches differences between the initial repository baseline and the worktree's
+runner environment. Failing/empty checks stop as `BASELINE_MISMATCH` without consuming
+developer attempts; mutations stop as `BASELINE_MUTATION` and preserve the unexpected
+changes. Preflight logs and outcomes are journaled under `03-dev/tasks/preflight/`.
+
+For an ordinary task-check failure, the scheduler archives the full patch, Git tree,
+developer output and check logs, then restores a clean checkpoint. The next attempt
+verifies the archived patch/log hashes, original base and declared file manifest,
+then restores that candidate for repair in place, including new/deleted/binary files.
+The prompt includes cumulative attempt summaries and head/tail excerpts of failed
+logs (6,000 characters per log, 24,000 total); full evidence is retained. No failed
+patch becomes a verified checkpoint until all required checks pass. Interrupted dirty
+repairs and altered/missing evidence require reconciliation; arbitrary dirty state
+is never silently adopted. Legacy failed attempts without repair metadata retain
+their original restart behavior and are not automatically converted.
+
+A developer can explicitly report `TASK_DEV_STATUS: SCOPE_REQUIRED` or
+`TASK_DEV_STATUS: ENVIRONMENT_BLOCKED` as its final line. These signals archive any
+in-scope partial work, roll back to the checkpoint and stop without speculative code
+retries or automatic scope expansion. A nonzero developer exit stops separately as
+`DEVELOPER_INVOCATION`. Repeating the identical failing tree with identical check
+outcomes stops as `REPAIR_STALLED`. Attempt counters remain persistent; restarting
+does not reset them. Console logs show the task/attempt, whether it restores a prior
+candidate, and the failed checks with evidence paths. Failure packs preserve the
+phase/category where execution actually stopped.
+
+`TASK_DEV_STATUS: COMPLETE` (also COMPLETED/IMPLEMENTED/SUCCESS) requests independent
+verification; it never bypasses checks. After a parser correction, an explicitly
+selected unverified `DEVELOPER_PROTOCOL` candidate can be recovered with
+`TaskScheduler.run(..., recover_protocol_task=task_id)`. Recovery checks the original
+response against the journal, verifies its archived patch/base/scope, then runs all
+task and required quality checks in a fresh evidence directory without another
+developer call or a counter reset. The original protocol failure remains in history.
+Only passing verification can create a checkpoint; failures return to ordinary
+repair using the remaining developer allowance. Scope/environment blockers and
+altered responses cannot use this recovery path.
+
+Task-mode code review receives the complete cumulative diff and runs read-only in
+the verified task worktree. It verifies the diff against the clean checkpoint before
+calling reviewers and withholds approval if the checkpoint changes during review.
+`SSDLC_REVIEW_MAX_DIFF_CHARS` controls the explicit input budget (default 200,000;
+maximum 1,000,000). A larger diff stops before model invocation instead of silently
+truncating input. Each invocation archives its full prompt/input and individual raw
+reviews under `04-review/runs/`, retaining evidence even if a later reviewer fails.
+QA uses the same complete-diff budget and verified worktree, archives its input and
+raw output under `05-qa/runs/`, and requires one exact final `QA_STATUS` marker plus
+passing deterministic checks. Quoted, contradictory or annotated verdicts cannot
+approve a checkpoint; source changes during QA also withhold approval.
 
 This bootstrap requires strict file manifests and automated task checks. Runtime
 scope expansion, targeted review bounce and transitive invalidation, granular model
@@ -582,3 +732,13 @@ credentials or AI API keys are granted to this profile, and untrusted verificati
 containers do not receive the AGY store. Missing credentials fail before starting
 an interactive login. A newer host token can replace the project copy on a later
 invocation after an explicit host reauthentication.
+
+Design retries now save each architect draft and security critique immediately in
+`02-design/rounds/<session-id>/`, registering both in the artifact manifest. When
+approval is withheld, the controller prints a bounded excerpt of the actual
+critique and its full report path, followed by either the next round number or an
+explicit exhaustion message. Repeating design creates a new session directory;
+previous round evidence is retained. Semantic task-plan rejections likewise print
+the reviewer feedback and archived report path. These logs add no model calls and
+do not change retry limits or approval criteria. Controllers already running from
+a pinned checkout retain their original logging behavior.

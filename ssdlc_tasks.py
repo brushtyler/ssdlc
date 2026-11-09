@@ -19,6 +19,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
+from ssdlc_catalogues import CatalogueError, heading_anchors, requirement_catalogue
+
 SCHEMA_DIR = Path(__file__).resolve().parent / 'schemas'
 PROTECTED = {'.git', '.ssdlc', '.agents', '.codex', '.aws'}
 
@@ -33,6 +35,14 @@ class ResourceLimitError(TaskError):
     category = 'ENVIRONMENT_RESOURCE'
 
 
+class DevelopmentBlocked(TaskError):
+    """The development loop cannot repair this condition inside its approved scope."""
+
+    def __init__(self, category: str, message: str):
+        super().__init__(f'{category}: {message}')
+        self.category = category
+
+
 class PlanError(TaskError):
     """A plan or contract cannot be safely executed."""
 
@@ -44,13 +54,29 @@ class PlanError(TaskError):
 def parse_plan_output(output: str) -> dict:
     """Accept JSON or one JSON/unlabelled fenced block, never choose among alternatives."""
     text = output.strip()
-    fences = re.findall(r'^```([^\n`]*)\n(.*?)^```[ \t]*$', text, re.M | re.S)
+    fences = list(re.finditer(r'^```([^\n`]*)\n(.*?)^```[ \t]*$', text, re.M | re.S))
     if fences:
-        if len(fences) != 1 or fences[0][0].strip().lower() not in ('', 'json'):
+        if len(fences) != 1 or fences[0][1].strip().lower() not in ('', 'json'):
             raise PlanError('Ambiguous fenced plan output', [{'code': 'AMBIGUOUS_OUTPUT', 'field': '$'}])
-        text = fences[0][1].strip()
+        outside = text[:fences[0].start()] + text[fences[0].end():]
+        for start in re.finditer(r'[\[{]', outside):
+            try:
+                json.JSONDecoder().raw_decode(outside[start.start():])
+            except ValueError:
+                continue
+            raise PlanError('Ambiguous plan output outside fence', [{'code': 'AMBIGUOUS_OUTPUT', 'field': '$'}])
+        text = fences[0][2].strip()
     try:
-        value = json.loads(text)
+        def unique_object(pairs):
+            obj = {}
+            for key, value in pairs:
+                if key in obj:
+                    raise ValueError(f'Duplicate JSON key: {key}')
+                obj[key] = value
+            return obj
+        def invalid_constant(value):
+            raise ValueError(f'Non-finite JSON constant: {value}')
+        value = json.loads(text, object_pairs_hook=unique_object, parse_constant=invalid_constant)
     except ValueError as exc:
         raise PlanError(str(exc), [{'code': 'INVALID_JSON', 'field': '$', 'message': str(exc)}]) from exc
     if not isinstance(value, dict):
@@ -64,6 +90,56 @@ def digest(value: Any) -> str:
 
 def file_hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def log_retry_reason(label: str, report: str, path: Path, max_chars: int = 3000) -> None:
+    """Expose the actual critique, with a bounded excerpt and full evidence path."""
+    text = report.strip() or '(Reviewer returned an empty report.)'
+    print(f'[{label}] Full report: {path}', flush=True)
+    print(text[:max_chars], flush=True)
+    if len(text) > max_chars:
+        print(f'[{label}] Excerpt truncated; see the full report above.', flush=True)
+
+
+def diagnostic_excerpt(text: str, limit: int) -> str:
+    """Keep the start and final traceback within an explicit prompt/log budget."""
+    if len(text) <= limit:
+        return text
+    marker = '\n[... excerpt truncated; full log retained ...]\n'
+    if limit <= len(marker):
+        return text[-limit:] if limit else ''
+    head = (limit - len(marker)) // 3
+    tail = limit - len(marker) - head
+    return text[:head] + marker + text[-tail:]
+
+
+def developer_blocker(output: str) -> str | None:
+    """A completion claim requests verification; it never grants completion."""
+    markers = re.findall(r'^[ \t]*TASK_DEV_STATUS:[ \t]*(\w+)[ \t]*$', output, re.M)
+    if not markers:
+        return None
+    final = output.strip().splitlines()[-1].strip()
+    if len(markers) != 1 or not re.fullmatch(r'TASK_DEV_STATUS:[ \t]*' + re.escape(markers[0]), final):
+        return 'DEVELOPER_PROTOCOL'
+    if markers[0] in ('COMPLETE', 'COMPLETED', 'IMPLEMENTED', 'SUCCESS'):
+        return None
+    return markers[0] if markers[0] in ('SCOPE_REQUIRED', 'ENVIRONMENT_BLOCKED') else 'DEVELOPER_PROTOCOL'
+
+
+def test_suite_is_empty(stdout: str, stderr: str = '') -> bool:
+    """Use the final runner summary, rather than quoted/nested empty-suite output.
+
+    Unittest writes its real summary to stderr. Earlier stdout can contain test
+    fixtures that exercise the empty-suite guard, including their literal logs.
+    """
+    summaries = list(re.finditer(r'^Ran\s+(?P<unittest>\d+)\s+tests?\b[^\n]*$'
+                                r'|^collected\s+(?P<collected>\d+)\s+items?\b[^\n]*$'
+                                r'|^=*\s*(?P<pytest>\d+)\s+(?:passed|failed|skipped|xfailed|xpassed|errors?)\b[^\n]*$'
+                                r'|^(?:=+\s*)?(?P<empty>no tests ran)\b[^\n]*$', stdout + '\n' + stderr, re.M))
+    if not summaries:
+        return False
+    final = summaries[-1]
+    return final['empty'] is not None or (final['unittest'] or final['collected'] or final['pytest']) == '0'
 
 
 def atomic_json(path: Path, value: Any) -> None:
@@ -114,7 +190,10 @@ def confined(root: Path, relative: str, *, protect: bool = True) -> Path:
 
 
 def requirement_ids(text: str) -> set[str]:
-    return set(re.findall(r'(?<![\w-])(?:AC|SEC)-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*', text))
+    try:
+        return set(requirement_catalogue(text)['required_ids'])
+    except CatalogueError as exc:
+        raise PlanError(str(exc), exc.diagnostics) from exc
 
 
 def validate_advisory(document: dict, artifacts: Path) -> dict[str, str]:
@@ -140,27 +219,18 @@ def validate_advisory(document: dict, artifacts: Path) -> dict[str, str]:
 class TaskPlanValidator:
     def __init__(self, repo: Path, requirements: str, quality: dict, artifacts: Path | None = None):
         self.repo = repo.resolve()
-        self.requirements = requirement_ids(requirements)
+        try:
+            self.requirement_catalogue = requirement_catalogue(requirements)
+        except CatalogueError as exc:
+            raise PlanError(str(exc), exc.diagnostics) from exc
+        self.requirements = set(self.requirement_catalogue['required_ids'])
         self.quality = quality
         self.artifacts = artifacts
 
     def validate(self, plan: dict) -> list[dict]:
         validate_document('quality-contract', self.quality)
         validate_document('plan', plan)
-        issues = []
-        for task in plan['tasks']:
-            refs = set(task['ac_refs'] + task['sec_refs'])
-            checked = {ref for c in task['verification']['checks'] for ref in c['ac_refs'] + c['sec_refs']}
-            missing = sorted(refs - checked)
-            if task['verification']['mode'] == 'automated' and missing:
-                issues.append({'code': 'MISSING_VERIFICATION_REF', 'task_id': task['task_id'],
-                               'field': 'verification.checks', 'missing_refs': missing})
-            unknown = sorted(refs - self.requirements)
-            if unknown:
-                issues.append({'code': 'UNKNOWN_REQUIREMENT_REF', 'task_id': task['task_id'],
-                               'field': 'ac_refs/sec_refs', 'unknown_refs': unknown})
-        if issues:
-            raise PlanError('Invalid task requirement/check mappings', issues)
+        self._validate_references(plan)
         if plan['base_commit'] != self.quality['base_commit']:
             raise PlanError('Plan and quality contract have different base commits')
         if not any(ref.startswith('AC-') for ref in self.requirements):
@@ -171,7 +241,6 @@ class TaskPlanValidator:
             raise PlanError('Duplicate task_id')
         checks = {c['check_id'] for c in self.quality['checks']}
         standards = {s['standard_id'] for s in self.quality['standards']}
-        covered: set[str] = set()
         for task in tasks.values():
             deps = set(task['depends_on'])
             if not deps <= tasks.keys() or task['task_id'] in deps:
@@ -180,12 +249,6 @@ class TaskPlanValidator:
                 confined(self.repo, path)
                 if path == '.' or (self.repo / path).is_dir():
                     raise PlanError('target_files must name files, not directories')
-            refs = set(task['ac_refs'] + task['sec_refs'])
-            if not refs <= self.requirements:
-                raise PlanError(f'Unknown requirement references: {refs - self.requirements}')
-            if any(not r.startswith('AC-') for r in task['ac_refs']) or any(not r.startswith('SEC-') for r in task['sec_refs']):
-                raise PlanError('AC and SEC references are in the wrong field')
-            covered |= refs
             if not set(task['standard_refs']) <= standards:
                 raise PlanError('Unknown standard reference')
             # Applicable standards cannot be omitted merely by leaving standard_refs empty.
@@ -208,19 +271,8 @@ class TaskPlanValidator:
             ids = [c['check_id'] for c in verify['checks']]
             if len(set(ids)) != len(ids):
                 raise PlanError('Duplicate task check_id')
-            checked = set()
             for check in verify['checks']:
                 self._check_command(check)
-                check_refs = set(check['ac_refs'] + check['sec_refs'])
-                if not check_refs <= refs:
-                    raise PlanError('Check references requirements outside its task')
-                checked |= check_refs
-            if verify['mode'] == 'automated' and not refs <= checked:
-                raise PlanError('Each task requirement needs an executable verification reference')
-            for ref in task['contract_refs']:
-                self._artifact_ref(ref)
-        if covered != self.requirements:
-            raise PlanError(f'Uncovered requirements: {self.requirements - covered}')
         pending = dict(tasks)
         ordered = []
         done: set[str] = set()
@@ -240,6 +292,80 @@ class TaskPlanValidator:
         if any('\x00' in arg for arg in check['argv']):
             raise PlanError('NUL in command arguments')
 
+    def _validate_references(self, plan: dict) -> None:
+        """Report all ownership, coverage and contract defects in one repair round."""
+        issues = []
+        covered = set()
+        for task in plan['tasks']:
+            location = {'task_id': task['task_id']}
+            if task['kind'] != 'task' or task['verification']['mode'] != 'automated':
+                issues.append({**location, 'code': 'UNSUPPORTED_EXECUTION_MODE',
+                               'field': 'kind/verification.mode',
+                               'message': 'Bootstrap requires kind=task and automated verification'})
+            checked = {'ac_refs': set(), 'sec_refs': set()}
+            for owner, prefix, where in [(task, '', location)] + [
+                (check, 'verification.checks.', {**location, 'check_id': check['check_id']})
+                for check in task['verification']['checks']
+            ]:
+                for field, kind in [('ac_refs', 'AC-'), ('sec_refs', 'SEC-')]:
+                    refs = set(owner[field])
+                    unknown = sorted(refs - self.requirements)
+                    if unknown:
+                        issues.append({**where, 'code': 'UNKNOWN_REQUIREMENT_REF',
+                                       'field': prefix + field, 'unknown_refs': unknown})
+                    wrong = sorted(ref for ref in refs if not ref.startswith(kind))
+                    if wrong:
+                        issues.append({**where, 'code': 'WRONG_REQUIREMENT_KIND',
+                                       'field': prefix + field, 'offending_refs': wrong})
+                    valid = {ref for ref in refs & self.requirements if ref.startswith(kind)}
+                    if owner is task:
+                        covered |= valid
+                    else:
+                        outside = sorted(refs - set(task[field]))
+                        if outside:
+                            issues.append({**where, 'code': 'CHECK_REFS_OUTSIDE_TASK',
+                                           'field': prefix + field, 'offending_refs': outside,
+                                           'allowed_refs': sorted(task[field])})
+                        checked[field] |= valid & set(task[field])
+            missing = sorted(set(task['ac_refs'] + task['sec_refs']) - (checked['ac_refs'] | checked['sec_refs']))
+            if task['verification']['mode'] == 'automated' and missing:
+                issues.append({**location, 'code': 'MISSING_VERIFICATION_REF',
+                               'field': 'verification.checks', 'missing_refs': missing})
+            for ref in task['contract_refs']:
+                try:
+                    self._artifact_ref(ref)
+                except PlanError as exc:
+                    issues.append({**location, 'code': 'INVALID_CONTRACT_REF', 'field': 'contract_refs',
+                                   'ref': ref, 'message': str(exc),
+                                   'available_refs': self.available_contract_refs()})
+        missing = sorted(self.requirements - covered)
+        if missing:
+            issues.append({'code': 'UNCOVERED_REQUIREMENTS', 'field': 'tasks', 'missing_refs': missing,
+                           'coverage_policy': self.requirement_catalogue['coverage_policy']})
+        if issues:
+            messages = ['Invalid task requirement/check mappings']
+            if missing:
+                messages.append(f'Uncovered requirements: {missing}')
+            messages.extend(i['message'] for i in issues if 'message' in i)
+            raise PlanError('; '.join(messages), issues)
+
+    def available_contract_refs(self) -> list[str]:
+        """Published design files and anchors, relative to 02-design (no aliases)."""
+        if self.artifacts is None:
+            return []
+        root = self.artifacts / '02-design'
+        refs = []
+        for path in sorted(root.glob('*.md')):
+            # Do not catalogue symlinks that escape the approved artifact directory.
+            try:
+                target = confined(root, path.name, protect=False)
+            except PlanError:
+                continue
+            if target.is_file():
+                refs.append(path.name)
+                refs.extend(path.name + '#' + anchor for anchor in heading_anchors(target.read_text()))
+        return refs
+
     def _artifact_ref(self, ref: str) -> None:
         path, _, anchor = ref.partition('#')
         if self.artifacts is None:
@@ -248,9 +374,7 @@ class TaskPlanValidator:
         if not target.is_file():
             raise PlanError(f'Missing contract: {ref}')
         if anchor:
-            headings = re.findall(r'^#+\s+(.+)$', target.read_text(), re.M)
-            slugs = {re.sub(r'[^\w -]', '', h.lower()).replace(' ', '-') for h in headings}
-            if anchor not in slugs:
+            if anchor not in heading_anchors(target.read_text()):
                 raise PlanError(f'Missing contract anchor: {ref}')
 
     def _validate_quality(self) -> None:
@@ -534,6 +658,7 @@ class TaskScheduler:
         results = []
         for index, check in enumerate(checks):
             self.budget()
+            self.guard()
             cwd = confined(self.wt, check['cwd'])
             try:
                 out, err, rc = self.verifier(check['argv'], cwd, check['timeout_sec'])
@@ -541,7 +666,7 @@ class TaskScheduler:
                 out, err, rc = '', f'Verification timeout: {exc}', 124
             log = attempt_dir / f'check-{index}.log'
             log.write_text(out + '\n' + err)
-            empty = bool(re.search(r'Ran 0 tests\b|\bno tests ran\b|\bcollected 0 items\b', out + err))
+            empty = test_suite_is_empty(out, err)
             results.append({'check_id': check['check_id'], 'exit_code': rc, 'empty_suite': empty,
                             'log_ref': str(log.relative_to(self.directory)), 'sha256': file_hash(log)})
             record['checks'] = results
@@ -556,6 +681,151 @@ class TaskScheduler:
             if not path.is_file() or file_hash(path) != result['sha256']:
                 return False
         return bool(record.get('checks'))
+
+    def _preflight(self) -> None:
+        """Run required checks at the clean checkpoint in the actual task worktree."""
+        self._assert_clean()
+        preflights = self.state.setdefault('preflights', [])
+        record = {'head': self.state['expected_head'], 'status': 'RUNNING', 'checks': []}
+        preflights.append(record)
+        directory = self.directory / 'preflight' / f'run-{len(preflights)}'
+        self._save('PREFLIGHT_STARTED')
+        directory.mkdir(parents=True, exist_ok=False)
+        protected = self._protected()
+        print(f'[task-dev] Checkpoint preflight in {self.wt}; no developer attempts consumed.', flush=True)
+        results = self._verify({'verification': {'checks': []}}, record, directory)
+        if self._protected() != protected or self._changed() or self._ignored() != self.state['ignored_paths']:
+            record['status'] = 'MUTATED'
+            self._save('PREFLIGHT_BLOCKED')
+            raise DevelopmentBlocked('BASELINE_MUTATION', f'Preflight changed source or metadata; evidence: {directory}')
+        self._assert_tree()
+        failed = [r for r in results if r['exit_code'] or r['empty_suite']]
+        record['status'] = 'FAILED' if failed else 'PASSED'
+        self._save('PREFLIGHT_BLOCKED' if failed else 'PREFLIGHT_PASSED')
+        if failed:
+            self._log_failed_checks(failed)
+            raise DevelopmentBlocked('BASELINE_MISMATCH', f'Required checks fail at the clean checkpoint; inspect {directory}')
+
+    def _log_failed_checks(self, results: list[dict]) -> None:
+        for check in results:
+            if check['exit_code'] or check['empty_suite']:
+                path = confined(self.directory, check['log_ref'], protect=False)
+                print(f"[task-dev] Failed {check['check_id']}: exit={check['exit_code']}, empty_suite={check['empty_suite']}", flush=True)
+                log_retry_reason('task-dev', diagnostic_excerpt(path.read_text(), 3000), path)
+
+    def _repair_context(self, record: dict) -> dict | None:
+        failures = record.get('failed_attempts', [])
+        if not failures:
+            return None
+        latest = failures[-1]
+        context = copy.deepcopy(latest)
+        context['history'] = [{k: item[k] for k in ('attempt', 'category', 'checks', 'diff_ref', 'diff_sha256')}
+                              for item in failures]
+        remaining = 24000
+        for check in context['checks']:
+            if not check['exit_code'] and not check['empty_suite']:
+                continue
+            path = confined(self.directory, check['log_ref'], protect=False)
+            if not path.is_file() or file_hash(path) != check['sha256']:
+                raise TaskError('Repair verification evidence changed or disappeared')
+            text = path.read_text()
+            limit = min(6000, remaining)
+            check['log_excerpt'] = diagnostic_excerpt(text, limit)
+            check['log_truncated'] = len(text) > limit
+            remaining -= len(check['log_excerpt'])
+        context['instruction'] = ('Repair the restored previous candidate in place. Preserve working behavior and tests. '
+                                  'The log excerpts are bounded; full logs remain at their recorded evidence references. '
+                                  'Do not weaken checks or expand scope to pass verification.')
+        return context
+
+    def _restore_candidate(self, task: dict, record: dict, *, protocol_recovery=False) -> None:
+        if not record.get('failed_attempts'):
+            return
+        candidate = record['failed_attempts'][-1]
+        if candidate['category'] != 'CHECK_FAILURE' and not (protocol_recovery and candidate['category'] == 'DEVELOPER_PROTOCOL'):
+            raise DevelopmentBlocked(candidate['category'], 'Previous attempt needs explicit reconciliation')
+        self._assert_clean()
+        path = confined(self.directory, candidate['diff_ref'], protect=False)
+        if not path.is_file() or file_hash(path) != candidate['diff_sha256']:
+            raise TaskError('Repair patch changed or disappeared')
+        tree = candidate['tree']
+        if not re.fullmatch(r'[a-f0-9]{40,64}', tree) or candidate['base_commit'] != self.state['expected_head']:
+            raise TaskError('Repair candidate has an unexpected base or tree')
+        changed = sorted(p for p in git(self.wt, 'diff', '--no-renames', '--name-only', '-z', candidate['base_commit'], tree).split('\x00') if p)
+        if changed != sorted(candidate['changed_files']) or not set(changed) <= set(task['target_files']):
+            raise TaskError('Repair candidate exceeds its approved manifest')
+        if git(self.wt, 'diff', '--binary', candidate['base_commit'], tree) != path.read_text():
+            raise TaskError('Repair tree differs from archived patch')
+        for name in changed:
+            confined(self.wt, name)
+        if changed:
+            git(self.wt, 'restore', '--source', tree, '--staged', '--worktree', '--', *changed)
+        for name in changed:
+            confined(self.wt, name)
+        if sorted(self._changed()) != changed:
+            raise TaskError('Restored repair candidate differs from archived paths')
+
+    def _recover_protocol_candidate(self, task: dict, record: dict) -> None:
+        """Explicitly verify an archived ready candidate; do not rerun its developer."""
+        candidate = record.get('failed_attempts', [{}])[-1]
+        if record['status'] == 'COMPLETED' and record.get('protocol_recoveries'):
+            return
+        if record['status'] != 'FAILED' or candidate.get('category') != 'DEVELOPER_PROTOCOL' or candidate.get('checks'):
+            raise TaskError('Protocol recovery requires an unverified archived protocol failure')
+        original = confined(self.directory, f"{task['task_id']}/attempt-{candidate['attempt']}/developer.log", protect=False)
+        output = original.read_text()
+        if (record.get('failure') != json.dumps(candidate['checks']) + '\n' + output
+                or record.get('producer', {}).get('exit_code') != 0 or developer_blocker(output) is not None
+                or not re.search(r'TASK_DEV_STATUS:', output)):
+            raise TaskError('Archived developer response does not request normal verification')
+        recoveries = record.setdefault('protocol_recoveries', [])
+        recovery = {'attempt': candidate['attempt'], 'status': 'RESERVED',
+                    'developer_log_ref': str(original.relative_to(self.directory)), 'developer_log_sha256': file_hash(original),
+                    'candidate_tree': candidate['tree']}
+        directory = self.directory / task['task_id'] / f'protocol-recovery-{len(recoveries) + 1}'
+        recoveries.append(recovery)
+        self._save('PROTOCOL_RECOVERY_RESERVED')
+        directory.mkdir(parents=True, exist_ok=False)
+        self._restore_candidate(task, record, protocol_recovery=True)
+        protected, changed = self._protected(), self._changed()
+        signature = self._source_signature(changed)
+        record.update(status='VERIFYING', checks=[])
+        self._save('PROTOCOL_RECOVERY_VERIFYING')
+        print(f"[task-dev] Verifying archived {task['task_id']} attempt {candidate['attempt']}; no developer invocation.", flush=True)
+        results = self._verify(task, record, directory)
+        self._assert_tree()
+        if (self._protected() != protected or self._changed() != changed or self._source_signature(changed) != signature
+                or self._ignored() != self.state['ignored_paths'] or git(self.wt, 'write-tree') != candidate['tree']):
+            raise TaskError('Verification changed the recovered candidate or metadata')
+        if all(not c['exit_code'] and not c['empty_suite'] for c in results):
+            recovery['status'] = 'PASSED'
+            record.update(status='COMMIT_INTENT', candidate_tree=candidate['tree'], changed_files=changed,
+                          commit_message=f'feat({self.plan["ticket_id"]}/{task["task_id"]}): {task["title"]}\n\nSSDLC-Attempt: {candidate["attempt"]}')
+            self._save('COMMIT_INTENT')
+            self._complete_intent(task, record)
+            return
+        recovery['status'] = 'FAILED'
+        record['failed_attempts'].append({**copy.deepcopy(candidate), 'category': 'CHECK_FAILURE', 'checks': results,
+                                         'origin': 'explicit_protocol_verification'})
+        record.update(status='FAILED', failure=json.dumps(results) + '\n' + output)
+        self._save('PROTOCOL_RECOVERY_FAILED')
+        self._rollback_attempt(record, changed)
+        self._log_failed_checks(results)
+
+    def _rollback_attempt(self, record: dict, changed: list[str]) -> None:
+        for path in changed:
+            tracked = subprocess.run(['git', '--literal-pathspecs', 'cat-file', '-e', f'{record["start_commit"]}:{path}'], cwd=self.wt, capture_output=True).returncode == 0
+            if tracked:
+                git(self.wt, 'restore', '--source', record['start_commit'], '--staged', '--worktree', '--', path)
+            else:
+                git(self.wt, 'reset', '--', path)
+                confined(self.wt, path)
+                target = self.wt / path
+                if target.is_file() or target.is_symlink():
+                    target.unlink()
+        if self._changed():
+            raise TaskError('Attempt rollback left unexpected changes')
+        self._save('ATTEMPT_RESTORED')
 
     def _complete_intent(self, task: dict, record: dict) -> None:
         parent, tree = record['start_commit'], record['candidate_tree']
@@ -578,11 +848,11 @@ class TaskScheduler:
         self.state['expected_head'] = head
         self._save('TASK_COMPLETED')
 
-    def run(self, ordered: list[dict], feedback: str = '') -> dict:
+    def run(self, ordered: list[dict], feedback: str = '', *, recover_protocol_task=None) -> dict:
         with ticket_lock(self.directory / 'scheduler.lock'):
-            return self._run(ordered, feedback)
+            return self._run(ordered, feedback, recover_protocol_task=recover_protocol_task)
 
-    def _run(self, ordered: list[dict], feedback: str) -> dict:
+    def _run(self, ordered: list[dict], feedback: str, *, recover_protocol_task=None) -> dict:
         if any(t['kind'] != 'task' or t['verification']['mode'] != 'automated' for t in ordered):
             raise TaskError('Bootstrap supports automated tasks only; subgoals/review_only require later increments')
         self.guard()
@@ -615,6 +885,23 @@ class TaskScheduler:
         if feedback:
             # Targeted bounce belongs to Step 3. Never silently skip rejected completed tasks.
             raise TaskError('Review feedback requires explicit invalidation, unavailable in the bootstrap scheduler')
+        pending = [t for t in ordered if state['tasks'][t['task_id']]['status'] != 'COMPLETED']
+        if recover_protocol_task is not None and recover_protocol_task not in state['tasks']:
+            raise TaskError('Unknown task for protocol recovery')
+        for task in pending:
+            record = state['tasks'][task['task_id']]
+            recovering = task['task_id'] == recover_protocol_task
+            if record.get('failed_attempts') and record['failed_attempts'][-1]['category'] != 'CHECK_FAILURE' and not recovering:
+                raise DevelopmentBlocked(record['failed_attempts'][-1]['category'], 'Previous attempt needs explicit reconciliation')
+            if record['attempts'] >= self.max_attempts and not recovering:
+                raise TaskError(f'Task {task["task_id"]} exhausted its persistent attempt limit')
+        if pending:
+            self._preflight()
+        if recover_protocol_task:
+            task = next(t for t in ordered if t['task_id'] == recover_protocol_task)
+            if not all(state['tasks'][dep]['status'] == 'COMPLETED' for dep in task['depends_on']):
+                raise TaskError('Protocol recovery dependency has not completed')
+            self._recover_protocol_candidate(task, state['tasks'][recover_protocol_task])
         for task in ordered:
             record = state['tasks'][task['task_id']]
             if record['status'] == 'COMPLETED':
@@ -627,9 +914,11 @@ class TaskScheduler:
                 self._assert_tree()
                 self.guard()
                 self.budget()
+                repair = self._repair_context(record)
+                self._restore_candidate(task, record)
                 record['attempts'] += 1
                 attempt = record['attempts']
-                record.update(status='RUNNING', start_commit=state['expected_head'],
+                record.update(status='RUNNING', start_commit=state['expected_head'], checks=[],
                               protected_snapshot=self._protected())
                 self._save('TASK_STARTED')
                 attempt_dir = self.directory / task['task_id'] / f'attempt-{attempt}'
@@ -641,12 +930,20 @@ class TaskScheduler:
                 atomic_json(attempt_dir / 'manifest.json', manifest)
                 protected = self._protected()
                 prompt = ('Implement only this task, reusing project conventions. Do not commit, change Git metadata, '
-                          'or modify protected SSDLC artifacts. Stay within target_files; report any required scope change.\n'
+                          'or modify protected SSDLC artifacts. Stay within target_files. '
+                          'If repair context is supplied, the previous failed candidate is already restored: repair it in place. '
+                          'When ready for independent verification, end with TASK_DEV_STATUS: COMPLETE. '
+                          'If completion requires changes outside target_files, end with TASK_DEV_STATUS: SCOPE_REQUIRED. '
+                          'For a missing environment prerequisite, end with TASK_DEV_STATUS: ENVIRONMENT_BLOCKED. '
+                          'Explain the blocker and do not bypass it, weaken checks or expand scope.\n'
                           + json.dumps(task, indent=2) + '\nPROJECT QUALITY CONTRACT:\n'
                           + json.dumps(self.quality, indent=2) + '\nAPPROVED CONTEXT:\n'
                           + json.dumps(self.context, indent=2) + '\nDEPENDENCY CHECKPOINTS:\n'
                           + json.dumps({dep: state['tasks'][dep]['commit'] for dep in task['depends_on']})
-                          + '\nPREVIOUS FAILURE:\n' + record.get('failure', ''))
+                          + '\nREPAIR CONTEXT:\n' + json.dumps(repair, indent=2)
+                          + ('\nPREVIOUS FAILURE:\n' + record.get('failure', '') if repair is None else ''))
+                print(f"[task-dev] {task['task_id']} attempt {attempt}/{self.max_attempts}: "
+                      + (f"repairing archived attempt {repair['attempt']}" if repair else 'implementing from verified checkpoint'), flush=True)
                 result = self.developer(task, attempt, prompt)
                 (attempt_dir / 'developer.log').write_text(result['output'])
                 record['producer'] = {k: v for k, v in result.items() if k != 'output'}
@@ -661,23 +958,27 @@ class TaskScheduler:
                     raise TaskError('Task exceeded approved manifest; scope reconciliation is required')
                 for path in changed:
                     confined(self.wt, path)
-                if not changed:
+                blocker = developer_blocker(result['output'])
+                if result['exit_code'] != 0:
+                    blocker = blocker or 'DEVELOPER_INVOCATION'
+                if not changed and not blocker:
                     raise TaskError('No diff: independent evidence of an already-satisfied task is required')
                 record.update(status='VERIFYING', changed_files=changed)
                 self._save('VERIFYING')
                 source_signature = self._source_signature(changed)
-                results = self._verify(task, record, attempt_dir)
+                results = self._verify(task, record, attempt_dir) if not blocker else []
                 self._assert_tree()
                 if (self._protected() != protected or self._changed() != changed
                         or self._source_signature(changed) != source_signature
                         or self._ignored() != state['ignored_paths']):
                     raise TaskError('Verification changed source or metadata')
                 # Capture all changes, including new files, without staging unknown paths.
-                git(self.wt, 'add', '--', *changed)
+                if changed:
+                    git(self.wt, 'add', '--', *changed)
                 tree = git(self.wt, 'write-tree')
                 diff = git(self.wt, 'diff', '--cached', '--binary')
                 (attempt_dir / 'implementation.diff').write_text(diff)
-                if result['exit_code'] == 0 and all(r['exit_code'] == 0 and not r['empty_suite'] for r in results):
+                if not blocker and all(r['exit_code'] == 0 and not r['empty_suite'] for r in results):
                     record.update(status='COMMIT_INTENT', candidate_tree=tree,
                                   commit_message=f'feat({self.plan["ticket_id"]}/{task["task_id"]}): {task["title"]}\n\nSSDLC-Attempt: {attempt}')
                     self._save('COMMIT_INTENT')
@@ -685,22 +986,26 @@ class TaskScheduler:
                     break
                 # Preserve failed attempt before restoring only its declared paths.
                 record['failure'] = json.dumps(results) + '\n' + result['output']
+                category = blocker or 'CHECK_FAILURE'
+                candidate = {'attempt': attempt, 'category': category, 'base_commit': record['start_commit'],
+                             'tree': tree, 'changed_files': changed,
+                             'diff_ref': str((attempt_dir / 'implementation.diff').relative_to(self.directory)),
+                             'diff_sha256': file_hash(attempt_dir / 'implementation.diff'), 'checks': copy.deepcopy(results),
+                             'developer_output': result['output'][-8000:]}
+                prior = record.setdefault('failed_attempts', [])
+                outcomes = lambda checks: [(c['check_id'], c['exit_code'], c['empty_suite']) for c in checks]
+                if (category == 'CHECK_FAILURE' and prior and prior[-1]['category'] == 'CHECK_FAILURE'
+                        and prior[-1]['tree'] == tree and outcomes(prior[-1]['checks']) == outcomes(results)):
+                    candidate['category'] = category = 'REPAIR_STALLED'
+                prior.append(candidate)
                 record['status'] = 'FAILED'
                 self._save('ATTEMPT_FAILED')
-                for path in changed:
-                    tracked = subprocess.run(['git', '--literal-pathspecs', 'cat-file', '-e', f'{record["start_commit"]}:{path}'], cwd=self.wt, capture_output=True).returncode == 0
-                    if tracked:
-                        git(self.wt, 'restore', '--source', record['start_commit'], '--staged', '--worktree', '--', path)
-                    else:
-                        git(self.wt, 'reset', '--', path)
-                        confined(self.wt, path)
-                        # Unlink the new directory entry, never its symlink target.
-                        target = self.wt / path
-                        if target.is_file() or target.is_symlink():
-                            target.unlink()
-                if self._changed():
-                    raise TaskError('Attempt rollback left unexpected changes')
-                self._save('ATTEMPT_RESTORED')
+                self._rollback_attempt(record, changed)
+                self._log_failed_checks(results)
+                if category != 'CHECK_FAILURE':
+                    path = attempt_dir / 'developer.log'
+                    log_retry_reason('task-dev ' + category, diagnostic_excerpt(result['output'], 3000), path)
+                    raise DevelopmentBlocked(category, f'Task {task["task_id"]}; evidence: {attempt_dir}')
             if record['status'] != 'COMPLETED':
                 raise TaskError(f'Task {task["task_id"]} exhausted its persistent attempt limit')
         self.guard()

@@ -31,10 +31,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ssdlc_planning import PlanRepair
+from ssdlc_design import DesignSession
+from ssdlc_catalogues import CatalogueError, requirement_catalogue
+from ssdlc_controller import assert_controller, controller_snapshot
 
 from ssdlc_tasks import (
     PlanError, TaskError, ResourceLimitError, TaskPlanValidator, TaskScheduler, atomic_json,
-    confined, file_hash, git, ticket_lock, validate_document,
+    confined, file_hash, git, ticket_lock, validate_document, log_retry_reason, diagnostic_excerpt, test_suite_is_empty, parse_plan_output,
 )
 
 
@@ -51,6 +54,17 @@ def parse_review_verdict(report: str) -> Optional[str]:
     for verdict in ("APPROVED", "CHANGES_REQUESTED"):
         if final_line == f"REVIEW_STATUS: {verdict}":
             return verdict
+    return None
+
+
+def parse_qa_verdict(report: str) -> Optional[str]:
+    """QA approval requires one exact final marker, never a quoted substring."""
+    markers = re.findall(r'\bQA_STATUS\s*:', report)
+    final = report.rstrip().splitlines()[-1].strip() if report.strip() else ''
+    if len(markers) == 1:
+        for verdict in ('PASSED', 'FAILED'):
+            if final == f'QA_STATUS: {verdict}':
+                return verdict
     return None
 
 
@@ -1460,17 +1474,32 @@ class SSDLCOrchestrator:
             log.write_text(out + "\n" + err)
             contract["baseline"].append({"check_id": check["check_id"], "exit_code": rc,
                                          "log_ref": str(log.relative_to(self.ssdlc_root)), "sha256": sha256_file(log)})
-            if rc or re.search(r"Ran 0 tests\b|\bno tests ran\b|\bcollected 0 items\b", out + err):
+            if rc or test_suite_is_empty(out, err):
                 raise PlanError(f"Baseline check {check['check_id']} failed or ran no tests; inspect {log}")
         atomic_json(target, contract)
         self.record_artifact("00-recon/quality-contract.json", target)
         return contract
 
-    def _ensure_task_plan(self, review_repairs=None) -> Dict[str, Any]:
+    def _ensure_task_plan(self, review_repairs=None, recover_review=False) -> Dict[str, Any]:
         self.state["task_breakdown"] = True
+        self.state.update(current_phase='02-design', current_step='task-plan')
         self._save_state()
         quality = self._ensure_quality_contract()
         plan_path = self.dir_design / "plan.json"
+        design_session = self.dir_design / 'design-session/session.json'
+        if design_session.exists():
+            name = '02-design/design-session/session.json'
+            meta = self.state.get('artifacts', {}).get(name)
+            gates = [g for g in self.state.get('gate_history', []) if g['gate'] == 'PAIR_DESIGN_GATE']
+            session = json.loads(design_session.read_text())
+            if (not meta or file_hash(design_session) != meta['sha256'] or not gates or not gates[-1]['passed']
+                    or not session['rounds'] or session['rounds'][-1]['status'] != 'APPROVED'):
+                raise PlanError('Persistent pair design has not been independently approved')
+            for filename in ('adr.md', 'threat-model.md'):
+                path = self.dir_design / filename
+                meta = self.state.get('artifacts', {}).get('02-design/' + filename)
+                if not meta or not path.is_file() or file_hash(path) != meta['sha256']:
+                    raise PlanError('Approved design projection changed or disappeared')
         requirements = (self.dir_po / "requirements.md").read_text()
         validator = TaskPlanValidator(self.repo_root, requirements, quality, self.ssdlc_root)
         if plan_path.exists():
@@ -1484,10 +1513,14 @@ class SSDLCOrchestrator:
             return plan
         if "02-design/plan.json" in self.state.get("artifacts", {}):
             raise PlanError("Registered task plan disappeared; refusing regeneration")
+        controller = self._ensure_controller_contract()
         engine, model, effort, _ = SquadDispatcher.dispatch_role(
             "02-design-arch", self.state.get("risk_tier", "M"), self.state.get("dev_profile", "ALGORITHMIC")
         )
         context = {"requirements": requirements,
+                   "requirement_catalogue": validator.requirement_catalogue,
+                   "available_contract_refs": validator.available_contract_refs(),
+                   "execution_contract": controller,
                    "adr": self._read_optional(self.dir_design / "adr.md", "Tier S: lightweight plan"),
                    "threat_model": self._read_optional(self.dir_design / "threat-model.md", "See SEC requirements"),
                    "quality_contract": quality, "repo_context": self._gather_repo_context(),
@@ -1502,6 +1535,14 @@ class SSDLCOrchestrator:
                    "with local regression checks, but must still obey all applicable safety invariants. "
                    "Each claimed requirement must have an actual behavioral check, not merely an added label. "
                    "On repair, fix the reported defects without dropping requirements or weakening checks.")
+        prompt += ("\nThe requirement_catalogue is authoritative: explicitly cover every required_id, including both "
+                   "parent AC headings and defined sub-cases. Parent/child coverage is never implicit. "
+                   "Put AC IDs only in ac_refs and SEC IDs only in sec_refs, for tasks AND checks. "
+                   "Each check's references must be a subset of its owning task's corresponding field; "
+                   "each task reference must have a local executable check. "
+                   "References are exact and case-sensitive; prose mentions are not definitions. "
+                   "Use contract_refs from available_contract_refs, relative to 02-design, e.g. adr.md#heading. "
+                   "ADR document titles are not filenames. Never invent filenames or anchors.")
         rev_engine, rev_model, rev_effort, _ = SquadDispatcher.dispatch_role(
             "02-design-sec", self.state.get("risk_tier", "M"), self.state.get("dev_profile", "ALGORITHMIC")
         )
@@ -1522,14 +1563,31 @@ class SSDLCOrchestrator:
                 f"02-design-task-plan-a{attempt}", "Task Planner", engine, model, "GENERATED",
                 time.time() - t0, cost, tin, tout, trace, effort))
             return out
-        def review(plan):
+        review_schema = (Path(__file__).parent / "schemas" / "task-plan-review.schema.json").read_text()
+        review_prompt = (
+            "Review the entire plan against approved requirements and design in one comprehensive pass. "
+            "Return only JSON matching the supplied review schema. Keep finding_id stable across revisions; "
+            "explicitly resolve or retain every prior open blocker using evidence from the current plan. "
+            "Open blocking findings need an exact approved AC/SEC, standard or required quality-check reference, "
+            "concrete evidence and a bounded requested change. "
+            "Resolved structural/schema diagnostics may have empty obligation references; do not invent IDs to annotate them. "
+            "Optional improvements are ADVISORY and cannot block approval. Do not introduce new scope or require "
+            "implementation detail beyond the approved behavior. Identify new findings as INTRODUCED_BY_REVISION or "
+            "MISSED_EARLIER and explain why in evidence. Review planned behavioral assertions, not code that does not exist yet. "
+            "Reject label-only checks and tests deferred beyond the task implementing the behavior. "
+            "Use the supplied execution_contract for controller prerequisites; never invent environment variables. "
+            "Infrastructure prerequisites belong to ENVIRONMENT_PREREQUISITE, not speculative target code changes.\n" + review_schema)
+        prompt += ("\nUse repair.history to preserve all earlier fixes. Avoid unrelated rewrites during repair. "
+                   "Honor execution_contract: the host harness captures and verifies the executing controller. "
+                   "Do not create controller-capture tasks or assume undeclared environment variables. "
+                   "For crash safety, enumerate persistence boundaries from the approved design and specify "
+                   "the fault injection and expected recovery for each; justify equivalence when grouping boundaries.")
+        def review(plan, history):
             t0 = time.time()
             out, cost, tin, tout, trace = EngineRunner.invoke_role(
                 rev_engine, rev_model,
-                "Review decomposition, missing scenarios and requirement/check coverage. Reject label-only coverage: "
-                "checks must exercise the claimed behavior and implementation tasks must include their tests. "
-                "End with exactly TASK_PLAN_STATUS: APPROVED or TASK_PLAN_STATUS: REVISION_REQUIRED.",
-                json.dumps({"context": context, "plan": plan}), self.repo_root,
+                review_prompt,
+                json.dumps({"context": context, "plan": plan, "review_history": history}), self.repo_root,
                 self.project_id, self.ticket_id, "02-design-task-plan-review", reasoning_effort=rev_effort,
             )
             self.record_ledger(CostAndTelemetryEntry(
@@ -1537,10 +1595,13 @@ class SSDLCOrchestrator:
                 time.time() - t0, cost, tin, tout, trace, rev_effort))
             return out
         repair = PlanRepair(self.dir_design,
-                            {"context": context, "schema": schema, "prompt": prompt,
+                            {"context": context, "schema": schema, "prompt": prompt, "review_prompt": review_prompt,
                              "planner": [engine, model, effort], "reviewer": [rev_engine, rev_model, rev_effort]},
-                            validate, generate, review, self.check_budget_circuit_breaker, review_repairs=review_repairs)
+                            validate, generate, review, self.check_budget_circuit_breaker, review_repairs=review_repairs,
+                            structured_reviews=True)
         try:
+            if recover_review:
+                repair.recover_rejected_review()
             previous_candidate = self.dir_design / "task-plan-candidate.txt"
             previous_meta = self.state.get('artifacts', {}).get('02-design/task-plan-candidate.txt')
             initial = None
@@ -1560,7 +1621,31 @@ class SSDLCOrchestrator:
         self.record_gate("TASK_PLAN_GATE", True, "Validated plan and independent semantic review")
         return plan
 
-    def resume_task_planning(self, review_repairs=None) -> Path:
+    def _ensure_controller_contract(self) -> dict:
+        """Persist the host baseline before planning/development, never inside a task."""
+        name = '00-recon/controller-contract.json'
+        path = self.ssdlc_root / name
+        root = Path(__file__).resolve().parent
+        meta = self.state.get('artifacts', {}).get(name)
+        if path.exists():
+            if not meta or file_hash(path) != meta['sha256']:
+                raise TaskError('Unregistered or changed controller contract')
+            snapshot = json.loads(path.read_text())
+            assert_controller(root, snapshot)
+        else:
+            if meta or (self.dir_dev / 'tasks/task-journal.jsonl').exists():
+                raise TaskError('Missing controller contract; explicit revision required')
+            snapshot = controller_snapshot(root)
+            atomic_json(path, snapshot)
+            self.record_artifact(name, path)
+        return {'artifact_ref': name, 'snapshot': snapshot,
+                'verification_owner': 'host orchestrator, outside target task commands',
+                'guard_points': ['before development', 'before each developer invocation',
+                                 'after each developer invocation', 'before and after each verification check'],
+                'limitations': 'Unkeyed integrity checking at guard boundaries; not authentication or continuous containment. '
+                               'Ignored controller files are excluded. No controller environment variables are required.'}
+
+    def resume_task_planning(self, review_repairs=None, recover_review=False) -> Path:
         """Resume only planning against sealed upstream artifacts; never execute code."""
         with ticket_lock(self.ssdlc_root / "ticket.lock"):
             self.state = self._load_or_init_state()
@@ -1583,7 +1668,7 @@ class SSDLCOrchestrator:
             self.state.update(current_phase="02-design", current_step="task-plan", status="IN_PROGRESS")
             self._save_state()
             try:
-                self._ensure_task_plan(review_repairs=review_repairs)
+                self._ensure_task_plan(review_repairs=review_repairs, recover_review=recover_review)
             except Exception as exc:
                 self.state.update(status="FAILED", failure={"phase": "task-plan", "message": str(exc)})
                 self._save_state()
@@ -1593,8 +1678,9 @@ class SSDLCOrchestrator:
             self._save_state()
             return self.dir_design / 'plan.json'
 
-    def _run_task_development(self, feedback: str = "") -> Tuple[Path, List[str]]:
+    def _run_task_development(self, feedback: str = "", recover_protocol_task=None) -> Tuple[Path, List[str]]:
         plan = self._ensure_task_plan()
+        controller = self._ensure_controller_contract()
         quality = json.loads((self.dir_recon / "quality-contract.json").read_text())
         wt = self._ensure_worktree()
         context = {name: self._read_optional(self.ssdlc_root / name) for name in (
@@ -1605,6 +1691,7 @@ class SSDLCOrchestrator:
         protected = {name: dict(meta) for name, meta in self.state.get("artifacts", {}).items()
                      if name.startswith(("00-recon/", "01-po/", "02-design/"))}
         def guard():
+            assert_controller(Path(__file__).resolve().parent, controller['snapshot'])
             validator.validate(plan)
             for name, meta in protected.items():
                 path = self.ssdlc_root / meta["path"]
@@ -1644,8 +1731,10 @@ class SSDLCOrchestrator:
             max_attempts=int(os.environ.get("SSDLC_MAX_DEV_RETRIES", "3")),
         )
         self.state["current_phase"] = "03-dev"
+        self.state["current_step"] = "task-development"
+        self.state["status"] = "IN_PROGRESS"
         self._save_state()
-        result = scheduler.run(ordered, feedback)
+        result = scheduler.run(ordered, feedback, recover_protocol_task=recover_protocol_task)
         self.state["tasks_status"] = result["tasks"]
         self.state["task_verified_head"] = result["expected_head"]
         diff = self.dir_dev / "implementation.diff"
@@ -1967,158 +2056,184 @@ class SSDLCOrchestrator:
     # ------------------------------------------------------------------
     # PHASE 2: Pair Design & STRIDE Threat Modeling
     # ------------------------------------------------------------------
-    def run_phase_pair_design(self) -> Tuple[Path, Path]:
-        print(f"\n==> [{self.project_id} | Phase 2: 02-design] Pair Design (Architect <-> Security Threat Modeler)...")
-        self.state["current_phase"] = "02-design"
-        self._save_state()
-
-        recon_text = (self.dir_recon / "context-and-blast-radius.md").read_text(encoding="utf-8")
-        req_text = (self.dir_po / "requirements.md").read_text(encoding="utf-8")
-
-        risk_tier = self.state.get("risk_tier", "M")
-        dev_profile = self.state.get("dev_profile", "ALGORITHMIC")
-        arch_engine, arch_model, _, arch_reason = SquadDispatcher.dispatch_role("02-design-arch", risk_tier, dev_profile)
-        sec_engine, sec_model, _, sec_reason = SquadDispatcher.dispatch_role("02-design-sec", risk_tier, dev_profile)
-        print(f"    [Squad Dispatcher] Architect: {arch_engine}:{arch_model} ({arch_reason})")
-        print(f"    [Squad Dispatcher] Security Reviewer: {sec_engine}:{sec_model} ({sec_reason})")
-        max_rounds = int(os.environ.get("SSDLC_MAX_DESIGN_ROUNDS", "3"))
-
-        dialogue_log: List[str] = ["# Pair Design & STRIDE Threat Modeling Transcript\n"]
-        current_adr = ""
-        current_threat_model = ""
-        approved = False
-        for rnd in range(1, max_rounds + 1):
-            arch_effort = SquadDispatcher.resolve_reasoning_effort("02-design-arch", risk_tier, attempt=rnd)
-            sec_effort = SquadDispatcher.resolve_reasoning_effort("02-design-sec", risk_tier, attempt=rnd)
-            print(f"    -> Round {rnd}/{max_rounds}: Architect ({arch_engine}:{arch_model}, reasoning={arch_effort}) proposing ADR...")
-            ui_arch_rules = ""
-            if dev_profile == "FRONTEND_UI" and not self._task_mode():
-                ui_arch_rules = (
-                    "\nUI/UX ARCHITECTURE & DESIGN SYSTEM RULES:\n"
-                    "- ZERO DRIFT: Specify exact Design System tokens (import { space, shape, type, useTheme } from '@/theme/tokens').\n"
-                    "- REUSE MANDATE: Check COMPONENT_CATALOG.md and reuse existing primitives (<Button>, <Card>, <Loading>, <SecureImage>) rather than designing duplicates.\n"
-                    "- Ensure Safe Area Insets are factored into all container boundaries via useSafeAreaInsets.\n"
-                    "- Enforce vector/SVG icons (@expo/vector-icons or custom SVG) and explicitly forbid raw Unicode glyphs.\n"
-                )
-            arch_sys = (
-                "You are the Lead Systems Architect in a Pair Design session.\n"
-                "Draft or revise a complete Architecture Decision Record (ADR) that satisfies all PO Acceptance "
-                "Criteria (AC-*) and Security Requirements (SEC-*), and resolves any critiques from the Security Reviewer.\n"
-                "Include: Exact file paths to create/modify, interfaces, DB/state impact, error handling, and test strategy."
-                f"{ui_arch_rules}"
-            )
-            arch_user = (
-                f"CODEBASE RECON:\n{recon_text}\n\n"
-                f"PO REQUIREMENTS:\n{req_text}\n\n"
-                f"PREVIOUS ADR DRAFT:\n{current_adr or '(None - Round 1)'}\n\n"
-                f"SECURITY REVIEWER CRITIQUE:\n{current_threat_model or '(None - Round 1)'}"
-            )
-            t0 = time.time()
-            current_adr, cost, tin, tout, trace_user = EngineRunner.invoke_role(
-                arch_engine,
-                arch_model,
-                arch_sys,
-                arch_user,
-                self.repo_root,
-                self.project_id,
-                self.ticket_id,
-                f"02-design-arch-r{rnd}",
-                reasoning_effort=arch_effort,
-            )
-            dur = time.time() - t0
-            self.record_ledger(
-                CostAndTelemetryEntry(
-                    f"02-design-r{rnd}",
-                    "Architect",
-                    arch_engine,
-                    arch_model,
-                    "DRAFT",
-                    dur,
-                    cost,
-                    tin,
-                    tout,
-                    trace_user,
-                    reasoning_effort=arch_effort,
-                )
-            )
-            dialogue_log.append(f"## Round {rnd} — Architect ({arch_model}, reasoning={arch_effort})\n\n{current_adr}\n\n---\n")
-
-            print(f"    -> Round {rnd}/{max_rounds}: Security Critic ({sec_engine}:{sec_model}, reasoning={sec_effort}) running STRIDE audit...")
-            sec_sys = (
-                "You are a Staff Adversarial Security & Systems Reviewer.\n"
-                "Critique the Architect's ADR against the PO Requirements using STRIDE "
-                "(Spoofing, Tampering, Repudiation, Information Disclosure, Denial of Service, Elevation of Privilege).\n"
-                "Also check for race conditions, broken invariants, and over-engineering.\n"
-                "At the very end of your response, output one of these exact lines:\n"
-                "DESIGN_STATUS: APPROVED (if all critical/major design & security flaws are addressed)\n"
-                "or\n"
-                "DESIGN_STATUS: REVISION_REQUIRED (if blocking flaws remain)"
-            )
-            sec_user = (
-                f"PO REQUIREMENTS:\n{req_text}\n\n"
-                f"PROPOSED ADR (Round {rnd}):\n{current_adr}"
-            )
-            t0 = time.time()
-            current_threat_model, cost, tin, tout, trace_user = EngineRunner.invoke_role(
-                sec_engine,
-                sec_model,
-                sec_sys,
-                sec_user,
-                self.repo_root,
-                self.project_id,
-                self.ticket_id,
-                f"02-design-sec-r{rnd}",
-                reasoning_effort=sec_effort,
-            )
-            dur = time.time() - t0
-            status_tag = (
-                "APPROVED"
-                if "DESIGN_STATUS: APPROVED" in current_threat_model
-                else "REVISION_REQUIRED"
-            )
-            self.record_ledger(
-                CostAndTelemetryEntry(
-                    f"02-design-r{rnd}",
-                    "Security Threat Modeler",
-                    sec_engine,
-                    sec_model,
-                    status_tag,
-                    dur,
-                    cost,
-                    tin,
-                    tout,
-                    trace_user,
-                    reasoning_effort=sec_effort,
-                )
-            )
-            dialogue_log.append(
-                f"## Round {rnd} — Security & Systems Reviewer ({sec_model}, reasoning={sec_effort})\n\n{current_threat_model}\n\n---\n"
-            )
-
-            if status_tag == "APPROVED":
-                approved = True
-                print(f"    [OK] Pair Design converged and APPROVED in round {rnd}.")
+    def _design_sources(self, recon_text: str) -> list[dict]:
+        """Supply bounded, numbered source evidence for the modules named by recon."""
+        remaining = 80000
+        sources = []
+        extensions = {'.py', '.ts', '.tsx', '.js', '.jsx', '.go', '.rs', '.java', '.kt', '.cs', '.rb', '.php', '.c', '.h'}
+        for name in git(self.repo_root, 'ls-files', '-z').split('\x00'):
+            if not name or name not in recon_text or Path(name).suffix not in extensions:
+                continue
+            path = confined(self.repo_root, name)
+            if not path.is_file():
+                continue
+            text = path.read_text()
+            numbered = '\n'.join(f'{i}: {line}' for i, line in enumerate(text.splitlines(), 1))
+            limit = min(50000, remaining)
+            sources.append({'path': name, 'sha256': file_hash(path), 'truncated': len(numbered) > limit,
+                            'source': diagnostic_excerpt(numbered, limit)})
+            remaining -= min(limit, len(numbered))
+            if remaining <= 0 or len(sources) == 4:
                 break
+        return sources
 
-        adr_path = self.dir_design / "adr.md"
-        tm_path = self.dir_design / "threat-model.md"
-        dlg_path = self.dir_design / "pair-dialogue.md"
+    def run_phase_pair_design(self, round_limit=None, import_legacy=None) -> Tuple[Path, Path]:
+        """Run/resume pair design; the pipeline or resume entry point holds the lock."""
+        print(f'\n==> [{self.project_id} | Phase 2: 02-design] Persistent Pair Design...')
+        self.state.update(current_phase='02-design', current_step='pair-design')
+        self._save_state()
+        recon_text = (self.dir_recon / 'context-and-blast-radius.md').read_text()
+        req_text = (self.dir_po / 'requirements.md').read_text()
+        risk = self.state.get('risk_tier', 'M')
+        profile = self.state.get('dev_profile', 'ALGORITHMIC')
+        arch_engine, arch_model, _, _ = SquadDispatcher.dispatch_role('02-design-arch', risk, profile)
+        sec_engine, sec_model, _, _ = SquadDispatcher.dispatch_role('02-design-sec', risk, profile)
+        if not arch_model or not sec_model or arch_model.split('/')[-1] == sec_model.split('/')[-1]:
+            raise PlanError('Pair design requires an independent reviewer')
+        quality_path = self.dir_recon / 'quality-contract.json'
+        quality = json.loads(quality_path.read_text()) if quality_path.exists() else {}
+        try:
+            catalogue = requirement_catalogue(req_text)
+        except CatalogueError as exc:
+            raise PlanError(str(exc), exc.diagnostics) from exc
+        context = {'ticket_id': self.ticket_id, 'base_commit': self.state.get('base_commit'),
+                   'recon': recon_text, 'requirements': req_text, 'requirement_catalogue': catalogue,
+                   'quality_contract': quality, 'source_evidence': self._design_sources(recon_text)}
+        arch_prompt = (
+            'Draft or repair a complete ADR against the approved AC/SEC and quality obligations. '
+            'Preserve previous correct decisions and explicitly address all prior open findings. '
+            'Use exact files, interfaces, state transitions, error handling and meaningful behavioral tests. '
+            'Verify API signatures, persisted state keys, exception types and all retained evidence stores from source. '
+            'Cite source file/line evidence for interface and state claims; read full source when excerpts are truncated. '
+            'Do not invent state fields or assume the journal contains a plan. Inventory existing evidence, including '
+            'failed attempts and checkpoint preflight logs when present; explicitly define which inventory the '
+            'approved integrity requirement covers. Enumerate persistence boundaries and precise fault injection points. '
+            'Respect the documented threat model and scope; do not invent stronger external-writer guarantees. '
+            'Return the ADR as Markdown. History contains prior reviews; the previous ADR is the repair starting point.')
+        if profile == 'FRONTEND_UI' and not self._task_mode():
+            arch_prompt += (' Specify exact Design System tokens (import { space, shape, type, useTheme } from "@/theme/tokens"). '
+                            'Check COMPONENT_CATALOG.md and reuse existing primitives (<Button>, <Card>, <Loading>, <SecureImage>). '
+                            'Ensure Safe Area Insets via useSafeAreaInsets. Use vector/SVG icons (@expo/vector-icons or custom SVG), '
+                            'never raw Unicode glyphs. Do not invent a parallel design system.')
+        schema = (Path(__file__).parent / 'schemas/design-review.schema.json').read_text()
+        review_prompt = (
+            'Review the entire ADR comprehensively using STRIDE, the approved requirements, quality contract, '
+            'source evidence and cumulative history. Return only JSON matching the review schema. '
+            'Use analysis for STRIDE assessment, source-contract checks, races and stated limits. '
+            'Use task_ids=[] because implementation tasks do not exist yet. '
+            'Keep finding_id stable and explicitly resolve or retain every earlier open blocker using evidence. '
+            'Open blockers must cite approved AC/SEC, standards or checks and identify a concrete source/design contradiction. '
+            'Resolved schema diagnostics may have empty obligation references; never invent IDs for them. '
+            'Classify optional improvements as ADVISORY; do not expand scope or turn documented limitations into blockers. '
+            'Explain newly introduced or previously missed findings. Inspect source to verify signatures, state shapes, '
+            'all retained evidence and exception boundaries; do not demand implementation code before design approval. '
+            'Legacy prose reviews remain relevant: account for their unresolved concerns in the first structured review.\n' + schema)
+        routing = {role: [engine, model, [SquadDispatcher.resolve_reasoning_effort(role, risk, attempt=i) for i in range(1, 9)]]
+                   for role, engine, model in [('02-design-arch', arch_engine, arch_model), ('02-design-sec', sec_engine, sec_model)]}
+        def invoke(role, engine, model, system, user, rnd):
+            effort = routing[role][2][rnd - 1]
+            print(f'[02-design] {role} round {rnd}: {engine}:{model}, reasoning={effort}', flush=True)
+            start = time.time()
+            out, cost, tin, tout, trace = EngineRunner.invoke_role(
+                engine, model, system, json.dumps(user, indent=2), self.repo_root,
+                self.project_id, self.ticket_id, f'{role}-r{rnd}', reasoning_effort=effort)
+            self.record_ledger(CostAndTelemetryEntry(f'{role}-r{rnd}', role, engine, model, 'GENERATED',
+                                                    time.time() - start, cost, tin, tout, trace, effort))
+            return out
+        def architect(rnd, previous, history):
+            return invoke('02-design-arch', arch_engine, arch_model, arch_prompt,
+                          {'context': context, 'previous_adr': previous, 'review_history': history}, rnd)
+        def reviewer(rnd, adr, history):
+            return invoke('02-design-sec', sec_engine, sec_model, review_prompt,
+                          {'context': context, 'adr': adr, 'review_history': history}, rnd)
+        def artifact(path):
+            self.record_artifact(str(path.relative_to(self.ssdlc_root)), path)
+        session = DesignSession(self.dir_design,
+                                {'context': context, 'architect_prompt': arch_prompt, 'review_prompt': review_prompt,
+                                 'routing': routing}, architect, reviewer, self.check_budget_circuit_breaker, artifact,
+                                initial_limit=int(os.environ.get('SSDLC_MAX_DESIGN_ROUNDS', '5')), extend_limit=round_limit)
+        if import_legacy:
+            legacy = confined(self.dir_design, import_legacy, protect=False)
+            if not legacy.is_dir():
+                raise PlanError('Legacy round directory does not exist')
+            numbered = []
+            for path in legacy.glob('adr-round-*.md'):
+                match = re.fullmatch(r'adr-round-(\d+)\.md', path.name)
+                if match:
+                    numbered.append((int(match[1]), path))
+            numbered.sort()
+            if not numbered or [n for n, _ in numbered] != list(range(1, len(numbered) + 1)):
+                raise PlanError('Legacy round sequence is missing or ambiguous')
+            rounds = []
+            for index, adr in numbered:
+                row = {}
+                for field, path in [('adr', adr), ('review', legacy / f'security-review-round-{index}.md')]:
+                    path = confined(legacy, path.name, protect=False)
+                    if not path.exists() and field == 'review' and index == len(numbered):
+                        continue
+                    name = str(path.relative_to(self.ssdlc_root))
+                    meta = self.state.get('artifacts', {}).get(name)
+                    if not meta or not path.is_file() or file_hash(path) != meta['sha256']:
+                        raise PlanError(f'Legacy design evidence is missing, unregistered or changed: {name}')
+                    row[field] = path.read_text()
+                rounds.append(row)
+            session.import_legacy(rounds)
+        elif not session.path.exists() and any(name in ('02-design/adr.md', '02-design/pair-dialogue.md') or name.startswith('02-design/rounds/')
+                                               for name in self.state.get('artifacts', {})):
+            raise PlanError('Existing design needs explicit --import-legacy from its verified round directory')
+        try:
+            adr, review = session.run()
+        except Exception as exc:
+            self.record_gate('PAIR_DESIGN_GATE', False, str(exc))
+            raise
+        assessment = parse_plan_output(review)
+        threat_model = '# STRIDE & Systems Review\n\n' + assessment['analysis'] + '\n\n## Findings\n\n'
+        threat_model += '\n\n'.join(f"- {f['finding_id']} [{f['status']}, {f['severity']}]: {f['message']}\n  Evidence: {f['evidence']}"
+                                    for f in assessment['findings']) or 'No findings.'
+        threat_model += '\n\nDESIGN_STATUS: APPROVED\n'
+        for name, text in [('adr.md', adr), ('threat-model.md', threat_model), ('pair-dialogue.md', session.transcript())]:
+            path = self.dir_design / name
+            meta = self.state.get('artifacts', {}).get('02-design/' + name)
+            if path.exists() and (not meta or file_hash(path) != meta['sha256']):
+                raise PlanError('Existing design projection is unregistered or changed')
+            path.write_text(text)
+            artifact(path)
+        self.record_gate('PAIR_DESIGN_GATE', True, 'Persistent ADR and independently approved structured review')
+        return self.dir_design / 'adr.md', self.dir_design / 'threat-model.md'
 
-        adr_path.write_text(current_adr, encoding="utf-8")
-        tm_path.write_text(current_threat_model, encoding="utf-8")
-        dlg_path.write_text("\n".join(dialogue_log), encoding="utf-8")
-
-        self.record_artifact("02-design/adr.md", adr_path)
-        self.record_artifact("02-design/threat-model.md", tm_path)
-        self.record_artifact("02-design/pair-dialogue.md", dlg_path)
-        self.record_gate(
-            "PAIR_DESIGN_GATE",
-            approved,
-            f"Completed in {rnd} round(s) (explicit approval={approved}).",
-        )
-        if not approved:
-            raise RuntimeError("Pair design did not receive explicit approval")
-        return adr_path, tm_path
+    def resume_pair_design(self, round_limit=None, import_legacy=None) -> Tuple[Path, Path]:
+        """Resume design only against sealed upstream artifacts; never execute code."""
+        with ticket_lock(self.ssdlc_root / 'ticket.lock'):
+            self.state = self._load_or_init_state()
+            if self.worktree_dir.exists() or (self.dir_design / 'plan.json').exists():
+                raise PlanError('Planning or execution already started; explicit design migration required')
+            for gate in ('RECON_BLAST_RADIUS_GATE', 'PO_SPEC_GATE'):
+                history = [g for g in self.state.get('gate_history', []) if g['gate'] == gate]
+                if not history or not history[-1]['passed']:
+                    raise PlanError(f'Design requires approved upstream gate: {gate}')
+            required = ['00-recon/context-and-blast-radius.md', '01-po/requirements.md']
+            if self._task_mode():
+                required.append('00-recon/quality-contract.json')
+            for name in required:
+                meta = self.state.get('artifacts', {}).get(name)
+                path = self.ssdlc_root / name
+                if not meta or not path.is_file() or file_hash(path) != meta['sha256']:
+                    raise PlanError(f'Design input changed or disappeared: {name}')
+            if git(self.repo_root, 'rev-parse', 'HEAD') != self.state['base_commit'] or git(self.repo_root, 'status', '--porcelain'):
+                raise PlanError('Design requires the unchanged clean target baseline')
+            self.state.update(status='IN_PROGRESS', current_phase='02-design', current_step='pair-design')
+            self.state.pop('failure', None)
+            self._save_state()
+            try:
+                result = self.run_phase_pair_design(round_limit, import_legacy)
+            except Exception as exc:
+                self.state.update(status='FAILED', failure={'phase': '02-design', 'message': str(exc)})
+                self._save_state()
+                raise
+            self.state.update(status='DESIGN_READY')
+            self.state.pop('failure', None)
+            self._save_state()
+            return result
 
     # ------------------------------------------------------------------
     # PHASE 3: Developer (Isolated Git Worktree)
@@ -2317,6 +2432,24 @@ class SSDLCOrchestrator:
     # ------------------------------------------------------------------
     # PHASE 4: Code Reviewer (+ Conditional DB & Perf/SRE Specialist Lenses)
     # ------------------------------------------------------------------
+    def _verified_task_review_input(self, diff_text: str) -> Tuple[Path, int]:
+        try:
+            diff_limit = int(os.environ.get('SSDLC_REVIEW_MAX_DIFF_CHARS', '200000'))
+        except ValueError as exc:
+            raise TaskError('SSDLC_REVIEW_MAX_DIFF_CHARS must be a positive integer') from exc
+        if not 1 <= diff_limit <= 1000000:
+            raise TaskError('SSDLC_REVIEW_MAX_DIFF_CHARS must be between 1 and 1000000')
+        if len(diff_text) > diff_limit:
+            raise TaskError(f'Full review diff ({len(diff_text)} chars) exceeds configured review budget ({diff_limit}); no truncation performed')
+        if (not self.worktree_dir.is_dir() or not self.state.get('task_verified_head')
+                or git(self.worktree_dir, 'rev-parse', 'HEAD') != self.state['task_verified_head']
+                or git(self.worktree_dir, 'status', '--porcelain')):
+            raise TaskError('Code review requires the clean verified task checkpoint')
+        expected_diff = git(self.worktree_dir, 'diff', '--binary', self.state['base_commit'], 'HEAD') + '\n'
+        if diff_text != expected_diff:
+            raise TaskError('Review diff differs from the verified cumulative checkpoint')
+        return self.worktree_dir, diff_limit
+
     def run_phase_review(self, attempt: int = 1) -> Tuple[bool, str]:
         risk_tier = self.state.get("risk_tier", "M")
         dev_profile = self.state.get("dev_profile", "ALGORITHMIC")
@@ -2364,8 +2497,7 @@ class SSDLCOrchestrator:
             )
 
         if self._task_mode():
-            if len(diff_text) > 60000:
-                raise TaskError("Bootstrap review cannot truncate the cumulative diff; split this ticket")
+            _, diff_limit = self._verified_task_review_input(diff_text)
             ui_review_rules = (
                 "\nPROJECT QUALITY CONTRACT (apply the actual project rules, including test/config changes):\n"
                 + (self.dir_recon / "quality-contract.json").read_text()
@@ -2404,13 +2536,23 @@ class SSDLCOrchestrator:
             f"PO REQUIREMENTS:\n{req_text}\n\n"
             f"ADR:\n{adr_text}\n\n"
             f"THREAT MODEL:\n{tm_text}\n\n"
-            f"GIT DIFF TO REVIEW:\n```diff\n{diff_text[:60000]}\n```"
+            f"GIT DIFF TO REVIEW:\n```diff\n{diff_text if self._task_mode() else diff_text[:60000]}\n```"
         )
+
+        review_cwd = self.worktree_dir if self._task_mode() else self.repo_root
+        review_run = self.dir_review / 'runs' / uuid.uuid4().hex
+        review_run.mkdir(parents=True)
+        inputs_path = review_run / 'inputs.json'
+        atomic_json(inputs_path, {'verified_head': self.state.get('task_verified_head'), 'review_cwd': str(review_cwd),
+                                 'diff_chars': len(diff_text), 'diff_char_budget': diff_limit if self._task_mode() else 60000,
+                                 'system_prompt': sys_prompt, 'user_prompt': user_prompt, 'review_models': review_models})
+        self.record_artifact(str(inputs_path.relative_to(self.ssdlc_root)), inputs_path)
 
         combined_reviews: List[str] = [f"# Multi-Model Code Review Report (Attempt {attempt}, reasoning={rev_effort})\n"]
         all_approved = True
 
-        for mdl in review_models:
+        for reviewer_index, mdl in enumerate(review_models, 1):
+            self.check_budget_circuit_breaker()
             if ":" in mdl and not mdl.startswith("http"):
                 effective_engine, effective_model = mdl.split(":", 1)
             else:
@@ -2423,7 +2565,7 @@ class SSDLCOrchestrator:
                 effective_model,
                 sys_prompt,
                 user_prompt,
-                self.repo_root,
+                review_cwd,
                 self.project_id,
                 self.ticket_id,
                 f"04-review-a{attempt}",
@@ -2432,7 +2574,12 @@ class SSDLCOrchestrator:
             )
             dur = time.time() - t0
             verdict = parse_review_verdict(rev_out)
-            passed = verdict == "APPROVED"
+            raw_review = review_run / f'reviewer-{reviewer_index}.md'
+            raw_review.write_text(rev_out)
+            self.record_artifact(str(raw_review.relative_to(self.ssdlc_root)), raw_review)
+            input_changed = self._task_mode() and (git(review_cwd, 'rev-parse', 'HEAD') != self.state['task_verified_head']
+                                                   or bool(git(review_cwd, 'status', '--porcelain')))
+            passed = verdict == "APPROVED" and not input_changed
             if not passed:
                 all_approved = False
             self.record_ledger(
@@ -2441,7 +2588,7 @@ class SSDLCOrchestrator:
                     "Code Reviewer",
                     effective_engine,
                     effective_model,
-                    verdict or "INVALID_VERDICT",
+                    'INPUT_CHANGED' if input_changed else verdict or "INVALID_VERDICT",
                     dur,
                     cost,
                     tin,
@@ -2450,6 +2597,10 @@ class SSDLCOrchestrator:
                     reasoning_effort=rev_effort,
                 )
             )
+            self.check_budget_circuit_breaker()
+            if input_changed:
+                self.record_gate(f'CODE_REVIEW_A{attempt}', False, 'Verified checkpoint changed during review')
+                raise TaskError('Verified checkpoint changed during review; approval withheld')
             verdict_note = "Invalid or ambiguous final verdict; approval withheld.\n\n" if verdict is None else ""
             combined_reviews.append(f"## Reviewer: `{effective_engine}:{effective_model}` ({verdict or 'INVALID_VERDICT'}, reasoning={rev_effort})\n\n{verdict_note}{rev_out}\n\n---\n")
 
@@ -2556,6 +2707,9 @@ class SSDLCOrchestrator:
         diff_text = self._read_optional(self.dir_dev / "implementation.diff", "")
 
         ui_qa_rules = ""
+        qa_cwd = self.repo_root
+        if self._task_mode():
+            qa_cwd, _ = self._verified_task_review_input(diff_text)
         if dev_profile == "FRONTEND_UI":
             ui_qa_rules = (
                 "\n\nMANDATORY UI/UX ACCEPTANCE VERIFICATION:\n"
@@ -2574,16 +2728,25 @@ class SSDLCOrchestrator:
             "2. ## Edge Cases & Behavioral Verification Analysis\n"
             "3. ## Verdict\n"
             "At the very end, output EXACTLY one of:\n"
-            "QA_STATUS: PASSED (only if all ACs, SEC items, and deterministic tests pass)\n"
+            "QA_STATUS: PASSED\n"
             "or\n"
-            "QA_STATUS: FAILED (if any AC, SEC item, or test fails)"
+            "QA_STATUS: FAILED\n"
+            "Use PASSED only when all ACs, SEC items and deterministic checks pass. "
+            "Emit exactly one verdict marker as the final standalone line, without annotations or code fences."
         )
         user_prompt = (
             f"PO REQUIREMENTS:\n{req_text}\n\n"
             f"THREAT MODEL:\n{tm_text}\n\n"
             f"DETERMINISTIC TEST & SCAN LOGS:\n{det_logs}\n\n"
-            f"IMPLEMENTATION DIFF:\n```diff\n{diff_text[:60000]}\n```"
+            f"IMPLEMENTATION DIFF:\n```diff\n{diff_text if self._task_mode() else diff_text[:60000]}\n```"
         )
+
+        qa_run = self.dir_qa / 'runs' / uuid.uuid4().hex
+        qa_run.mkdir(parents=True)
+        input_path = qa_run / 'inputs.json'
+        atomic_json(input_path, {'verified_head': self.state.get('task_verified_head'), 'qa_cwd': str(qa_cwd),
+                                 'system_prompt': sys_prompt, 'user_prompt': user_prompt})
+        self.record_artifact(str(input_path.relative_to(self.ssdlc_root)), input_path)
 
         t0 = time.time()
         qa_out, cost, tin, tout, trace_user = EngineRunner.invoke_role(
@@ -2591,7 +2754,7 @@ class SSDLCOrchestrator:
             qa_model,
             sys_prompt,
             user_prompt,
-            self.repo_root,
+            qa_cwd,
             self.project_id,
             self.ticket_id,
             f"05-qa-a{attempt}",
@@ -2600,8 +2763,14 @@ class SSDLCOrchestrator:
         )
         dur = time.time() - t0
 
-        llm_qa_ok = "QA_STATUS: PASSED" in qa_out
-        final_qa_ok = det_ok and llm_qa_ok
+        qa_verdict = parse_qa_verdict(qa_out)
+        llm_qa_ok = qa_verdict == 'PASSED'
+        input_changed = self._task_mode() and (git(qa_cwd, 'rev-parse', 'HEAD') != self.state['task_verified_head']
+                                               or bool(git(qa_cwd, 'status', '--porcelain')))
+        final_qa_ok = det_ok and llm_qa_ok and not input_changed
+        raw_path = qa_run / 'response.md'
+        raw_path.write_text(qa_out)
+        self.record_artifact(str(raw_path.relative_to(self.ssdlc_root)), raw_path)
 
         qa_path = self.dir_qa / "qa-traceability-matrix.md"
         qa_path.write_text(qa_out, encoding="utf-8")
@@ -2612,7 +2781,7 @@ class SSDLCOrchestrator:
                 "QA & Security Verifier",
                 qa_engine,
                 qa_model,
-                "PASSED" if final_qa_ok else "FAILED",
+                'INPUT_CHANGED' if input_changed else 'INVALID_VERDICT' if qa_verdict is None else "PASSED" if final_qa_ok else "FAILED",
                 dur,
                 cost,
                 tin,
@@ -2624,7 +2793,7 @@ class SSDLCOrchestrator:
         self.record_gate(
             f"QA_VERIFICATION_A{attempt}",
             final_qa_ok,
-            f"deterministic_ok={det_ok}, ac_matrix_ok={llm_qa_ok}, reasoning={qa_effort}",
+            f"deterministic_ok={det_ok}, ac_matrix_ok={llm_qa_ok}, input_changed={input_changed}, reasoning={qa_effort}",
         )
         print(f"    [{'OK' if final_qa_ok else 'BOUNCE'}] QA Gate status: {'PASSED' if final_qa_ok else 'FAILED'}")
         return final_qa_ok, f"{det_logs}\n\n{qa_out}"
@@ -3063,8 +3232,20 @@ To **REJECT** and send feedback back to the team:
             try:
                 return self._run_pipeline(goal, test_cmd, tier, from_phase)
             except TaskError as exc:
+                failed_phase = self.state.get('current_phase')
+                failed_step = self.state.get('current_step')
+                failed_status = self.state.get('status')
+                self.state['failure'] = {'phase': failed_phase, 'type': type(exc).__name__,
+                                         'category': getattr(exc, 'category', 'TASK_EXECUTION'), 'message': str(exc)}
                 self.record_gate("TASK_EXECUTION_GATE", False, str(exc))
-                self.compile_evidence_pack(ready_for_signoff=False)
+                try:
+                    self.compile_evidence_pack(ready_for_signoff=False)
+                finally:
+                    status = ('HALTED_BUDGET_EXCEEDED' if failed_status == 'HALTED_BUDGET_EXCEEDED'
+                              else 'ESCALATED_TO_SUPERVISOR' if self.state.get('status') == 'ESCALATED_TO_SUPERVISOR'
+                              else 'FAILED')
+                    self.state.update(status=status, current_phase=failed_phase, current_step=failed_step)
+                    self._save_state()
                 raise
 
     def _run_pipeline(
@@ -3354,6 +3535,15 @@ def main() -> int:
     p_plan.add_argument("--ticket", required=True)
     p_plan.add_argument("--repo", "-r", default=".")
     p_plan.add_argument("--review-repairs", type=int, choices=range(5), default=None, help="Explicitly extend the persisted semantic repair allowance (0-4)")
+    p_plan.add_argument('--recover-review', action='store_true', help='Explicitly revalidate an archived rejected review after a validator fix, preserving attempt counts')
+
+    p_design = sub.add_parser('design', help='Resume pair design from its persisted ADR and review history')
+    p_design.add_argument('--ticket', required=True)
+    p_design.add_argument('--repo', '-r', default='.')
+    p_design.add_argument('--rounds', type=int, choices=range(1, 9), default=None,
+                          help='Explicit total round limit (1-8), preserving consumed rounds')
+    p_design.add_argument('--import-legacy', default=None,
+                          help='Import a verified legacy directory relative to 02-design, e.g. rounds/UUID')
 
     p_app = sub.add_parser("approve", help="Supervisor sign-off: commit worktree changes, merge, and prune worktree")
     p_app.add_argument("ticket", help="Ticket ID")
@@ -3383,7 +3573,12 @@ def main() -> int:
 
     if args.subcommand == "plan":
         orch = SSDLCOrchestrator(repo_path, args.ticket, sync_remote=False)
-        print(orch.resume_task_planning(review_repairs=args.review_repairs))
+        print(orch.resume_task_planning(review_repairs=args.review_repairs, recover_review=args.recover_review))
+        return 0
+
+    if args.subcommand == 'design':
+        orch = SSDLCOrchestrator(repo_path, args.ticket, sync_remote=False)
+        print(orch.resume_pair_design(round_limit=args.rounds, import_legacy=args.import_legacy))
         return 0
 
     if args.subcommand == "run":

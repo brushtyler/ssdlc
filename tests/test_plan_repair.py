@@ -154,7 +154,8 @@ class PlanRepairTests(unittest.TestCase):
         plan['tasks'].append(duplicate)
         with self.assertRaises(PlanError) as caught:
             TaskPlanValidator(self.root, 'AC-1 AC-2', quality).validate(plan)
-        self.assertEqual([d['task_id'] for d in caught.exception.diagnostics], [task['task_id'], 'T2'])
+        self.assertEqual([d['task_id'] for d in caught.exception.diagnostics
+                          if d['code'] == 'MISSING_VERIFICATION_REF'], [task['task_id'], 'T2'])
 
 
 from unittest.mock import patch

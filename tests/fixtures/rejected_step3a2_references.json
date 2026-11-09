@@ -1,0 +1,1195 @@
+{
+  "source_ticket": "STEP3A2-REVALIDATE",
+  "note": "Reference fields extracted unchanged from the three rejected planning candidates. Executable commands are intentionally not replayed.",
+  "requirements": "# Specification: Step 3a.2, Verification-Based Revalidation (`TaskScheduler.revalidate()`)\n\nRISK_TIER: M \u00b7 DEV_PROFILE: ALGORITHMIC \u00b7 Scope: `ssdlc_tasks.py`, `tests/test_task_bootstrap.py` only.\n\nI wrote this from the recon report and your goal statement. I did not re-read `PLAN_TASK_ROUTING_AND_SUBGOALS.md` or the source. Names such as `_verify`, `_evidence_valid` and `peek()` come from the recon and should be checked against the code during implementation.\n\n---\n\n## 1. Overview & Business Goal\n\nStep 3a.1 added `TaskScheduler.invalidate()`, which marks a task and its downstream closure `INVALIDATED`. `run()` then refuses to proceed. There is currently no way back to `COMPLETED` other than re-running the developer.\n\nStep 3a.2 adds `TaskScheduler.revalidate()`. It re-establishes trust in invalidated work by re-running verification only. It does not invoke the developer, change source or Git HEAD, or create commits. Each task is restored to `COMPLETED` only if its declared checks and the required project checks pass against the current verified HEAD/tree.\n\nGoals:\n- Cheap, deterministic recovery when invalidation was precautionary.\n- Honest failure reporting, with task-attributed diagnostics and blocked-task reporting.\n- Crash-safe progress, with the journal as the sole authority.\n\nNon-goals (explicit exclusions):\n- Developer correction or bounce.\n- Plan or requirements migration.\n- Overlapping invalidation operations.\n- Advanced-target merges, routing and shared-budget redesign.\n- Advisory and authentication changes.\n- Generic controller cleanup.\n- Exact external invocation accounting. Attempt reservations stay conservative across crashes.\n\nThe pinned executing controller checkout must remain unchanged. No schema, dependency or journal-format breakage is allowed, and existing assertions must keep passing.\n\n---\n\n## 2. User Stories\n\n- **US-1 (Operator):** As an operator, after a precautionary `invalidate()`, I want to run `revalidate()` so that tasks whose checks still pass return to `COMPLETED` without spending developer attempts or creating commits.\n- **US-2 (Operator):** As an operator, I want a structured result listing passed, failed and blocked tasks, with task-attributed diagnostics, so I can see which tasks need attention without guessing ownership.\n- **US-3 (Operator):** As an operator, I want `run()` to keep refusing while any task is `INVALIDATED` and to resume normally once all are revalidated.\n- **US-4 (Operator):** As an operator, I want interrupted revalidation to be safe to restart, so a crash never yields a falsely `COMPLETED` task or skips required checks.\n- **US-5 (Auditor):** As an auditor, I want original producer/commit provenance and all prior verification logs preserved, with new evidence in fresh paths and an append-only audit trail.\n- **US-6 (Security reviewer):** As a security reviewer, I want altered inputs, tampered evidence, dirty or moved HEAD, and verifier-induced mutation to stop revalidation without laundering invalidated work, and without the docs overstating the guarantees.\n\n---\n\n## 3. Testable Acceptance Criteria\n\nThe five requested criteria are kept as AC-1 to AC-5. Each is split into sub-cases (a, b, \u2026) that the tests must cover. Fixture: tasks A \u2192 B \u2192 C plus unrelated D, all `COMPLETED` before invalidation.\n\n### AC-1: Eligibility, locking and pre-check validation\n\n- **AC-1a.** *Given* a ticket journal where every task is `COMPLETED` or `INVALIDATED` and at least one is `INVALIDATED`, *when* `revalidate()` is called, *then* it acquires `ticket_lock` before any journal read for decision-making or any write, and holds it until it returns.\n- **AC-1b.** *Given* another scheduler process holds the ticket lock, *when* `revalidate()` is called, *then* it blocks or refuses using the same mechanism as `invalidate()`/`run()`. No verifier call occurs and no journal event is appended.\n- **AC-1c.** *Given* no journal exists, or any task is in a state other than `COMPLETED`/`INVALIDATED` (for example `PENDING`, `RUNNING` or `FAILED`), *when* `revalidate()` is called, *then* it raises a clear refusal error. There are no verifier calls and no state change.\n- **AC-1d.** *Given* a journal with no `INVALIDATED` task, *when* `revalidate()` is called, *then* it returns a result with empty passed/failed/blocked lists. It runs no checks and changes no state. Whether it appends an audit event is an implementation choice, but the choice must be tested.\n- **AC-1e.** *Given* the plan, quality contract or context digest differs from the journal's recorded fingerprint, *when* `revalidate()` is called, *then* it refuses before running any check. Every task remains in its prior state. Invalidated tasks stay `INVALIDATED`.\n- **AC-1f.** *Given* the Git HEAD differs from the expected verified HEAD, or the worktree is dirty (per the existing `_assert_clean()` semantics), *when* `revalidate()` is called, *then* it refuses before running any check.\n- **AC-1g.** *Given* a protected-path snapshot or ignored-path baseline no longer matches, *when* `revalidate()` is called, *then* it refuses before running any check.\n- **AC-1h.** *Given* retained evidence for a task (including `INVALIDATED` tasks and the unrelated `COMPLETED` task D) is missing or its check-log hash mismatches (per `_evidence_valid()`), *when* `revalidate()` is called, *then* it refuses before running any check. It never transitions that task to `COMPLETED`.\n- **AC-1i.** *Given* any refusal in AC-1c to AC-1h, *then* no `INVALIDATED` task becomes `COMPLETED`.\n- **AC-1j.** The docstring or README note for `revalidate()` states the bootstrap's documented limits: fingerprints and hashes are unkeyed integrity checks, not authentication. Ignored-file contents are not verified. Arbitrary external writers are not excluded by the lock. No stronger claim is made.\n\n### AC-2: Ordered verification, outcomes and result\n\n- **AC-2a.** *Given* A, B and C are `INVALIDATED` (D `COMPLETED`), *when* `revalidate()` runs and all checks pass, *then* tasks are verified in deterministic topological DAG order (A, B, C). The verifier callback's recorded invocation order proves this. Repeated runs from identical state give identical order.\n- **AC-2b.** For each visited task, the verifier is run with the task's declared executable checks followed by the project's required quality checks, using the supplied verifier callback. The same check set and order apply as in the normal verification path (`_verify()`).\n- **AC-2c.** *Given* a task passes all checks, *then* it transitions to `COMPLETED` with fresh verification evidence. The evidence records the current verified HEAD and tree identifier and is stored in a fresh evidence path.\n- **AC-2d.** *Given* B fails a check, *then* B remains `INVALIDATED` and the result contains a structured diagnostic for B. The diagnostic includes the task id, the failing check name and its outcome, and the evidence/log path and hash. There is no inferred ownership, no auto-correction and no label manipulation.\n- **AC-2e.** *Given* B failed and C depends on B, *then* C is reported as `blocked` with the blocking dependency id(s). C's checks are not run and C remains `INVALIDATED`. A is unaffected by B's failure and is `COMPLETED`.\n- **AC-2f.** *Given* a later `revalidate()` call after the B failure has been resolved outside this operation (for example the verifier now passes), *then* B and C are revalidated in order and become `COMPLETED`. A, already `COMPLETED`, is not rechecked.\n- **AC-2g.** The result is a structured value (for example a dataclass or dict) with at least `passed`, `failed` and `blocked`. Each entry is task-attributed, and failed entries carry diagnostics. `failed` and `blocked` are disjoint. Every task that was `INVALIDATED` at entry appears in exactly one list.\n- **AC-2h.** Failures are returned in the result, not suppressed or relabelled to look like success. Whether `revalidate()` also raises is unspecified. If it does not raise, the caller must be able to tell from the result that work remains.\n\n### AC-3: Non-mutation, provenance and `run()` interplay\n\n- **AC-3a.** The developer callback is never invoked during `revalidate()`. A fake developer asserts zero calls in all scenarios, including failure and recovery.\n- **AC-3b.** Git HEAD is identical before and after `revalidate()`, and no commit is created. Test via the commit count and the HEAD SHA.\n- **AC-3c.** Source files are neither reset nor rewritten by `revalidate()`.\n- **AC-3d.** Per-task developer attempt counters are unchanged, and no attempt reservation is created.\n- **AC-3e.** Original producer and commit provenance fields are unchanged after revalidation. Prior verification logs remain on disk with identical bytes and hashes.\n- **AC-3f.** Revalidation writes to evidence paths that did not previously exist (a new directory per attempt). It never overwrites an existing artifact. The journal gains appended events, and no earlier event is rewritten.\n- **AC-3g.** Unrelated completed task D is not re-verified: the verifier receives no call for D. D's state and evidence are unchanged.\n- **AC-3h.** *Given* any task remains `INVALIDATED` after `revalidate()`, *when* `run()` is called, *then* it still refuses, preserving the Step 3a.1 behavior. *Given* all tasks are `COMPLETED` after successful revalidation, *when* `run()` is called, *then* it proceeds normally.\n\n### AC-4: Crash safety, recovery and safe stop\n\n- **AC-4a.** The journal records revalidation progress before each check runs, and records each check's completion with its evidence, as the existing `_verify()` does. A task's `COMPLETED` transition is appended only after all its checks have passed.\n- **AC-4b.** *Given* the process is interrupted (simulated by an exception from the verifier or a patched journal append) in the middle of a task's checks, *when* the journal is reloaded and `revalidate()` is called again, *then* the task is `INVALIDATED`, not `COMPLETED`. Required checks are re-run in full into a fresh evidence directory. The earlier interrupted attempt's partial evidence is preserved on disk.\n- **AC-4c.** *Given* a crash after a journal append but before the snapshot write, *when* the journal is loaded, *then* state is recovered from the authoritative journal (the snapshot is repaired). The next `revalidate()` neither loses nor duplicates completed work.\n- **AC-4d.** *Given* a prior `revalidate()` fully completed (all tasks `COMPLETED`), *when* `revalidate()` is called again with inputs, HEAD and evidence still valid, *then* the completed result is reused. No verifier calls are made, and the result reports nothing to do. *Given* inputs, HEAD or evidence are no longer valid, *then* the AC-1 refusal applies.\n- **AC-4e.** *Given* the verifier leaves source files modified, changes HEAD, or alters protected or ignored-baseline paths during a check, *when* the check returns, *then* revalidation stops safely. The task is not marked `COMPLETED`, and no developer is invoked. The result or error attributes the stop to that task and describes the mutation. Later tasks are not verified.\n- **AC-4f.** A restart at each persistence boundary leaves state that is safe: no task is `COMPLETED` without a complete passing evidence set for the current HEAD/tree. Byte-identical journals across recovery events are not required.\n\n### AC-5: Test suite\n\nNew tests in `tests/test_task_bootstrap.py` use fake developer/verifier callbacks and fake Git repositories, with no real providers. They cover at least:\n- (a) all-pass ordered revalidation, with zero developer calls and no new commits (AC-2a, AC-2c, AC-3a, AC-3b);\n- (b) B fails and C is blocked, with D untouched (AC-2d, AC-2e, AC-3g);\n- (c) later success recovers B and C (AC-2f);\n- (d) developer counters and prior logs survive (AC-3d, AC-3e);\n- (e) restarts at check and persistence boundaries are safe (AC-4b, AC-4c, AC-4d);\n- (f) invalid fingerprint, evidence, protected/ignored paths, dirty source, moved HEAD, and concurrent lock ownership block correctly (AC-1b to AC-1i);\n- (g) verifier-induced mutation stops safely (AC-4e);\n- (h) `run()` refuses while any task is invalidated and resumes after revalidation (AC-3h).\n\nAll pre-existing assertions are preserved unmodified. `python3 -m unittest discover -s tests -v` passes in full.\n\n---\n\n## 4. Security Requirements & Abuse Cases\n\n- **SEC-1 (No laundering).** An `INVALIDATED` task becomes `COMPLETED` only via a recorded, complete, passing verification against the current verified HEAD/tree. Abuse case: altered inputs or evidence followed by `revalidate()` must refuse (AC-1e to AC-1i).\n- **SEC-2 (Evidence integrity).** All retained evidence, including that of unrelated completed tasks, is hash-checked before any check runs. Abuse case: a tampered or deleted check log. The result is refusal with a task-attributed reason.\n- **SEC-3 (Verifier-induced mutation).** The verifier is untrusted to the extent that it may modify the worktree. After each check, source cleanliness, protected paths, ignored baseline and HEAD are re-validated before completion is recorded (AC-4e). Abuse case: a verifier that rewrites source to make checks pass or commits changes.\n- **SEC-4 (No developer or provider invocation).** `revalidate()` has no code path that reaches the developer callback or any provider. The test fake fails the test if it is called.\n- **SEC-5 (Append-only audit).** Existing artifacts and journal events are never overwritten or deleted. Fresh evidence paths are used for every attempt, including retries after interruption. Abuse case: a path collision with a prior attempt must not clobber the old evidence. A new path is allocated, or the operation fails safely.\n- **SEC-6 (Lock discipline).** All journal decisions and writes are made under `ticket_lock`. Abuse case: concurrent `invalidate()`, `run()` or `revalidate()` from another scheduler process. The second is refused or blocked and corrupts nothing. The lock does not constrain arbitrary external writers, and this is documented.\n- **SEC-7 (Authoritative journal).** Recovery uses the hash-chained journal, not the snapshot. A stale or tampered snapshot never grants `COMPLETED` status. Eligibility decisions are made from the loaded, repaired journal state.\n- **SEC-8 (Honest guarantees).** Code comments, docstrings and docs make no claim beyond unkeyed integrity checking. They do not claim protection against a malicious external writer, ignored-file content tampering, or hash forgery (AC-1j).\n- **SEC-9 (Blocking over silent pass).** A task whose dependency is `INVALIDATED` is never completed, and its checks are not run (AC-2e). An unknown or inconsistent dependency graph refuses.\n- **SEC-10 (Scope containment).** The controller checkout and files outside `ssdlc_tasks.py` and `tests/test_task_bootstrap.py` are unmodified. Verify with `git diff --stat`.\n\n---\n\n## 5. Non-Functional & Observability Requirements\n\n**Logging and audit events**\n- Journal events are appended for revalidation start, each task's in-progress marker, each check's completion with log path and hash, each task's pass or fail outcome, blocked tasks, and an interrupted or aborted stop.\n- Each event records the task id, the verified HEAD/tree, and the fresh evidence directory.\n- Event schemas and journal hash-chain semantics stay compatible. Older journals must still load, and existing event types are not repurposed. New event types or fields must be tolerated by `load()`, `peek()` and replay.\n\n**Diagnostics**\n- Failure diagnostics are structured and machine-readable: task id, check name, exit status or outcome, and log path. They contain no secrets or environment dumps beyond what existing verification evidence already holds.\n\n**Metrics**\n- No new metrics infrastructure. The result's counts (passed, failed, blocked, skipped/unrelated) serve as the observability surface.\n\n**Rollback and recovery**\n- Revalidation is additive. Reverting the code leaves journals readable, with unknown events handled per existing replay behavior or documented as such.\n- An interrupted run is resumable by calling `revalidate()` again (AC-4b). A partial attempt's evidence is preserved, never deleted.\n- Existing attempt reservations remain conservative across crashes. No exact external invocation accounting is promised.\n\n**Performance and compatibility**\n- Checks run only for `INVALIDATED` tasks. Completed unrelated tasks are not rechecked.\n- Python 3 standard library only, no new dependencies.\n- Existing behavior of `run()`, `invalidate()`, locking and evidence is unchanged.\n\n**Planning constraints (for the downstream task breakdown)**\n- At most three coherent tasks, each pairing code with its tests. Tests are not deferred to a final task.\n- Preparatory refactors may carry empty requirement refs and need only local regression checks.\n- Every AC or SEC reference claimed by a task needs a meaningful executable check in that task.\n- `contract_refs` are ADR-relative paths or anchors, not ticket-root quality-contract paths.",
+  "contracts": {
+    "adr.md": "# ADR-3a.2: Verification-Based Revalidation (`TaskScheduler.revalidate()`)\n## 1. Context and verified code facts\n## 2. Decision\n## 3. Interfaces\n### 3.1 Public API\n### 3.2 Private helpers\n### 3.3 `run()` change\n## 4. State and journal impact\n### 4.1 Event attribution\n## 5. Algorithm\n### 5.1 Persistence ordering\n### 5.2 Fail-closed abort path (R2)\n## 6. Error handling\n## 7. Test strategy\n## 8. Task breakdown\n## 9. Risks and residual limits\n### 9.1 Rollback\n## 10. Critique resolution map"
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "tasks": [
+        {
+          "task_id": "T1-preflight-helpers",
+          "ac_refs": [
+            "AC-1a",
+            "AC-1b",
+            "AC-1c",
+            "AC-1d",
+            "AC-1e",
+            "AC-1f",
+            "AC-1g",
+            "AC-1h",
+            "AC-1i",
+            "AC-1j",
+            "AC-4d"
+          ],
+          "sec_refs": [
+            "SEC-2",
+            "SEC-6",
+            "SEC-7",
+            "SEC-8",
+            "SEC-9"
+          ],
+          "contract_refs": [
+            "ADR-3a.2-revalidation.md#3-interfaces",
+            "ADR-3a.2-revalidation.md#5-algorithm",
+            "ADR-3a.2-revalidation.md#6-error-handling"
+          ],
+          "checks": [
+            {
+              "check_id": "T1-lock",
+              "ac_refs": [
+                "AC-1a",
+                "AC-1b"
+              ],
+              "sec_refs": [
+                "SEC-6"
+              ]
+            },
+            {
+              "check_id": "T1-refuse-state",
+              "ac_refs": [
+                "AC-1c",
+                "AC-1i"
+              ],
+              "sec_refs": []
+            },
+            {
+              "check_id": "T1-noop",
+              "ac_refs": [
+                "AC-1d",
+                "AC-4d"
+              ],
+              "sec_refs": []
+            },
+            {
+              "check_id": "T1-fingerprint",
+              "ac_refs": [
+                "AC-1e",
+                "AC-1i"
+              ],
+              "sec_refs": []
+            },
+            {
+              "check_id": "T1-head-dirty",
+              "ac_refs": [
+                "AC-1f",
+                "AC-1i"
+              ],
+              "sec_refs": []
+            },
+            {
+              "check_id": "T1-baseline",
+              "ac_refs": [
+                "AC-1g",
+                "AC-1i"
+              ],
+              "sec_refs": []
+            },
+            {
+              "check_id": "T1-evidence",
+              "ac_refs": [
+                "AC-1h",
+                "AC-1i"
+              ],
+              "sec_refs": [
+                "SEC-2"
+              ]
+            },
+            {
+              "check_id": "T1-graph",
+              "ac_refs": [],
+              "sec_refs": [
+                "SEC-9"
+              ]
+            },
+            {
+              "check_id": "T1-snapshot",
+              "ac_refs": [
+                "AC-4d"
+              ],
+              "sec_refs": [
+                "SEC-7"
+              ]
+            },
+            {
+              "check_id": "T1-doc-limits",
+              "ac_refs": [
+                "AC-1j"
+              ],
+              "sec_refs": [
+                "SEC-8"
+              ]
+            },
+            {
+              "check_id": "T1-units",
+              "ac_refs": [],
+              "sec_refs": [
+                "SEC-9"
+              ]
+            },
+            {
+              "check_id": "T1-run-refuses",
+              "ac_refs": [],
+              "sec_refs": []
+            },
+            {
+              "check_id": "T1-full-suite",
+              "ac_refs": [],
+              "sec_refs": []
+            }
+          ]
+        },
+        {
+          "task_id": "T2-ordered-verification",
+          "ac_refs": [
+            "AC-2a",
+            "AC-2b",
+            "AC-2c",
+            "AC-2d",
+            "AC-2e",
+            "AC-2f",
+            "AC-2g",
+            "AC-2h",
+            "AC-3a",
+            "AC-3b",
+            "AC-3c",
+            "AC-3d",
+            "AC-3e",
+            "AC-3f",
+            "AC-3g",
+            "AC-3h",
+            "AC-4a"
+          ],
+          "sec_refs": [
+            "SEC-1",
+            "SEC-4",
+            "SEC-5"
+          ],
+          "contract_refs": [
+            "ADR-3a.2-revalidation.md#4-state-and-journal-impact",
+            "ADR-3a.2-revalidation.md#5-algorithm"
+          ],
+          "checks": [
+            {
+              "check_id": "T2-ordered-pass",
+              "ac_refs": [
+                "AC-2a",
+                "AC-2b",
+                "AC-2c",
+                "AC-3a",
+                "AC-3b",
+                "AC-3c",
+                "AC-3g"
+              ],
+              "sec_refs": [
+                "SEC-1",
+                "SEC-4"
+              ]
+            },
+            {
+              "check_id": "T2-b-fails",
+              "ac_refs": [
+                "AC-2d",
+                "AC-2e",
+                "AC-2g",
+                "AC-2h",
+                "AC-3g"
+              ],
+              "sec_refs": [
+                "SEC-1"
+              ]
+            },
+            {
+              "check_id": "T2-recovery",
+              "ac_refs": [
+                "AC-2f"
+              ],
+              "sec_refs": [
+                "SEC-1"
+              ]
+            },
+            {
+              "check_id": "T2-provenance",
+              "ac_refs": [
+                "AC-3d",
+                "AC-3e",
+                "AC-3f"
+              ],
+              "sec_refs": [
+                "SEC-5"
+              ]
+            },
+            {
+              "check_id": "T2-attribution",
+              "ac_refs": [
+                "AC-4a",
+                "AC-2g"
+              ],
+              "sec_refs": [
+                "SEC-5"
+              ]
+            },
+            {
+              "check_id": "T2-alloc",
+              "ac_refs": [
+                "AC-3f"
+              ],
+              "sec_refs": [
+                "SEC-5"
+              ]
+            },
+            {
+              "check_id": "T2-run-guard",
+              "ac_refs": [
+                "AC-3h"
+              ],
+              "sec_refs": []
+            },
+            {
+              "check_id": "T2-no-developer",
+              "ac_refs": [
+                "AC-3a",
+                "AC-3d"
+              ],
+              "sec_refs": [
+                "SEC-4"
+              ]
+            },
+            {
+              "check_id": "T2-full-suite",
+              "ac_refs": [],
+              "sec_refs": []
+            }
+          ]
+        },
+        {
+          "task_id": "T3-mutation-crash-safety",
+          "ac_refs": [
+            "AC-4a",
+            "AC-4b",
+            "AC-4c",
+            "AC-4d",
+            "AC-4e",
+            "AC-4f",
+            "AC-5"
+          ],
+          "sec_refs": [
+            "SEC-1",
+            "SEC-3",
+            "SEC-5",
+            "SEC-7",
+            "SEC-10"
+          ],
+          "contract_refs": [
+            "ADR-3a.2-revalidation.md#5-algorithm",
+            "ADR-3a.2-revalidation.md#6-error-handling"
+          ],
+          "checks": [
+            {
+              "check_id": "T3-interrupt",
+              "ac_refs": [
+                "AC-4a",
+                "AC-4b"
+              ],
+              "sec_refs": [
+                "SEC-1",
+                "SEC-5"
+              ]
+            },
+            {
+              "check_id": "T3-crash-boundary",
+              "ac_refs": [
+                "AC-4a",
+                "AC-4f"
+              ],
+              "sec_refs": [
+                "SEC-1"
+              ]
+            },
+            {
+              "check_id": "T3-collision",
+              "ac_refs": [
+                "AC-4b"
+              ],
+              "sec_refs": [
+                "SEC-5"
+              ]
+            },
+            {
+              "check_id": "T3-stale-snapshot",
+              "ac_refs": [
+                "AC-4c",
+                "AC-4d"
+              ],
+              "sec_refs": [
+                "SEC-7"
+              ]
+            },
+            {
+              "check_id": "T3-mutation",
+              "ac_refs": [
+                "AC-4e"
+              ],
+              "sec_refs": [
+                "SEC-3",
+                "SEC-1"
+              ]
+            },
+            {
+              "check_id": "T3-inspection",
+              "ac_refs": [
+                "AC-4e",
+                "AC-4f"
+              ],
+              "sec_refs": [
+                "SEC-3"
+              ]
+            },
+            {
+              "check_id": "T3-tamper",
+              "ac_refs": [
+                "AC-4f"
+              ],
+              "sec_refs": [
+                "SEC-1",
+                "SEC-3"
+              ]
+            },
+            {
+              "check_id": "T3-durability",
+              "ac_refs": [
+                "AC-4f"
+              ],
+              "sec_refs": [
+                "SEC-5"
+              ]
+            },
+            {
+              "check_id": "T3-scope",
+              "ac_refs": [],
+              "sec_refs": [
+                "SEC-10"
+              ]
+            },
+            {
+              "check_id": "T3-all-revalidation-tests",
+              "ac_refs": [
+                "AC-5"
+              ],
+              "sec_refs": []
+            },
+            {
+              "check_id": "T3-full-suite",
+              "ac_refs": [
+                "AC-5"
+              ],
+              "sec_refs": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "attempt": 2,
+      "tasks": [
+        {
+          "task_id": "T1-preflight-helpers",
+          "ac_refs": [
+            "AC-1a",
+            "AC-1b",
+            "AC-1c",
+            "AC-1d",
+            "AC-1e",
+            "AC-1f",
+            "AC-1g",
+            "AC-1h",
+            "AC-1i",
+            "AC-1j",
+            "AC-4d"
+          ],
+          "sec_refs": [
+            "SEC-2",
+            "SEC-6",
+            "SEC-7",
+            "SEC-8",
+            "SEC-9"
+          ],
+          "contract_refs": [
+            "adr.md#3-interfaces",
+            "adr.md#5-algorithm",
+            "adr.md#6-error-handling"
+          ],
+          "checks": [
+            {
+              "check_id": "T1-lock",
+              "ac_refs": [
+                "AC-1a",
+                "AC-1b"
+              ],
+              "sec_refs": [
+                "SEC-6"
+              ]
+            },
+            {
+              "check_id": "T1-refuse-state",
+              "ac_refs": [
+                "AC-1c",
+                "AC-1i"
+              ],
+              "sec_refs": []
+            },
+            {
+              "check_id": "T1-noop",
+              "ac_refs": [
+                "AC-1d",
+                "AC-4d"
+              ],
+              "sec_refs": []
+            },
+            {
+              "check_id": "T1-fingerprint",
+              "ac_refs": [
+                "AC-1e",
+                "AC-1i"
+              ],
+              "sec_refs": []
+            },
+            {
+              "check_id": "T1-head-dirty",
+              "ac_refs": [
+                "AC-1f",
+                "AC-1i"
+              ],
+              "sec_refs": []
+            },
+            {
+              "check_id": "T1-baseline",
+              "ac_refs": [
+                "AC-1g",
+                "AC-1i"
+              ],
+              "sec_refs": []
+            },
+            {
+              "check_id": "T1-evidence",
+              "ac_refs": [
+                "AC-1h",
+                "AC-1i"
+              ],
+              "sec_refs": [
+                "SEC-2"
+              ]
+            },
+            {
+              "check_id": "T1-graph",
+              "ac_refs": [],
+              "sec_refs": [
+                "SEC-9"
+              ]
+            },
+            {
+              "check_id": "T1-snapshot",
+              "ac_refs": [
+                "AC-4d"
+              ],
+              "sec_refs": [
+                "SEC-7"
+              ]
+            },
+            {
+              "check_id": "T1-doc-limits",
+              "ac_refs": [
+                "AC-1j"
+              ],
+              "sec_refs": [
+                "SEC-8"
+              ]
+            },
+            {
+              "check_id": "T1-units",
+              "ac_refs": [],
+              "sec_refs": [
+                "SEC-9"
+              ]
+            },
+            {
+              "check_id": "T1-run-refuses",
+              "ac_refs": [],
+              "sec_refs": []
+            },
+            {
+              "check_id": "T1-full-suite",
+              "ac_refs": [],
+              "sec_refs": []
+            }
+          ]
+        },
+        {
+          "task_id": "T2-ordered-verification",
+          "ac_refs": [
+            "AC-2a",
+            "AC-2b",
+            "AC-2c",
+            "AC-2d",
+            "AC-2e",
+            "AC-2f",
+            "AC-2g",
+            "AC-2h",
+            "AC-3a",
+            "AC-3b",
+            "AC-3c",
+            "AC-3d",
+            "AC-3e",
+            "AC-3f",
+            "AC-3g",
+            "AC-3h",
+            "AC-4a"
+          ],
+          "sec_refs": [
+            "SEC-1",
+            "SEC-4",
+            "SEC-5"
+          ],
+          "contract_refs": [
+            "adr.md#4-state-and-journal-impact",
+            "adr.md#5-algorithm"
+          ],
+          "checks": [
+            {
+              "check_id": "T2-ordered-pass",
+              "ac_refs": [
+                "AC-2a",
+                "AC-2b",
+                "AC-2c",
+                "AC-3a",
+                "AC-3b",
+                "AC-3c",
+                "AC-3g"
+              ],
+              "sec_refs": [
+                "SEC-1",
+                "SEC-4"
+              ]
+            },
+            {
+              "check_id": "T2-b-fails",
+              "ac_refs": [
+                "AC-2d",
+                "AC-2e",
+                "AC-2g",
+                "AC-2h",
+                "AC-3g"
+              ],
+              "sec_refs": [
+                "SEC-1"
+              ]
+            },
+            {
+              "check_id": "T2-recovery",
+              "ac_refs": [
+                "AC-2f"
+              ],
+              "sec_refs": [
+                "SEC-1"
+              ]
+            },
+            {
+              "check_id": "T2-provenance",
+              "ac_refs": [
+                "AC-3d",
+                "AC-3e",
+                "AC-3f"
+              ],
+              "sec_refs": [
+                "SEC-5"
+              ]
+            },
+            {
+              "check_id": "T2-attribution",
+              "ac_refs": [
+                "AC-4a",
+                "AC-2g"
+              ],
+              "sec_refs": [
+                "SEC-5"
+              ]
+            },
+            {
+              "check_id": "T2-alloc",
+              "ac_refs": [
+                "AC-3f"
+              ],
+              "sec_refs": [
+                "SEC-5"
+              ]
+            },
+            {
+              "check_id": "T2-run-guard",
+              "ac_refs": [
+                "AC-3h"
+              ],
+              "sec_refs": []
+            },
+            {
+              "check_id": "T2-no-developer",
+              "ac_refs": [
+                "AC-3a",
+                "AC-3d"
+              ],
+              "sec_refs": [
+                "SEC-4"
+              ]
+            },
+            {
+              "check_id": "T2-full-suite",
+              "ac_refs": [],
+              "sec_refs": []
+            }
+          ]
+        },
+        {
+          "task_id": "T3-mutation-crash-safety",
+          "ac_refs": [
+            "AC-4a",
+            "AC-4b",
+            "AC-4c",
+            "AC-4d",
+            "AC-4e",
+            "AC-4f",
+            "AC-5"
+          ],
+          "sec_refs": [
+            "SEC-1",
+            "SEC-3",
+            "SEC-5",
+            "SEC-7",
+            "SEC-10"
+          ],
+          "contract_refs": [
+            "adr.md#5-algorithm",
+            "adr.md#6-error-handling"
+          ],
+          "checks": [
+            {
+              "check_id": "T3-interrupt",
+              "ac_refs": [
+                "AC-4a",
+                "AC-4b"
+              ],
+              "sec_refs": [
+                "SEC-1",
+                "SEC-5"
+              ]
+            },
+            {
+              "check_id": "T3-crash-boundary",
+              "ac_refs": [
+                "AC-4a",
+                "AC-4f"
+              ],
+              "sec_refs": [
+                "SEC-1"
+              ]
+            },
+            {
+              "check_id": "T3-collision",
+              "ac_refs": [
+                "AC-4b"
+              ],
+              "sec_refs": [
+                "SEC-5"
+              ]
+            },
+            {
+              "check_id": "T3-stale-snapshot",
+              "ac_refs": [
+                "AC-4c",
+                "AC-4d"
+              ],
+              "sec_refs": [
+                "SEC-7"
+              ]
+            },
+            {
+              "check_id": "T3-mutation",
+              "ac_refs": [
+                "AC-4e"
+              ],
+              "sec_refs": [
+                "SEC-3",
+                "SEC-1"
+              ]
+            },
+            {
+              "check_id": "T3-inspection",
+              "ac_refs": [
+                "AC-4e",
+                "AC-4f"
+              ],
+              "sec_refs": [
+                "SEC-3"
+              ]
+            },
+            {
+              "check_id": "T3-tamper",
+              "ac_refs": [
+                "AC-4f"
+              ],
+              "sec_refs": [
+                "SEC-1",
+                "SEC-3"
+              ]
+            },
+            {
+              "check_id": "T3-durability",
+              "ac_refs": [
+                "AC-4f"
+              ],
+              "sec_refs": [
+                "SEC-5"
+              ]
+            },
+            {
+              "check_id": "T3-scope",
+              "ac_refs": [],
+              "sec_refs": [
+                "SEC-10"
+              ]
+            },
+            {
+              "check_id": "T3-all-revalidation-tests",
+              "ac_refs": [
+                "AC-5"
+              ],
+              "sec_refs": []
+            },
+            {
+              "check_id": "T3-full-suite",
+              "ac_refs": [
+                "AC-5"
+              ],
+              "sec_refs": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "attempt": 3,
+      "tasks": [
+        {
+          "task_id": "T1-preflight-helpers",
+          "ac_refs": [
+            "AC-1",
+            "AC-1a",
+            "AC-1b",
+            "AC-1c",
+            "AC-1d",
+            "AC-1e",
+            "AC-1f",
+            "AC-1g",
+            "AC-1h",
+            "AC-1i",
+            "AC-1j",
+            "AC-4d"
+          ],
+          "sec_refs": [
+            "SEC-2",
+            "SEC-6",
+            "SEC-7",
+            "SEC-8",
+            "SEC-9"
+          ],
+          "contract_refs": [
+            "adr.md#3-interfaces",
+            "adr.md#5-algorithm",
+            "adr.md#6-error-handling"
+          ],
+          "checks": [
+            {
+              "check_id": "T1-lock",
+              "ac_refs": [
+                "AC-1",
+                "AC-1a",
+                "AC-1b"
+              ],
+              "sec_refs": [
+                "SEC-6"
+              ]
+            },
+            {
+              "check_id": "T1-refuse-state",
+              "ac_refs": [
+                "AC-1",
+                "AC-1c",
+                "AC-1i"
+              ],
+              "sec_refs": []
+            },
+            {
+              "check_id": "T1-noop",
+              "ac_refs": [
+                "AC-1",
+                "AC-1d",
+                "AC-4",
+                "AC-4d"
+              ],
+              "sec_refs": []
+            },
+            {
+              "check_id": "T1-fingerprint",
+              "ac_refs": [
+                "AC-1",
+                "AC-1e",
+                "AC-1i"
+              ],
+              "sec_refs": []
+            },
+            {
+              "check_id": "T1-head-dirty",
+              "ac_refs": [
+                "AC-1",
+                "AC-1f",
+                "AC-1i"
+              ],
+              "sec_refs": []
+            },
+            {
+              "check_id": "T1-baseline",
+              "ac_refs": [
+                "AC-1",
+                "AC-1g",
+                "AC-1i"
+              ],
+              "sec_refs": []
+            },
+            {
+              "check_id": "T1-evidence",
+              "ac_refs": [
+                "AC-1",
+                "AC-1h",
+                "AC-1i"
+              ],
+              "sec_refs": [
+                "SEC-2"
+              ]
+            },
+            {
+              "check_id": "T1-graph",
+              "ac_refs": [],
+              "sec_refs": [
+                "SEC-9"
+              ]
+            },
+            {
+              "check_id": "T1-snapshot",
+              "ac_refs": [
+                "AC-4",
+                "AC-4d"
+              ],
+              "sec_refs": [
+                "SEC-7"
+              ]
+            },
+            {
+              "check_id": "T1-doc-limits",
+              "ac_refs": [
+                "AC-1",
+                "AC-1j"
+              ],
+              "sec_refs": [
+                "SEC-8"
+              ]
+            },
+            {
+              "check_id": "T1-units",
+              "ac_refs": [],
+              "sec_refs": [
+                "SEC-9"
+              ]
+            },
+            {
+              "check_id": "T1-run-refuses",
+              "ac_refs": [],
+              "sec_refs": []
+            },
+            {
+              "check_id": "T1-full-suite",
+              "ac_refs": [],
+              "sec_refs": []
+            }
+          ]
+        },
+        {
+          "task_id": "T2-ordered-verification",
+          "ac_refs": [
+            "AC-2",
+            "AC-3",
+            "AC-2a",
+            "AC-2b",
+            "AC-2c",
+            "AC-2d",
+            "AC-2e",
+            "AC-2f",
+            "AC-2g",
+            "AC-2h",
+            "AC-3a",
+            "AC-3b",
+            "AC-3c",
+            "AC-3d",
+            "AC-3e",
+            "AC-3f",
+            "AC-3g",
+            "AC-3h",
+            "AC-4a"
+          ],
+          "sec_refs": [
+            "SEC-1",
+            "SEC-4",
+            "SEC-5"
+          ],
+          "contract_refs": [
+            "adr.md#4-state-and-journal-impact",
+            "adr.md#5-algorithm"
+          ],
+          "checks": [
+            {
+              "check_id": "T2-ordered-pass",
+              "ac_refs": [
+                "AC-2",
+                "AC-3",
+                "AC-2a",
+                "AC-2b",
+                "AC-2c",
+                "AC-3a",
+                "AC-3b",
+                "AC-3c",
+                "AC-3g"
+              ],
+              "sec_refs": [
+                "SEC-1",
+                "SEC-4"
+              ]
+            },
+            {
+              "check_id": "T2-b-fails",
+              "ac_refs": [
+                "AC-2",
+                "AC-2d",
+                "AC-2e",
+                "AC-2g",
+                "AC-2h",
+                "AC-3g"
+              ],
+              "sec_refs": [
+                "SEC-1"
+              ]
+            },
+            {
+              "check_id": "T2-recovery",
+              "ac_refs": [
+                "AC-2",
+                "AC-2f"
+              ],
+              "sec_refs": [
+                "SEC-1"
+              ]
+            },
+            {
+              "check_id": "T2-provenance",
+              "ac_refs": [
+                "AC-3",
+                "AC-3d",
+                "AC-3e",
+                "AC-3f"
+              ],
+              "sec_refs": [
+                "SEC-5"
+              ]
+            },
+            {
+              "check_id": "T2-attribution",
+              "ac_refs": [
+                "AC-4a",
+                "AC-2g"
+              ],
+              "sec_refs": [
+                "SEC-5"
+              ]
+            },
+            {
+              "check_id": "T2-alloc",
+              "ac_refs": [
+                "AC-3",
+                "AC-3f"
+              ],
+              "sec_refs": [
+                "SEC-5"
+              ]
+            },
+            {
+              "check_id": "T2-run-guard",
+              "ac_refs": [
+                "AC-3",
+                "AC-3h"
+              ],
+              "sec_refs": []
+            },
+            {
+              "check_id": "T2-no-developer",
+              "ac_refs": [
+                "AC-3",
+                "AC-3a",
+                "AC-3d"
+              ],
+              "sec_refs": [
+                "SEC-4"
+              ]
+            },
+            {
+              "check_id": "T2-full-suite",
+              "ac_refs": [],
+              "sec_refs": []
+            }
+          ]
+        },
+        {
+          "task_id": "T3-mutation-crash-safety",
+          "ac_refs": [
+            "AC-4",
+            "AC-4a",
+            "AC-4b",
+            "AC-4c",
+            "AC-4d",
+            "AC-4e",
+            "AC-4f",
+            "AC-5"
+          ],
+          "sec_refs": [
+            "SEC-1",
+            "SEC-3",
+            "SEC-5",
+            "SEC-7",
+            "SEC-10"
+          ],
+          "contract_refs": [
+            "adr.md#5-algorithm",
+            "adr.md#6-error-handling"
+          ],
+          "checks": [
+            {
+              "check_id": "T3-interrupt",
+              "ac_refs": [
+                "AC-4",
+                "AC-4a",
+                "AC-4b"
+              ],
+              "sec_refs": [
+                "SEC-1",
+                "SEC-5"
+              ]
+            },
+            {
+              "check_id": "T3-crash-boundary",
+              "ac_refs": [
+                "AC-4",
+                "AC-4a",
+                "AC-4f"
+              ],
+              "sec_refs": [
+                "SEC-1"
+              ]
+            },
+            {
+              "check_id": "T3-collision",
+              "ac_refs": [
+                "AC-4",
+                "AC-4b"
+              ],
+              "sec_refs": [
+                "SEC-5"
+              ]
+            },
+            {
+              "check_id": "T3-stale-snapshot",
+              "ac_refs": [
+                "AC-4",
+                "AC-4c",
+                "AC-4d"
+              ],
+              "sec_refs": [
+                "SEC-7"
+              ]
+            },
+            {
+              "check_id": "T3-mutation",
+              "ac_refs": [
+                "AC-4",
+                "AC-4e"
+              ],
+              "sec_refs": [
+                "SEC-3",
+                "SEC-1"
+              ]
+            },
+            {
+              "check_id": "T3-inspection",
+              "ac_refs": [
+                "AC-4",
+                "AC-4e",
+                "AC-4f"
+              ],
+              "sec_refs": [
+                "SEC-3"
+              ]
+            },
+            {
+              "check_id": "T3-tamper",
+              "ac_refs": [
+                "AC-4",
+                "AC-4f"
+              ],
+              "sec_refs": [
+                "SEC-1",
+                "SEC-3"
+              ]
+            },
+            {
+              "check_id": "T3-durability",
+              "ac_refs": [
+                "AC-4",
+                "AC-4f"
+              ],
+              "sec_refs": [
+                "SEC-5"
+              ]
+            },
+            {
+              "check_id": "T3-scope",
+              "ac_refs": [],
+              "sec_refs": [
+                "SEC-10"
+              ]
+            },
+            {
+              "check_id": "T3-all-revalidation-tests",
+              "ac_refs": [
+                "AC-5"
+              ],
+              "sec_refs": []
+            },
+            {
+              "check_id": "T3-full-suite",
+              "ac_refs": [
+                "AC-5"
+              ],
+              "sec_refs": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
