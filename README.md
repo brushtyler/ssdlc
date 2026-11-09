@@ -532,6 +532,34 @@ modified inputs or missing evidence stop with a diagnostic and preserve the work
 there is no automatic reset of unexplained changes. Existing monolithic tickets need
 an explicit migration; the feature does not adopt their changes silently.
 
+Development runs the required quality checks at the clean checkpoint in the actual
+task worktree before invoking a developer, including on resume with pending work.
+This catches differences between the initial repository baseline and the worktree's
+runner environment. Failing/empty checks stop as `BASELINE_MISMATCH` without consuming
+developer attempts; mutations stop as `BASELINE_MUTATION` and preserve the unexpected
+changes. Preflight logs and outcomes are journaled under `03-dev/tasks/preflight/`.
+
+For an ordinary task-check failure, the scheduler archives the full patch, Git tree,
+developer output and check logs, then restores a clean checkpoint. The next attempt
+verifies the archived patch/log hashes, original base and declared file manifest,
+then restores that candidate for repair in place, including new/deleted/binary files.
+The prompt includes cumulative attempt summaries and head/tail excerpts of failed
+logs (6,000 characters per log, 24,000 total); full evidence is retained. No failed
+patch becomes a verified checkpoint until all required checks pass. Interrupted dirty
+repairs and altered/missing evidence require reconciliation; arbitrary dirty state
+is never silently adopted. Legacy failed attempts without repair metadata retain
+their original restart behavior and are not automatically converted.
+
+A developer can explicitly report `TASK_DEV_STATUS: SCOPE_REQUIRED` or
+`TASK_DEV_STATUS: ENVIRONMENT_BLOCKED` as its final line. These signals archive any
+in-scope partial work, roll back to the checkpoint and stop without speculative code
+retries or automatic scope expansion. A nonzero developer exit stops separately as
+`DEVELOPER_INVOCATION`. Repeating the identical failing tree with identical check
+outcomes stops as `REPAIR_STALLED`. Attempt counters remain persistent; restarting
+does not reset them. Console logs show the task/attempt, whether it restores a prior
+candidate, and the failed checks with evidence paths. Failure packs preserve the
+phase/category where execution actually stopped.
+
 This bootstrap requires strict file manifests and automated task checks. Runtime
 scope expansion, targeted review bounce and transitive invalidation, granular model
 routing, shared invocation/time budgets, subgoals and the advisory lifecycle remain

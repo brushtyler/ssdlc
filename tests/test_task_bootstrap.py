@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from orchestrator import EngineRunner, SSDLCOrchestrator
 from ssdlc_tasks import (
-    PlanError, TaskError, TaskJournal, TaskPlanValidator, TaskScheduler,
+    PlanError, TaskError, DevelopmentBlocked, TaskJournal, TaskPlanValidator, TaskScheduler,
     atomic_json, confined, file_hash, git, ticket_lock, validate_document,
 )
 
@@ -660,11 +660,14 @@ class SchedulerTests(RepositoryTests):
         self.assertEqual(result['tasks']['T1']['status'], 'COMPLETED')
         self.assertEqual((self.repo / 'app.py').read_text(), 'value = 0\n')
 
-    def test_failed_attempt_is_archived_then_restored_for_retry(self):
+    def test_failed_attempt_is_archived_then_repaired_in_place(self):
         def verify(*args):
             return ('Ran 1 test', 'failure' if len(self.calls) == 1 else '', 1 if len(self.calls) == 1 else 0)
         def develop(task, attempt, prompt):
-            self.assertEqual((self.wt / 'app.py').read_text(), 'value = 0\n')
+            self.assertEqual((self.wt / 'app.py').read_text(), f'value = {attempt - 1}\n')
+            if attempt == 2:
+                self.assertIn('failure', prompt)
+                self.assertIn('Repair the restored previous candidate', prompt)
             return self.developer(task, attempt, prompt)
         result = self.scheduler(develop, verify).run(self.plan['tasks'])
         self.assertEqual(result['tasks']['T1']['attempts'], 2)
@@ -672,7 +675,7 @@ class SchedulerTests(RepositoryTests):
         self.assertEqual(git(self.wt, 'rev-list', '--count', self.base + '..HEAD'), '1')
 
     def test_attempt_limit_is_persistent(self):
-        failed = lambda *args: ('Ran 1 test', 'FAIL', 1)
+        failed = lambda *args: ('Ran 1 test', 'FAIL' if self.calls else '', 1 if self.calls else 0)
         for _ in range(2):
             with self.assertRaisesRegex(TaskError, 'exhausted'):
                 self.scheduler(self.developer, failed, max_attempts=1).run(self.plan['tasks'])
@@ -714,7 +717,8 @@ class SchedulerTests(RepositoryTests):
 
     def test_verification_cannot_change_already_modified_source(self):
         def verify(*args):
-            (self.wt / 'app.py').write_text('value = 999\n')
+            if self.calls:
+                (self.wt / 'app.py').write_text('value = 999\n')
             return 'Ran 1 test\nOK', '', 0
         with self.assertRaisesRegex(TaskError, 'Verification changed'):
             self.scheduler(self.developer, verify).run(self.plan['tasks'])
@@ -741,8 +745,9 @@ class SchedulerTests(RepositoryTests):
             self.scheduler(self.developer).run(self.plan['tasks'])
 
     def test_empty_suite_subgoal_and_review_feedback_cannot_pass(self):
-        with self.assertRaisesRegex(TaskError, 'exhausted'):
+        with self.assertRaisesRegex(TaskError, 'BASELINE_MISMATCH'):
             self.scheduler(self.developer, lambda *args: ('Ran 0 tests', '', 0), max_attempts=1).run(self.plan['tasks'])
+        self.assertEqual(self.calls, [])
         self.plan['tasks'][0]['kind'] = 'subgoal'
         with self.assertRaisesRegex(TaskError, 'automated tasks only'):
             self.scheduler(self.developer).run(self.plan['tasks'])
@@ -765,7 +770,7 @@ class SchedulerTests(RepositoryTests):
             (self.wt / 'new.py').symlink_to('app.py')
             return {'output': 'Link', 'exit_code': 0}
         with self.assertRaisesRegex(TaskError, 'exhausted'):
-            self.scheduler(develop, lambda *args: ('Ran 1 test', 'FAIL', 1), max_attempts=1).run(self.plan['tasks'])
+            self.scheduler(develop, lambda *args: ('Ran 1 test', 'FAIL', 1 if (self.wt / 'new.py').is_symlink() else 0), max_attempts=1).run(self.plan['tasks'])
         self.assertTrue((self.wt / 'app.py').exists())
         self.assertFalse((self.wt / 'new.py').exists())
         self.assertEqual(git(self.wt, 'status', '--porcelain'), '')
@@ -816,16 +821,41 @@ class SandboxTests(unittest.TestCase):
             repo = Path(tmp) / 'repo'
             wt = repo / '.ssdlc/TKT-1/worktree'
             wt.mkdir(parents=True)
-            cmd = EngineRunner._wrap_in_role_container(['pytest'], wt, pass_ai_keys=False)
+            toolkit = Path(tmp) / 'toolkit'
+            toolkit.mkdir()
+            (toolkit / '.ssdlc').mkdir()
+            with patch('orchestrator.__file__', str(toolkit / 'orchestrator.py')):
+                cmd = EngineRunner._wrap_in_role_container(['pytest'], wt, pass_ai_keys=False)
             mounts = [cmd[i + 1] for i, arg in enumerate(cmd[:-1]) if arg == '-v']
             self.assertIn(f'{wt}:{wt}:ro', mounts)
             self.assertFalse(any('.credentials.json' in item or 'auth.json' in item for item in mounts))
             self.assertFalse(any('.runtime' in item and item.endswith(':rw') for item in mounts))
             self.assertIn(f'{repo / ".ssdlc"}:rw,size=16m', cmd)
             self.assertIn('/opt/ssdlc/.ssdlc:rw,size=16m', cmd)
+            (toolkit / '.ssdlc').rmdir()
+            with patch('orchestrator.__file__', str(toolkit / 'orchestrator.py')):
+                pristine = EngineRunner._wrap_in_role_container(['pytest'], wt, pass_ai_keys=False)
+            self.assertNotIn('/opt/ssdlc/.ssdlc:rw,size=16m', pristine)
+            self.assertIn(f'{repo / ".ssdlc"}:rw,size=16m', pristine)
 
 
 class OrchestratorBootstrapTests(RepositoryTests):
+    def test_failure_pack_preserves_actual_failed_phase_and_category(self):
+        orch = self.make_orchestrator()
+        def fail(*args):
+            orch.state.update(current_phase='03-dev', current_step='task-development', status='IN_PROGRESS')
+            raise DevelopmentBlocked('BASELINE_MISMATCH', 'Clean worktree checks failed')
+        def pack(**kwargs):
+            orch.state.update(current_phase='08-supervisor')
+        with patch.object(orch, '_task_mode', return_value=False), patch.object(orch, '_run_pipeline', side_effect=fail), patch.object(orch, 'compile_evidence_pack', side_effect=pack):
+            with self.assertRaisesRegex(DevelopmentBlocked, 'BASELINE_MISMATCH'):
+                orch.run_pipeline('Scoped goal')
+        self.assertEqual(orch.state['current_phase'], '03-dev')
+        self.assertEqual(orch.state['current_step'], 'task-development')
+        self.assertEqual(orch.state['status'], 'FAILED')
+        self.assertEqual(orch.state['failure']['phase'], '03-dev')
+        self.assertEqual(orch.state['failure']['category'], 'BASELINE_MISMATCH')
+
     def test_controller_baseline_precedes_development_and_detects_committed_change(self):
         orch = self.make_orchestrator()
         self.seed_inputs(orch)

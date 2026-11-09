@@ -1700,6 +1700,7 @@ class SSDLCOrchestrator:
             max_attempts=int(os.environ.get("SSDLC_MAX_DEV_RETRIES", "3")),
         )
         self.state["current_phase"] = "03-dev"
+        self.state["current_step"] = "task-development"
         self._save_state()
         result = scheduler.run(ordered, feedback)
         self.state["tasks_status"] = result["tasks"]
@@ -3130,8 +3131,20 @@ To **REJECT** and send feedback back to the team:
             try:
                 return self._run_pipeline(goal, test_cmd, tier, from_phase)
             except TaskError as exc:
+                failed_phase = self.state.get('current_phase')
+                failed_step = self.state.get('current_step')
+                failed_status = self.state.get('status')
+                self.state['failure'] = {'phase': failed_phase, 'type': type(exc).__name__,
+                                         'category': getattr(exc, 'category', 'TASK_EXECUTION'), 'message': str(exc)}
                 self.record_gate("TASK_EXECUTION_GATE", False, str(exc))
-                self.compile_evidence_pack(ready_for_signoff=False)
+                try:
+                    self.compile_evidence_pack(ready_for_signoff=False)
+                finally:
+                    status = ('HALTED_BUDGET_EXCEEDED' if failed_status == 'HALTED_BUDGET_EXCEEDED'
+                              else 'ESCALATED_TO_SUPERVISOR' if self.state.get('status') == 'ESCALATED_TO_SUPERVISOR'
+                              else 'FAILED')
+                    self.state.update(status=status, current_phase=failed_phase, current_step=failed_step)
+                    self._save_state()
                 raise
 
     def _run_pipeline(
