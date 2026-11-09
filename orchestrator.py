@@ -639,7 +639,10 @@ class EngineRunner:
         else:
             # Test code must not read isolated credentials through the repository mount.
             docker_cmd.extend(["--tmpfs", f"{repo_root / '.ssdlc'}:rw,size=16m"])
-            docker_cmd.extend(["--tmpfs", "/opt/ssdlc/.ssdlc:rw,size=16m"])
+            # A pristine, read-only toolkit has no runtime directory to mask;
+            # Docker cannot create a nested mountpoint inside that bind mount.
+            if (ssdlc_home / ".ssdlc").exists():
+                docker_cmd.extend(["--tmpfs", "/opt/ssdlc/.ssdlc:rw,size=16m"])
             if cwd.resolve() != repo_root:
                 docker_cmd.extend(["-v", f"{cwd.resolve()}:{cwd.resolve()}:ro"])
             if verification_scratch is not None:

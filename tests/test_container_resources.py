@@ -11,6 +11,18 @@ from ssdlc_tasks import ResourceLimitError, TaskError
 
 
 class ContainerResourceTests(unittest.TestCase):
+    def test_pristine_toolkit_does_not_require_nested_mountpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root/'repo'
+            (repo/'.ssdlc').mkdir(parents=True)
+            toolkit = root/'toolkit'
+            toolkit.mkdir()
+            with patch('orchestrator.__file__', str(toolkit/'orchestrator.py')):
+                cmd = EngineRunner._wrap_in_role_container(['true'], repo, pass_ai_keys=False)
+            self.assertNotIn('/opt/ssdlc/.ssdlc:rw,size=16m', cmd)
+            self.assertFalse((toolkit/'.ssdlc').exists())
+
     def test_cli_container_calls_accept_string_cwd_and_record_resources(self):
         for engine in ('codex', 'claude'):
             with self.subTest(engine=engine), tempfile.TemporaryDirectory() as tmp:
