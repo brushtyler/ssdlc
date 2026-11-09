@@ -615,6 +615,18 @@ class EngineRunner:
                 "-v", "ssdlc-shared-uv-cache:/root/.cache/uv",
                 "-v", "ssdlc-shared-npm-cache:/root/.npm",
             ])
+            # Developer agents also run tests. Keep their caches outside source,
+            # just as for the trusted verification runner, without ignoring files.
+            cache_parent = runtime_dir / "cache" / "roles"
+            cache_parent.mkdir(parents=True, exist_ok=True)
+            role_cache = Path(tempfile.mkdtemp(prefix="invocation-", dir=cache_parent))
+            for key, value in {
+                "PYTHONPYCACHEPREFIX": str(role_cache / "pycache"),
+                "PYTEST_ADDOPTS": (os.environ.get("PYTEST_ADDOPTS", "") + f" -o cache_dir={role_cache / 'pytest'}").strip(),
+                "MYPY_CACHE_DIR": str(role_cache / "mypy"),
+                "RUFF_CACHE_DIR": str(role_cache / "ruff"),
+            }.items():
+                docker_cmd.extend(["-e", f"{key}={value}"])
         else:
             # Test code must not read isolated credentials through the repository mount.
             docker_cmd.extend(["--tmpfs", f"{repo_root / '.ssdlc'}:rw,size=16m"])

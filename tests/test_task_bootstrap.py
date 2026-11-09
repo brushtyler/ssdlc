@@ -342,6 +342,19 @@ class SandboxTests(unittest.TestCase):
         self.assertNotEqual(*seen)
         self.assertTrue(all(not Path(path).exists() for path in seen))
 
+    def test_developer_python_caches_are_redirected_per_invocation(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'PYTEST_ADDOPTS': '--strict-markers'}):
+            root = Path(tmp)
+            (root / '.ssdlc').mkdir()
+            commands = [EngineRunner._wrap_in_role_container(['codex', 'exec', '-'], root, writable_worktree=root) for _ in range(2)]
+            environments = [{cmd[i+1].split('=', 1)[0]: cmd[i+1].split('=', 1)[1]
+                             for i, arg in enumerate(cmd[:-1]) if arg == '-e'} for cmd in commands]
+            for env in environments:
+                self.assertTrue(Path(env['PYTHONPYCACHEPREFIX']).is_relative_to(root / '.ssdlc/.runtime/cache/roles'))
+                self.assertIn('--strict-markers', env['PYTEST_ADDOPTS'])
+                self.assertIn('cache_dir=', env['PYTEST_ADDOPTS'])
+            self.assertNotEqual(environments[0]['PYTHONPYCACHEPREFIX'], environments[1]['PYTHONPYCACHEPREFIX'])
+
     def test_test_container_masks_secrets_and_keeps_worktree_read_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / 'repo'
