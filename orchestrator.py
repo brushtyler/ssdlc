@@ -786,11 +786,16 @@ class EngineRunner:
         try:
             proc = subprocess.run(cmd, cwd=str(cwd), env=env, capture_output=True,
                                   text=True, timeout=timeout, input=input)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             timed_out = True
             if name:
                 subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=15)
-            raise
+            # Docker argv contains AI credentials passed with -e. Never expose it
+            # through exception messages, repr(), chained tracebacks or state.json.
+            raise subprocess.TimeoutExpired(
+                ["ssdlc-role", name or "local"], timeout,
+                output=exc.output, stderr=exc.stderr,
+            ) from None
         finally:
             if name:
                 metrics = {}
