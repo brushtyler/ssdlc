@@ -2478,8 +2478,21 @@ class SSDLCOrchestrator:
             )
 
         if self._task_mode():
-            if len(diff_text) > 60000:
-                raise TaskError("Bootstrap review cannot truncate the cumulative diff; split this ticket")
+            try:
+                diff_limit = int(os.environ.get('SSDLC_REVIEW_MAX_DIFF_CHARS', '200000'))
+            except ValueError as exc:
+                raise TaskError('SSDLC_REVIEW_MAX_DIFF_CHARS must be a positive integer') from exc
+            if not 1 <= diff_limit <= 1000000:
+                raise TaskError('SSDLC_REVIEW_MAX_DIFF_CHARS must be between 1 and 1000000')
+            if len(diff_text) > diff_limit:
+                raise TaskError(f'Full review diff ({len(diff_text)} chars) exceeds configured review budget ({diff_limit}); no truncation performed')
+            if (not self.worktree_dir.is_dir() or not self.state.get('task_verified_head')
+                    or git(self.worktree_dir, 'rev-parse', 'HEAD') != self.state['task_verified_head']
+                    or git(self.worktree_dir, 'status', '--porcelain')):
+                raise TaskError('Code review requires the clean verified task checkpoint')
+            expected_diff = git(self.worktree_dir, 'diff', '--binary', self.state['base_commit'], 'HEAD') + '\n'
+            if diff_text != expected_diff:
+                raise TaskError('Review diff differs from the verified cumulative checkpoint')
             ui_review_rules = (
                 "\nPROJECT QUALITY CONTRACT (apply the actual project rules, including test/config changes):\n"
                 + (self.dir_recon / "quality-contract.json").read_text()
@@ -2518,13 +2531,23 @@ class SSDLCOrchestrator:
             f"PO REQUIREMENTS:\n{req_text}\n\n"
             f"ADR:\n{adr_text}\n\n"
             f"THREAT MODEL:\n{tm_text}\n\n"
-            f"GIT DIFF TO REVIEW:\n```diff\n{diff_text[:60000]}\n```"
+            f"GIT DIFF TO REVIEW:\n```diff\n{diff_text if self._task_mode() else diff_text[:60000]}\n```"
         )
+
+        review_cwd = self.worktree_dir if self._task_mode() else self.repo_root
+        review_run = self.dir_review / 'runs' / uuid.uuid4().hex
+        review_run.mkdir(parents=True)
+        inputs_path = review_run / 'inputs.json'
+        atomic_json(inputs_path, {'verified_head': self.state.get('task_verified_head'), 'review_cwd': str(review_cwd),
+                                 'diff_chars': len(diff_text), 'diff_char_budget': diff_limit if self._task_mode() else 60000,
+                                 'system_prompt': sys_prompt, 'user_prompt': user_prompt, 'review_models': review_models})
+        self.record_artifact(str(inputs_path.relative_to(self.ssdlc_root)), inputs_path)
 
         combined_reviews: List[str] = [f"# Multi-Model Code Review Report (Attempt {attempt}, reasoning={rev_effort})\n"]
         all_approved = True
 
-        for mdl in review_models:
+        for reviewer_index, mdl in enumerate(review_models, 1):
+            self.check_budget_circuit_breaker()
             if ":" in mdl and not mdl.startswith("http"):
                 effective_engine, effective_model = mdl.split(":", 1)
             else:
@@ -2537,7 +2560,7 @@ class SSDLCOrchestrator:
                 effective_model,
                 sys_prompt,
                 user_prompt,
-                self.repo_root,
+                review_cwd,
                 self.project_id,
                 self.ticket_id,
                 f"04-review-a{attempt}",
@@ -2546,7 +2569,12 @@ class SSDLCOrchestrator:
             )
             dur = time.time() - t0
             verdict = parse_review_verdict(rev_out)
-            passed = verdict == "APPROVED"
+            raw_review = review_run / f'reviewer-{reviewer_index}.md'
+            raw_review.write_text(rev_out)
+            self.record_artifact(str(raw_review.relative_to(self.ssdlc_root)), raw_review)
+            input_changed = self._task_mode() and (git(review_cwd, 'rev-parse', 'HEAD') != self.state['task_verified_head']
+                                                   or bool(git(review_cwd, 'status', '--porcelain')))
+            passed = verdict == "APPROVED" and not input_changed
             if not passed:
                 all_approved = False
             self.record_ledger(
@@ -2555,7 +2583,7 @@ class SSDLCOrchestrator:
                     "Code Reviewer",
                     effective_engine,
                     effective_model,
-                    verdict or "INVALID_VERDICT",
+                    'INPUT_CHANGED' if input_changed else verdict or "INVALID_VERDICT",
                     dur,
                     cost,
                     tin,
@@ -2564,6 +2592,10 @@ class SSDLCOrchestrator:
                     reasoning_effort=rev_effort,
                 )
             )
+            self.check_budget_circuit_breaker()
+            if input_changed:
+                self.record_gate(f'CODE_REVIEW_A{attempt}', False, 'Verified checkpoint changed during review')
+                raise TaskError('Verified checkpoint changed during review; approval withheld')
             verdict_note = "Invalid or ambiguous final verdict; approval withheld.\n\n" if verdict is None else ""
             combined_reviews.append(f"## Reviewer: `{effective_engine}:{effective_model}` ({verdict or 'INVALID_VERDICT'}, reasoning={rev_effort})\n\n{verdict_note}{rev_out}\n\n---\n")
 

@@ -625,6 +625,14 @@ Only passing verification can create a checkpoint; failures return to ordinary
 repair using the remaining developer allowance. Scope/environment blockers and
 altered responses cannot use this recovery path.
 
+Task-mode code review receives the complete cumulative diff and runs read-only in
+the verified task worktree. It verifies the diff against the clean checkpoint before
+calling reviewers and withholds approval if the checkpoint changes during review.
+`SSDLC_REVIEW_MAX_DIFF_CHARS` controls the explicit input budget (default 200,000;
+maximum 1,000,000). A larger diff stops before model invocation instead of silently
+truncating input. Each invocation archives its full prompt/input and individual raw
+reviews under `04-review/runs/`, retaining evidence even if a later reviewer fails.
+
 This bootstrap requires strict file manifests and automated task checks. Runtime
 scope expansion, targeted review bounce, granular model
 routing, shared invocation/time budgets, subgoals and the advisory lifecycle remain
