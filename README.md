@@ -626,12 +626,48 @@ repair using the remaining developer allowance. Scope/environment blockers and
 altered responses cannot use this recovery path.
 
 This bootstrap requires strict file manifests and automated task checks. Runtime
-scope expansion, targeted review bounce and transitive invalidation, granular model
+scope expansion, targeted review bounce, granular model
 routing, shared invocation/time budgets, subgoals and the advisory lifecycle remain
 subsequent increments. Advisory schemas and provenance validation are available;
 proposal collection, export and `--from-proposal` are not implemented yet. Global
 review, QA and AppSec still run through the existing pipeline; the complete independent
 review matrix is part of the next increments.
+
+Transitive invalidation and verification-only revalidation are available through
+`TaskScheduler` without changing the plan or invoking a developer:
+
+```python
+scheduler.invalidate(["T1"], reason="Recheck affected tasks and their dependants")
+result = scheduler.revalidate()
+if not result.complete:
+    inspect(result.failed, result.blocked)
+```
+
+`revalidate()` accepts a journal with only COMPLETED/INVALIDATED tasks. It checks
+fingerprints, clean HEAD/tree, protected/ignored-path baselines and retained evidence,
+then verifies invalidated tasks in deterministic dependency order. Passing tasks
+receive fresh evidence; failed tasks stay INVALIDATED and their dependants are blocked.
+The result exposes passed, failed, blocked and unchanged tasks. Producer provenance,
+commits and developer counters are preserved. Normal `run()` resumes only after all
+invalidated work is successfully revalidated; its legacy refusal text is retained.
+
+Each attempt uses a fresh directory, exclusive log creation, durable check-start and
+completion events, and journal-authoritative recovery. Recorded original checks,
+failed-attempt check logs/diffs, global preflight logs and retained revalidation logs
+are hash-checked. Root identity and directory ancestry are checked before exclusive
+writes, detecting evidence-root redirection during verifier execution. Source/HEAD
+mutation or unsafe evidence paths stop without a false COMPLETED transition.
+
+These are unkeyed integrity checks, not authentication or continuous filesystem
+containment. The lock coordinates scheduler processes; arbitrary external writers
+and ignored-file contents remain outside the guarantee. Unreferenced partial logs,
+developer output, manifests and unrelated artifacts are outside this evidence inventory.
+Discard a scheduler instance after an exception. Interrupted verification can be
+repeated in a fresh directory, preserving earlier artifacts and audit history.
+
+Verification supports a toolkit or target in a linked Git checkout: its shared Git
+metadata is mounted read-only, preserving Git visibility without granting writes to
+repository configuration or other worktrees.
 
 The bootstrap stops on review feedback instead of skipping rejected completed tasks.
 Approval requires passing global gates, a clean checkpoint and an unchanged clean

@@ -1239,6 +1239,36 @@ class PromptTransportTests(unittest.TestCase):
 
 
 class RevalidateTests(SchedulerTests):
+    def assert_evidence_root_redirection_refused(self, redirect_parent=False):
+        scheduler = self.invalidated_chain()
+        root = scheduler.directory
+        originals = {root/c['log_ref']: (root/c['log_ref']).read_bytes()
+                     for task in scheduler.state['tasks'].values() for c in task['checks']}
+        def redirect():
+            source = root.parent if redirect_parent else root
+            destination = source.with_name(source.name + '-redirected')
+            source.rename(destination)
+            source.symlink_to(destination, target_is_directory=True)
+        scheduler.verifier = self.scripted_verifier([redirect])
+        with self.assertRaisesRegex(TaskError, 'Evidence root changed during verification'):
+            scheduler.revalidate()
+        self.assertEqual(len(self.verifier_calls), 1)
+        self.assertEqual(scheduler.state['tasks']['A']['status'], 'INVALIDATED')
+        self.assertEqual(scheduler.state['tasks']['B']['status'], 'INVALIDATED')
+        self.assertEqual(scheduler.state['tasks']['D']['status'], 'COMPLETED')
+        run = scheduler.state['revalidation_runs'][-1]
+        self.assertEqual(run['status'], 'ABORTED')
+        self.assertEqual(run['cursor']['task_id'], 'A')
+        self.assertEqual(run['cursor']['check_id'], 'CHECK-A')
+        for path, content in originals.items():
+            self.assertEqual(path.read_bytes(), content)
+
+    def test_evidence_root_redirection_stops_before_writing_check_log(self):
+        self.assert_evidence_root_redirection_refused()
+
+    def test_evidence_root_ancestor_redirection_stops_before_writing_check_log(self):
+        self.assert_evidence_root_redirection_refused(redirect_parent=True)
+
     def scripted_verifier(self, actions=()):
         self.verifier_calls = []
         actions = iter(actions)

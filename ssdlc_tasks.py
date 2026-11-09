@@ -725,6 +725,8 @@ class TaskScheduler:
                 raise TaskError(f"Evidence invalid for task '{problem['task_id']}' check "
                                 f"'{problem['check_id']}': {problem['reason']} ({problem['path']})")
             self._assert_clean()
+            root_stat = self.directory.stat()
+            self._revalidation_root_identity = (str(self.directory.resolve()), root_stat.st_dev, root_stat.st_ino)
             head = self.state['expected_head']
             tree = git(self.wt, 'rev-parse', 'HEAD^{tree}')
             protected, ignored = self._protected(), self._ignored()
@@ -886,13 +888,20 @@ class TaskScheduler:
 
     def _assert_evidence_dir(self, path, task_id=None, check_id=None):
         try:
+            expected_root = getattr(self, '_revalidation_root_identity', None)
+            root_stat = self.directory.stat()
+            actual_root = (str(self.directory.resolve()), root_stat.st_dev, root_stat.st_ino)
+            if expected_root is not None and actual_root != expected_root:
+                raise _EvidencePathError('Evidence root changed during verification', task_id, check_id, str(self.directory))
             relative = path.relative_to(self.directory)
             current = self.directory
             for part in relative.parts:
                 current = current / part
                 if not stat.S_ISDIR(os.lstat(current).st_mode):
                     raise _EvidencePathError('Invalid evidence directory', task_id, check_id, str(current))
-        except (OSError, ValueError) as exc:
+        except _RevalidationStop:
+            raise
+        except (OSError, ValueError, RuntimeError) as exc:
             raise _EvidencePathError('Invalid evidence directory', task_id, check_id, str(path)) from exc
 
     def _make_attempt_dir(self, path):
