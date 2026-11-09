@@ -245,6 +245,18 @@ class ValidationTests(BehaviorCase):
         self.assertEqual(d['indices'], [0, 2])
         self.assertEqual(d['finding_id'], 'F1')
 
+    def test_colliding_display_paths_preserve_each_unknown_field_diagnostic(self):
+        r = report()
+        names = ('a' * 127 + '/', 'a' * 127 + '~')
+        for name in names:
+            r[name] = True
+        diagnostics = self.errors(r)
+        self.assertEqual(len(diagnostics), 2)
+        self.assertEqual({d['code'] for d in diagnostics}, {'unknown_field'})
+        self.assertEqual({d['value'] for d in diagnostics}, set(names))
+        reordered = dict(reversed(list(r.items())))
+        self.assertEqual(diagnostics, self.errors(reordered))
+
     def test_stale_commit(self):
         r = report()
         r['reviewed_commit'] = 'b' * 40

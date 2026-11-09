@@ -156,7 +156,10 @@ class _Diagnostics:
             d['field'] = parts[2]
         if indices is not None:
             d['indices'] = list(indices)
-        self.items[(index, d['path'], code, d['message'])] = d
+        # Display paths are escaped and bounded. Distinct raw fields can share a
+        # display prefix; keep their identities separate and their order stable.
+        identity = tuple((type(part).__name__, str(part)) for part in parts)
+        self.items[(index, d['path'], code, d['message'], identity)] = d
 
     def raise_if_any(self):
         if self.items:
@@ -224,7 +227,7 @@ def _schema_errors(report, d):
                     d.add('missing_field', path + (name,))
         elif keyword == 'additionalProperties':
             for name in error.instance.keys() - error.schema['properties'].keys():
-                d.add('unknown_field', path + (name,))
+                d.add('unknown_field', path + (name,), name)
         else:
             code = {'type': 'invalid_type', 'maxItems': 'limit_exceeded',
                     'maxLength': 'limit_exceeded', 'minItems': 'missing_evidence'}.get(keyword, 'invalid_value')
