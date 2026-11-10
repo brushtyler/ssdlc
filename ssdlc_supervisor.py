@@ -411,7 +411,7 @@ def validate_record(d):
         raise SupervisorIntegrityError('metadata_corrupt')
     if set(d) - (set(RUN_SHAPE) | required | {'in_flight'}):
         raise SupervisorIntegrityError('metadata_corrupt')
-    for key, allowed in [('authorized', set(RUN_SHAPE['authorized']) | {'test_cmd_sha256', 'argv_id', 'compatibility_approved', 'review_repairs', 'rounds', 'containers_possible'}),
+    for key, allowed in [('authorized', set(RUN_SHAPE['authorized']) | {'test_cmd_sha256', 'argv_id', 'compatibility_approved', 'review_repairs', 'rounds', 'containers_possible', 'task_mode'}),
                          ('fingerprints', set(RUN_SHAPE['fingerprints'])),
                          ('processes', {'worker', 'controller', 'descendants'}),
                          ('handoff', {'outcome', 'at'})]:
@@ -419,8 +419,9 @@ def validate_record(d):
             raise SupervisorIntegrityError('metadata_corrupt')
     if d['authorized'].get('argv_id') not in {'orchestrator.run', 'orchestrator.plan', 'orchestrator.design'}:
         raise SupervisorIntegrityError('metadata_corrupt')
-    if 'containers_possible' in d['authorized'] and type(d['authorized']['containers_possible']) is not bool:
-        raise SupervisorIntegrityError('metadata_corrupt')
+    for key in ('containers_possible', 'task_mode'):
+        if key in d['authorized'] and type(d['authorized'][key]) is not bool:
+            raise SupervisorIntegrityError('metadata_corrupt')
     if d['resumes'] is not None and (not isinstance(d['resumes'], str) or not RUN_ID.fullmatch(d['resumes'])):
         raise SupervisorIntegrityError('metadata_corrupt')
     if d['completion_kind'] is not None and d['completion_kind'] not in {'run', 'plan', 'design'}:
@@ -693,7 +694,8 @@ def new_record(a, store):
                       test_cmd_sha256=digest(a['test_cmd']) if a.get('test_cmd') is not None else None,
                       test_cmd_authority='operator_flag', reauthorization=a.get('_reauthorization', []), argv_id='orchestrator.' + a['entrypoint'],
                       review_repairs=a.get('review_repairs'), rounds=a.get('rounds'), compatibility_approved=True,
-                      containers_possible=project_env.get('SSDLC_EXECUTION_MODE', 'docker') != 'native')
+                      containers_possible=project_env.get('SSDLC_EXECUTION_MODE', 'docker') != 'native',
+                      task_mode=bool(read_document(Path(a['repo']) / '.ssdlc' / a['ticket'] / 'state.json').get('task_breakdown')) or project_env.get('SSDLC_ENABLE_TASK_BREAKDOWN', 'false').lower() == 'true')
     return dict(schema_version=1, revision=0, worker_generation=1, run_id=store.run_id, nonce=uuid.uuid4().hex,
         resumes=a.get('_resumes'), project=dict(key=digest(a['repo'])[:16], name='project'), ticket=a['ticket'],
         created_at=float(store.clock.time()), authorized=authorized,
@@ -1888,6 +1890,11 @@ def completion(store, d, state):
     if kind == 'run':
         if state.get('status') != 'AWAITING_SUPERVISOR_SIGNOFF':
             return False
+        # Legacy pipelines have no task checkpoint. Bind the decision to the
+        # mode authorized at launch; old records without a mode remain strict.
+        task_mode = d['authorized'].get('task_mode', True) or bool(state.get('task_breakdown')) or bool(state.get('task_verified_head'))
+        if not task_mode:
+            return True
         worktree = repo / '.ssdlc' / store.ticket / 'worktree'
         return (worktree.is_dir() and bool(state.get('task_verified_head')) and
                 git_read(worktree, 'rev-parse', 'HEAD') == state['task_verified_head'] and

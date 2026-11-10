@@ -904,5 +904,51 @@ class TestReviewDiagnosisRegressions(CoreCase):
     def test_stale_deadline_observation_cannot_overwrite_concurrent_cancel(self):
         self.check_monitor_cancel_race(True)
 
+class TestCompletionModeAndForegroundRegressions(CoreCase):
+    def completed_legacy(self):
+        store, proc = self.fake_run()
+        del proc.entries[2002]
+        store.update(lambda d: d.update(base_commit_at_launch='base', exit_evidence=dict(source='parent_returncode', code=0, intent_id='b'*32)))
+        store.update(lambda d: d['authorized'].update(task_mode=False))
+        path = self.repo / '.ssdlc/T-1/state.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(dict(base_commit='base', status='AWAITING_SUPERVISOR_SIGNOFF')))
+        return store, proc
+
+    def test_legacy_completion_has_no_task_checkpoint_requirement(self):
+        store, proc = self.completed_legacy()
+        canonical = self.repo / '.ssdlc/T-1/state.json'
+        before = canonical.read_bytes()
+        with patch.object(sup, 'git_read', return_value='base'):
+            out = sup.status(self.repo, 'T-1', proc=proc)
+        self.assertEqual((out['status'], out['completion_kind']), ('completed', 'run'))
+        self.assertEqual(canonical.read_bytes(), before)
+
+    def test_task_completion_still_requires_verified_clean_worktree(self):
+        store, proc = self.completed_legacy()
+        store.update(lambda d: d['authorized'].update(task_mode=True))
+        with patch.object(sup, 'git_read', return_value='base'):
+            out = sup.status(self.repo, 'T-1', proc=proc)
+        self.assertEqual(out['status_reason'], 'completion_mismatch')
+
+    def test_old_record_without_mode_does_not_gain_legacy_completion_authority(self):
+        store, proc = self.completed_legacy()
+        store.update(lambda d: d['authorized'].pop('task_mode'))
+        with patch.object(sup, 'git_read', return_value='base'):
+            out = sup.status(self.repo, 'T-1', proc=proc)
+        self.assertEqual(out['status_reason'], 'completion_mismatch')
+
+    def test_foreground_resume_retains_legacy_baseline_refusal_contract(self):
+        import types
+        import orchestrator as o
+        root = self.repo / '.ssdlc/T-1'
+        fake = types.SimpleNamespace(ssdlc_root=root, state={}, _task_mode=lambda: True,
+            PHASE_ORDER=o.SSDLCOrchestrator.PHASE_ORDER, _ensure_task_plan=lambda: None,
+            run_phase_dev=lambda **kwargs: (_ for _ in ()).throw(RuntimeError('reached_dev')))
+        with self.assertRaisesRegex(RuntimeError, 'reached_dev'), contextlib.redirect_stdout(io.StringIO()):
+            o.SSDLCOrchestrator._run_pipeline(fake, 'goal', from_phase='03-dev')
+        # Supervised compatibility remains read-only and still refuses missing state.
+        self.assertFalse(o.resume_compatibility(self.repo, 'T-1', 'run', '03-dev', {'SSDLC_ENABLE_TASK_BREAKDOWN': 'true'})['ok'])
+
 if __name__ == '__main__':
     unittest.main()

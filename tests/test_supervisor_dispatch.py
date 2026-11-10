@@ -41,6 +41,27 @@ class TestDispatchHooks(Case):
         output = json.dumps(dict(result='OK', total_cost_usd=.1)) if 'claude' in argv[0] else 'OK'
         return subprocess.CompletedProcess(argv, 0, output, '')
 
+    def test_unknown_exception_names_preserve_terminal_events_without_raw_names(self):
+        for name in ['KeyError', 'JSONDecodeError', 'URLError', 'FileNotFoundError', 'PRIVATE_SENTINEL_CUSTOM_EXCEPTION']:
+            o._supervision_event('failure', category='TASK_EXECUTION', exc_type=name)
+            o._supervision_event('run_ended', exit_code=1, exc_type=name)
+        events = self.events()
+        self.assertEqual(len(events), 10)
+        self.assertTrue(all(e['exc_type'] == 'Exception' for e in events))
+        text = self.event_file(self.store_).read_text()
+        self.assertNotIn('PRIVATE_SENTINEL_CUSTOM_EXCEPTION', text)
+        self.assertTrue(s.exit_evidence(self.store_.read(), events)['code'] == 1)
+
+    def test_unknown_dispatch_exception_keeps_raised_terminal_binding(self):
+        with patch.object(o.EngineRunner, '_run_role_command', side_effect=KeyError('PRIVATE_SENTINEL_MESSAGE')):
+            with self.assertRaises(KeyError):
+                o.EngineRunner.invoke_role('codex', 'fake', 'sys', 'prompt', self.repo, 'p', 'T', '03-dev')
+        events = self.events()
+        self.assertEqual([e['type'] for e in events], ['dispatch_started', 'dispatch_finished'])
+        self.assertEqual(events[-1]['exc_type'], 'Exception')
+        self.assertEqual(events[-1]['outcome'], 'raised')
+        self.assertNotIn('PRIVATE_SENTINEL_MESSAGE', self.event_file(self.store_).read_text())
+
     def test_inventory_and_spawn_inside_dispatch(self):
         expected = {'invoke_role', 'call_openrouter', 'run_agy', 'run_codex', 'run_claude'}
         wrapped = {name for name in vars(o.EngineRunner) if getattr(getattr(o.EngineRunner, name), '_supervised_dispatch', False) is True}

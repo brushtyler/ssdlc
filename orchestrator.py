@@ -76,6 +76,10 @@ def _supervision_event(event_type, **fields):
                    'dispatch_id', 'engine', 'task_id', 'attempt'}
         if set(fields) - allowed:
             return False
+        # Keep terminal evidence for ordinary or custom exception classes while
+        # never persisting an arbitrary class name or exception message.
+        if isinstance(fields.get('exc_type'), str) and fields['exc_type'] not in sup.EXC_TYPES:
+            fields['exc_type'] = 'Exception'
         if (not sup.RUN_ID.fullmatch(env.get('SSDLC_SUPERVISED_RUN_ID', '')) or
                 not sup.RUN_ID.fullmatch(env.get('SSDLC_SUPERVISED_INTENT', '')) or
                 int(env['SSDLC_SUPERVISED_GEN']) < 1):
@@ -231,7 +235,8 @@ def _resume_plan_refusal(repo, root, state, task_mode):
             raise PlanError(f"Planning input is missing, unapproved or changed: {name}")
 
 
-def _resume_design_refusal(repo, root, state, task_mode):
+def _resume_design_refusal(repo, root, state, task_mode, read_git=None):
+    read_git = read_git or _resume_git
     if (root / "worktree").exists() or ((root / "02-design") / 'plan.json').exists():
         raise PlanError('Planning or execution already started; explicit design migration required')
     for gate in ('RECON_BLAST_RADIUS_GATE', 'PO_SPEC_GATE'):
@@ -246,7 +251,7 @@ def _resume_design_refusal(repo, root, state, task_mode):
         path = root / name
         if not meta or not path.is_file() or file_hash(path) != meta['sha256']:
             raise PlanError(f'Design input changed or disappeared: {name}')
-    if _resume_git(repo, 'rev-parse', 'HEAD') != state['base_commit'] or _resume_git(repo, 'status', '--porcelain'):
+    if read_git(repo, 'rev-parse', 'HEAD') != state['base_commit'] or read_git(repo, 'status', '--porcelain'):
         raise PlanError('Design requires the unchanged clean target baseline')
 
 
@@ -2612,7 +2617,7 @@ class SSDLCOrchestrator:
         """Resume design only against sealed upstream artifacts; never execute code."""
         with ticket_lock(self.ssdlc_root / 'ticket.lock'):
             self.state = self._load_or_init_state()
-            _resume_design_refusal(self.repo_root, self.ssdlc_root, self.state, self._task_mode())
+            _resume_design_refusal(self.repo_root, self.ssdlc_root, self.state, self._task_mode(), read_git=git)
             self.state.update(status='IN_PROGRESS', current_phase='02-design', current_step='pair-design')
             self.state.pop('failure', None)
             self._save_state()
@@ -3988,7 +3993,9 @@ To **REJECT** and send feedback back to the team:
         from_phase: str = "00-recon",
     ) -> Path:
         if self._task_mode() or os.environ.get('SSDLC_SUPERVISED_RUN_ID'):
-            _resume_run_refusal(self.ssdlc_root, self.state, self._task_mode(), from_phase, self.state_file.is_file())
+            # The read-only compatibility API checks whether baseline state exists.
+            # The existing foreground path retains its previous refusal contract.
+            _resume_run_refusal(self.ssdlc_root, self.state, self._task_mode(), from_phase)
         start_idx = self.PHASE_ORDER.index(from_phase) if from_phase in self.PHASE_ORDER else 0
 
         if start_idx <= self.PHASE_ORDER.index("00-recon"):

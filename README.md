@@ -901,7 +901,9 @@ reserved supervisor markers, `PWD`, `SHLVL` and `_`. A different shell's `TERM`,
 `OLDPWD` or `SSH_AUTH_SOCK` can therefore block adoption. Restart from the same
 effective environment; there is no reauthorization while adopting a live
 controller. A changed environment requires explicit reconciliation and, once the
-old controller is gone, a supported resume with audited reauthorization.
+old controller is gone, a supported resume with audited reauthorization. Switching from a goal-bearing `run` to `plan` or `design`
+also changes the goal fingerprint to null and explicitly requires
+`--reauthorize-fingerprints`; same-entrypoint examples assume unchanged inputs.
 
 The goal and ticket prose are inert argv data. `--test-cmd` has different authority:
 it is an operator-authorized executable verification command, executed by the
