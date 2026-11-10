@@ -824,6 +824,35 @@ the reviewer feedback and archived report path. These logs add no model calls an
 do not change retry limits or approval criteria. Controllers already running from
 a pinned checkout retain their original logging behavior.
 
+### PO format validation and recovery
+
+Task-mode PO output must pass the same strict requirement catalogue used by
+design and planning before `PO_SPEC_GATE` can pass. Each AC/SEC ID must be defined
+exactly once; prose mentions alone do not define obligations. Explicit children
+use IDs such as `AC-1-1` or `AC-1a`.
+
+The PO adapter can convert unambiguous dotted declaration IDs (`AC-1.1` to
+`AC-1-1`) and their prose references without another model call. It preserves
+every clause and fenced code, and archives the original, canonical representation,
+ID mapping and hashes under `01-po/validation/`. Collisions, duplicate definitions,
+missing AC/SEC families and other malformed IDs remain blocking. The catalogue
+itself still rejects unsupported dotted IDs; this is an explicit recorded format
+revision rather than relaxed validation.
+
+For an existing task ticket stopped before design/planning/development:
+
+```bash
+./ssdlc po --ticket TKT-001 --repo /path/to/project
+```
+
+This command validates the registered existing specification without calling a
+provider, repeating recon/tests or changing ledger/development counters. It
+verifies the clean target baseline and retained evidence. Registered format intent
+allows restart after an interrupted canonical replacement; unexpected source or
+archive changes block. Successful validation records `PO_READY`; then use the
+normal `design` and `plan` entrypoints. It does not authorize arbitrary phase
+skipping, regenerate specifications or migrate tickets after downstream work.
+
 ### Task gate reports
 
 Task-mode Review, QA and AppSec require a human report, one JSON object between
