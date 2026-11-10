@@ -2106,8 +2106,24 @@ class SSDLCOrchestrator:
                         wt, self.project_id, self.ticket_id, f'{phase}-diag', sandbox='read-only',
                         reasoning_effort=request.reasoning_effort)
                 def ledger(details):
-                    self.record_ledger(CostAndTelemetryEntry(f'{phase}-diag', 'Diagnosis', request.engine,
-                        request.model, details['transition'], 0, reasoning_effort=request.reasoning_effort,
+                    if details['transition'] == 'result':
+                        previous = [entry for entry in self.state.get('ledger', [])
+                                    if entry.get('details', {}).get('diagnosis_request_id') == details['diagnosis_request_id']
+                                    and entry.get('details', {}).get('transition') == 'result']
+                        if previous:
+                            expected = (details['result_sha256'], round(details['cost_usd'], 6),
+                                        details['tokens_in'], details['tokens_out'],
+                                        details['producer']['engine'], details['producer']['model'])
+                            if len(previous) != 1 or (previous[0]['details'].get('result_sha256'),
+                                    previous[0]['cost_usd'], previous[0]['tokens_in'], previous[0]['tokens_out'],
+                                    previous[0]['engine'], previous[0]['model']) != expected:
+                                raise TaskError('Diagnosis ledger differs from its immutable result')
+                            return
+                    producer = details.get('producer', provider)
+                    self.record_ledger(CostAndTelemetryEntry(f'{phase}-diag', 'Diagnosis', producer['engine'],
+                        producer['model'], details['transition'], details.get('duration_sec', 0),
+                        cost_usd=details.get('cost_usd', 0), tokens_in=details.get('tokens_in', 0),
+                        tokens_out=details.get('tokens_out', 0), reasoning_effort=producer['reasoning_effort'],
                         details=details))
                 candidate_reports.run_diagnosis(self.ssdlc_root, gate=request.gate, finding=finding,
                     reviewed_commit=request.reviewed_commit, tree=tree, evaluation_identity=identity,
@@ -2163,6 +2179,10 @@ class SSDLCOrchestrator:
                               tool=dict(argv0=argv[0], resolved_realpath=str(Path(tool).resolve()), sha256=file_hash(Path(tool))),
                               env=dict({k: os.environ[k] for k in names if k in os.environ},
                                        PYTEST_ADDOPTS_base=os.environ.get('PYTEST_ADDOPTS', '')))
+                # Interpreter and PATH hashes do not bind mutable site-packages or
+                # other dependencies outside the source tree. Keep current proof,
+                # but collect again for another gate rather than assume equivalence.
+                result.update(reuse_eligible=False, reason='local_dependencies_unpinned')
         except (OSError, ValueError, subprocess.SubprocessError):
             result.update(reuse_eligible=False, reason='environment_identity_unavailable')
         return result

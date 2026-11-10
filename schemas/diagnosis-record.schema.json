@@ -300,6 +300,10 @@
         },
         "trust": {
           "const": "untrusted_data"
+        },
+        "duration_sec": {
+          "type": "number",
+          "minimum": 0
         }
       },
       "required": [

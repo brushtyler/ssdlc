@@ -49,6 +49,8 @@ class SequenceTests(checkpoint.FullCheckpointReviewTests):
             self.assertEqual(candidate.decisions[0]['decision'], 'reused')
             return True, 'passed'
         with patch.object(orch, '_controller_revision', return_value=dict(head='controller', files_sha256='b'*64)), \
+             patch.object(orch, '_verification_environment', return_value=dict(
+                 mode='role_container', platform='fixture', image_id='sha256:' + '1'*64, reuse_eligible=True)), \
              patch.object(orch, '_ensure_task_plan', return_value=self.plan), patch.object(orch, 'run_phase_dev'), \
              patch.object(orch, 'run_phase_qa', side_effect=qa), \
              patch.object(orch, 'run_phase_ops'), patch.object(orch, 'run_phase_docs'), \

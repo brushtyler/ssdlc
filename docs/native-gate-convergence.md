@@ -20,6 +20,8 @@ Evidence reuse is limited to proven equivalence across source commit and tree,
 controller, contract, command, environment identity and privilege mode. Reuse is
 declined when environment identity cannot be established. The check can still
 run and supply proof for that collection, but another gate must collect again.
+Local checks always decline cross-gate reuse: interpreter and environment hashes
+do not establish equivalence of mutable dependencies outside the source tree.
 Continuing an existing phase attempt preserves its immutable catalogue snapshot;
 that continuation is distinct from reuse in a new collection. Reuse, execution,
 rejections and invalidation are recorded in structured decision artifacts.
@@ -31,13 +33,18 @@ required, with the existing structured assessment and blocker rules intact.
 
 ## Diagnosis and history
 
-Diagnosis is advisory, untrusted data only and never changes a verdict, clears a
+Diagnosis supplies untrusted analysis only and never changes a verdict, clears a
 blocker, resolves a finding, or accepts an advisory. Text claiming approval has
 no authority over structured assessments.
 
 The diagnosis allowance is bounded (default two per ticket), persisted, and
 never reset. Immutable request, evaluation association, reservation, consumption,
 result and uncertainty records are separate from development-attempt accounting.
+Reported diagnosis costs, tokens and duration enter the existing ledger exactly
+once, including recovery of a persisted result whose ledger write was interrupted.
+The producer remains the one recorded at dispatch. A budget refusal before dispatch
+does not become an uncertain invocation or consume an inference. This preserves
+the existing accounting units; subscription/API billing classification is separate.
 Consumption is persisted before dispatch. Duplicate requests and restarts do
 not grant another inference; a lost response or uncertain dispatch is recorded
 as uncertain, without a fabricated result or implicit retry. Exhaustion and

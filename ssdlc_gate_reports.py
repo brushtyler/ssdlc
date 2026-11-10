@@ -1104,6 +1104,15 @@ def run_diagnosis(root, *, gate, finding, reviewed_commit, tree, evaluation_iden
     def adopt():
         for ref, path in _diagnosis_inventory(root, artifacts):
             register(ref, path)
+    def account_result(result):
+        ref = base + '/result.json'
+        dispatch = read(base + '/consumption.json')['dispatch']
+        ledger(dict(diagnosis_request_id=rid, transition='result', slot=consumption['slot'],
+                    result_ref=ref, result_sha256=artifacts[ref]['sha256'],
+                    producer=dict(result['producer'], reasoning_effort=dispatch['reasoning_effort']),
+                    cost_usd=result['cost_usd'], tokens_in=result['tokens_in'], tokens_out=result['tokens_out'],
+                    duration_sec=result.get('duration_sec', 0)))
+        check_budget()
     def uncertain(reason, exc_type=None):
         obj = dict(kind='uncertain', request_id=rid, slot=consumption['slot'], reason=reason)
         if exc_type:
@@ -1130,6 +1139,7 @@ def run_diagnosis(root, *, gate, finding, reviewed_commit, tree, evaluation_iden
         adopt()
         result = read(base + '/result.json')
         if result:
+            account_result(result)
             return load_diagnosis(root, rid, artifacts)
         if consumption:
             uncertain('dispatch_started_without_result')
@@ -1156,10 +1166,12 @@ def run_diagnosis(root, *, gate, finding, reviewed_commit, tree, evaluation_iden
         user = untrusted_data('finding', finding) + '\n' + untrusted_data('candidate evidence catalogue', candidate_block)
         consumption = dict(kind='consumption', request_id=rid, slot=slot, dispatch=provider,
                            prompt_sha256=_digest(user.encode()), association=assoc)
+        # A known limit refusal occurs before dispatch, so it is not an uncertain call.
+        check_budget()
         write(base + '/consumption.json', consumption, True)
         fault(DIAGNOSIS_POINTS[3])
+        started = time.monotonic()
         try:
-            check_budget()
             text, cost, tin, tout, trace = invoke(DIAGNOSIS_SYSTEM, user)
         except Exception as exc:
             uncertain('dispatch_raised', type(exc).__name__)
@@ -1168,12 +1180,14 @@ def run_diagnosis(root, *, gate, finding, reviewed_commit, tree, evaluation_iden
         write(base + '/result.json', dict(kind='result', request_id=rid, finding_id=finding['id'],
             text=bounded, text_sha256=_digest(bounded.encode()), truncated=len(text) > len(bounded), total_chars=len(text),
             producer={k: provider[k] for k in ('engine', 'model')}, cost_usd=cost, tokens_in=tin, tokens_out=tout,
+            duration_sec=time.monotonic() - started,
             source=dict(commit=reviewed_commit, tree=tree), candidate_records=candidate_records, trust='untrusted_data'), True)
         fault(DIAGNOSIS_POINTS[5])
         adopt()
         fault(DIAGNOSIS_POINTS[6])
-        for transition in ('requested', 'reserved', 'consumed', 'result'):
+        for transition in ('requested', 'reserved', 'consumed'):
             ledger(dict(diagnosis_request_id=rid, transition=transition, slot=slot))
+        account_result(read(base + '/result.json'))
         return load_diagnosis(root, rid, artifacts)
 
 
