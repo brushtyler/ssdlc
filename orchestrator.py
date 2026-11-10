@@ -17,6 +17,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -34,7 +35,8 @@ from ssdlc_planning import PlanRepair
 from ssdlc_design import DesignSession
 from ssdlc_gate_reports import (GateEvaluator, EvaluationRequest, GateTerminalError,
     build_trusted_context, fingerprint, UNTRUSTED_DATA_INSTRUCTION, untrusted_data,
-    ScannerResult, scanner_status_json, discover_manifest_scopes, write_or_verify, canon)
+    ProtocolError, ScannerResult, scanner_status_json, discover_manifest_scopes, write_or_verify, canon)
+import ssdlc_bounce as bounce
 from ssdlc_bounce import request_identity
 from ssdlc_catalogues import CatalogueError, requirement_catalogue
 from ssdlc_controller import assert_controller, controller_snapshot
@@ -1477,6 +1479,95 @@ class SSDLCOrchestrator:
         self.state = self._load_or_init_state()
         self.remote_sync = RemoteSyncManager(self.repo_root, self.ticket_id, enabled=sync_remote)
         self.issue_id = issue_id or self.state.get("issue_id")
+
+    def preview_bounce(self, phase: str, attempt: int) -> dict:
+        """Host-only preview of one exact task gate; never run pipeline roles."""
+        counters = getattr(self, 'preview_counters', None)
+        if counters is None:
+            counters = self.preview_counters = dict(created=0, reused=0, recovered=0,
+                                                    blocked_by_reason={})
+        result = dict(status='blocked', execution_authorized=False, blockers=[])
+        try:
+            if (not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', self.ticket_id)
+                    or phase not in bounce.PHASES or type(attempt) is not int or attempt < 1):
+                raise bounce.BounceError('malformed_record')
+            # Acquire before loading. Do not initialize or migrate legacy state.
+            bounce._safe_path(self.ssdlc_root, 'ticket.lock')
+            with ticket_lock(self.ssdlc_root / 'ticket.lock'):
+                self.state = json.loads(bounce._safe_path(self.ssdlc_root, 'state.json').read_text())
+                initial = bounce.read_evidence(root=self.ssdlc_root, state=self.state,
+                    repo=self.repo_root, worktree=self.worktree_dir, phase=phase, attempt=attempt)
+                if initial['status'] != 'verified':
+                    result = {k: initial[k] for k in ('status', 'execution_authorized', 'blockers')}
+                else:
+                    controller_root = Path(__file__).resolve().parent
+                    if controller_root == self.worktree_dir.resolve():
+                        raise bounce.BounceError('controller_unpinned')
+                    contract_ref = '00-recon/controller-contract.json'
+                    contract_path = bounce._safe_path(self.ssdlc_root, contract_ref)
+                    meta = self.state['artifacts'].get(contract_ref)
+                    if not meta or not contract_path.is_file() or file_hash(contract_path) != meta['sha256']:
+                        raise bounce.BounceError('controller_integrity')
+                    controller = json.loads(contract_path.read_text())
+                    assert_controller(controller_root, controller)
+                    repo_before = (git(self.repo_root, 'rev-parse', 'HEAD'),
+                                   git(self.repo_root, 'status', '--porcelain'),
+                                   git(self.repo_root, 'diff', '--binary', 'HEAD'))
+                    frozen = bounce.preview_snapshot(self.ssdlc_root, self.state)
+                    sources = {}
+                    for ref, entry in self.state['artifacts'].items():
+                        if not ref.startswith('bounce-preview/'):
+                            path = bounce._safe_path(self.ssdlc_root, ref)
+                            if file_hash(path) != entry['sha256']:
+                                raise bounce.BounceError('integrity_mismatch')
+                            sources[ref] = entry['sha256']
+
+                    def verify():
+                        fresh = json.loads(bounce._safe_path(self.ssdlc_root, 'state.json').read_text())
+                        assert_controller(controller_root, controller)
+                        if repo_before != (git(self.repo_root, 'rev-parse', 'HEAD'),
+                                           git(self.repo_root, 'status', '--porcelain'),
+                                           git(self.repo_root, 'diff', '--binary', 'HEAD')):
+                            raise bounce.BounceError('source_changed')
+                        if bounce.preview_snapshot(self.ssdlc_root, fresh) != frozen:
+                            raise bounce.BounceError('snapshot_mismatch')
+                        evidence = bounce.read_evidence(root=self.ssdlc_root, state=fresh,
+                            repo=self.repo_root, worktree=self.worktree_dir, phase=phase, attempt=attempt)
+                        if evidence != initial:
+                            raise bounce.BounceError('postcheck_failed')
+
+                    proposal = bounce.plan_bounce(repo=self.repo_root, artifacts=self.ssdlc_root,
+                        plan=initial['plan'], requirements_text=initial['requirements_text'],
+                        quality=initial['quality'], reviewed_commit=initial['reviewed_commit'],
+                        evaluations=initial['evaluations'], phase=phase, attempt=attempt)
+                    result = bounce.publish_preview(root=self.ssdlc_root, state=self.state,
+                        proposal=proposal, sources=sources, verify=verify,
+                        record_artifact=self.record_artifact)
+                    counters[result['publication']] += 1
+        except bounce.BounceError as exc:
+            result = dict(status='blocked', execution_authorized=False, blockers=[{'code': exc.code}])
+        except bounce.FindingsError:
+            result = dict(status='blocked', execution_authorized=False, blockers=[{'code': 'report_invalid'}])
+        except ProtocolError as exc:
+            code = 'contradictory_evidence' if exc.code == 'binding_gate' else 'report_invalid'
+            result = dict(status='blocked', execution_authorized=False, blockers=[{'code': code}])
+        except (TaskError, PlanError, OSError):
+            result = dict(status='blocked', execution_authorized=False, blockers=[{'code': 'integrity_mismatch'}])
+        except (ValueError, TypeError, KeyError, IndexError, AttributeError):
+            result = dict(status='blocked', execution_authorized=False, blockers=[{'code': 'malformed_record'}])
+        plan = result.get('plan', {})
+        reasons = sorted({b['code'] for b in result.get('blockers', plan.get('blockers', []))})
+        for code in reasons:
+            counts = counters['blocked_by_reason']
+            counts[code] = counts.get(code, 0) + 1
+        # Selectors are validated before logging. No exception text or finding text.
+        logging.getLogger(__name__).info(
+            'bounce-preview ticket=%s phase=%s attempt=%s revision=%s status=%s reasons=%s roots=%d dependents=%d blockers=%d',
+            self.ticket_id if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', self.ticket_id) else 'invalid',
+            phase if phase in bounce.PHASES else 'invalid', attempt if type(attempt) is int else 0,
+            result.get('revision', '-'), result['status'], ','.join(reasons),
+            len(plan.get('repair_roots', [])), len(plan.get('revalidation_tasks', [])), len(reasons))
+        return result
 
     def _task_mode(self) -> bool:
         return bool(self.state.get("task_breakdown")) or os.environ.get("SSDLC_ENABLE_TASK_BREAKDOWN", "false").lower() == "true"
@@ -3912,7 +4003,7 @@ def cmd_doctor(repo: Path) -> int:
     return 0
 
 
-def main() -> int:
+def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Project-Isolated Multi-CLI SSDLC Orchestrator")
     sub = parser.add_subparsers(dest="subcommand", required=True)
 
@@ -3977,8 +4068,33 @@ def main() -> int:
     rej_sync.add_argument("--no-sync-remote", dest="sync_remote", action="store_false",
                           help="Disable remote synchronization on rejection cycle")
 
-    args = parser.parse_args()
+    p_preview = sub.add_parser('bounce-preview', help='Prepare a preview; grants no execution authority')
+    p_preview.add_argument('--ticket', required=True)
+    p_preview.add_argument('--repo', '-r', default='.')
+    p_preview.add_argument('--phase', required=True, choices=tuple(bounce.PHASES))
+    p_preview.add_argument('--attempt', required=True, type=int)
+
+    args = parser.parse_args(argv)
     repo_path = Path(getattr(args, "repo", ".")).resolve()
+
+    if args.subcommand == 'bounce-preview':
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', args.ticket) or args.attempt < 1:
+            parser.error('preview requires a literal ticket and a positive attempt')
+        # Avoid constructor side effects (runtime activation, state initialization,
+        # CLI version probes). Preview needs only the persisted public host state.
+        orch = SSDLCOrchestrator.__new__(SSDLCOrchestrator)
+        orch.repo_root, orch.ticket_id = repo_path, args.ticket
+        orch.ssdlc_root = repo_path / '.ssdlc' / args.ticket
+        orch.state_file = orch.ssdlc_root / 'state.json'
+        orch.worktree_dir = orch.ssdlc_root / 'worktree'
+        if not orch.ssdlc_root.is_dir():
+            print(json.dumps(dict(status='rejected-legacy', execution_authorized=False,
+                                  blockers=[{'code': 'rejected-legacy'}])))
+            return 20
+        result = orch.preview_bounce(args.phase, args.attempt)
+        print(bounce.canonical_json(result), end='')
+        return (0 if result['status'] == 'ready-for-later-executor' else
+                10 if result['status'] == 'diagnostic' else 20)
 
     if args.subcommand == "doctor":
         return cmd_doctor(repo_path)

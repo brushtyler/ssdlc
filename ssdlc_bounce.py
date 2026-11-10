@@ -251,13 +251,26 @@ def _safe_path(root, name):
             path = path.relative_to(root)
         except ValueError as exc:
             raise BounceError('contradictory_evidence') from exc
+    if '..' in path.parts or '\\' in str(path):
+        raise BounceError('unsafe_path')
+    # lstat checks each existing ancestor; dangling symlinks also reject.
+    import stat
+    for ancestor in (root, *root.parents):
+        try:
+            if stat.S_ISLNK(ancestor.lstat().st_mode):
+                raise BounceError('unsafe_path')
+        except FileNotFoundError:
+            pass
     current = root
     if root.is_symlink():
         raise BounceError('contradictory_evidence')
     for part in path.parts:
         current = current / part
-        if current.is_symlink():
-            raise BounceError('contradictory_evidence')
+        try:
+            if stat.S_ISLNK(current.lstat().st_mode):
+                raise BounceError('contradictory_evidence')
+        except FileNotFoundError:
+            pass
     return confined(root, str(path), protect=False)
 
 
@@ -504,3 +517,95 @@ def read_evidence(*, root, state, repo, worktree, phase, attempt):
         code = 'malformed_record'
     failure['blockers'] = [{'code': code}]
     return failure
+
+
+INTEGRITY_LIMITS = ('Hashes are unkeyed integrity checks, not authentication. '
+                    'No continuous containment is claimed. '
+                    'This preview grants no approval or execution authority.')
+
+
+def preview_snapshot(root, state):
+    """Hash immutable ticket bytes and semantic state, excluding preview refs.
+
+    The worktree is included: neither ignored source files nor raw projections
+    may be changed by publication. Lock files are coordination, not evidence.
+    """
+    root = Path(root)
+    frozen = copy.deepcopy(state)
+    frozen.pop('updated_at', None)
+    frozen['artifacts'] = {k: v for k, v in frozen.get('artifacts', {}).items()
+                           if not k.startswith('bounce-preview/')}
+    files = {}
+    for path in root.rglob('*'):
+        rel = path.relative_to(root)
+        if rel.parts[0] == 'bounce-preview' or str(rel) in ('state.json', 'ticket.lock'):
+            continue
+        if path.is_symlink():
+            import os
+            files[str(rel)] = {'symlink': os.readlink(path)}
+        elif path.is_file():
+            files[str(rel)] = _sha(path.read_bytes())
+    return _sha(canonical_json(dict(state=frozen, files=files)).encode())
+
+
+def publish_preview(*, root, state, proposal, sources, verify, record_artifact):
+    """Publish under the caller's ticket lock; verify before blessing any files.
+
+    Deliberate BaseException fault injections propagate at every persistence
+    boundary. Files left by an interruption are immutable recovery inputs.
+    """
+    from ssdlc_gate_reports import write_or_verify
+    root = Path(root).absolute()
+    payload = copy.deepcopy(proposal)
+    payload.pop('revision', None)
+    payload.update(source_hashes=sources, integrity_limits=INTEGRITY_LIMITS)
+    revision = _sha(canonical_json(payload).encode())
+    payload['revision'] = revision
+    base = f"bounce-preview/{payload['phase']}/attempt-{payload['attempt']}/{revision}"
+    data = canonical_json(payload).encode()
+    summary = ('Bounce preview\nexecution_authorized=false\n'
+               f"Revision: {revision}\nStatus: {payload['status']}\n"
+               f"Repair roots: {', '.join(payload['repair_roots']) or '(none)'}\n"
+               f"Revalidation tasks: {', '.join(payload['revalidation_tasks']) or '(none)'}\n"
+               'Reasons: ' + ', '.join(sorted({b['code'] for b in payload['blockers']})) + '\n'
+               + INTEGRITY_LIMITS + '\nSources (ticket-relative ref, SHA-256):\n'
+               + ''.join(f'{ref} {digest}\n' for ref, digest in sorted(sources.items()))).encode()
+    intended = [(base + '/plan.json', data), (base + '/summary.txt', summary)]
+    paths = []
+    existed = []
+    registered = []
+    # Inspect both paths before the first write, including registered-but-missing.
+    for ref, content in intended:
+        path = _safe_path(root, ref)
+        meta = state['artifacts'].get(ref)
+        present = path.exists()
+        if meta and not present:
+            raise BounceError('registered_artifact_missing')
+        if present and (not path.is_file() or path.read_bytes() != content):
+            raise BounceError('archive_conflict')
+        if meta and (meta.get('sha256') != _sha(content) or meta.get('path') != ref):
+            raise BounceError('archive_conflict')
+        paths.append(path)
+        existed.append(present)
+        registered.append(bool(meta))
+    verify()
+    for (ref, content), path, present in zip(intended, paths, existed):
+        if not present:
+            write_or_verify(path, content, root=root)
+    # A failed post-publication source check leaves files unregistered.
+    verify()
+    for (ref, content), path in zip(intended, paths):
+        if _safe_path(root, ref).read_bytes() != content:
+            raise BounceError('archive_conflict')
+    for (ref, _), path, known in zip(intended, paths, registered):
+        if not known:
+            record_artifact(ref, path)
+    verify()
+    for (ref, content), path in zip(intended, paths):
+        if _safe_path(root, ref).read_bytes() != content:
+            raise BounceError('archive_conflict')
+    return dict(status=('ready-for-later-executor' if payload['status'] == 'candidates'
+                        else 'diagnostic'), execution_authorized=False,
+                revision=revision, plan=payload, artifact_refs=[r for r, _ in intended],
+                publication=('reused' if all(registered) else
+                             'recovered' if any(existed) else 'created'))

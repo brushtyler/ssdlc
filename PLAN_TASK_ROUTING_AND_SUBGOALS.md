@@ -514,6 +514,20 @@ Ogni incremento include i relativi test; la suite non è rinviata alla fine. Per
 
 Stato aggiornato al 9 novembre 2026. Il percorso per task resta **opt-in**: i risultati del bootstrap e dei micro-ticket non equivalgono all'accettazione finale degli Step 1–6.
 
+### Step 3b.3a — Preview only
+
+Step 3b.2 / PR #13 merged with **397 tests after review fixes**. This increment
+only prepares targeted bounce: it verifies recorded gate evidence and archives a
+deterministic preview with `execution_authorized=false`. It grants no approval
+or execution authority. The following remain pending: repair execution,
+cumulative recovery, revalidation integration, repeated global gates and
+advanced-target delivery. Provider accounting is tracked in GH issue #14 and is
+not implemented here.
+
+Hashes are unkeyed integrity checks, not authentication. Verification provides
+point-in-time integrity checks; no continuous containment is claimed. A
+coordinated external rewrite of the integrity chain is outside this protection.
+
 ### Disponibile
 
 - Schemi eseguibili di contratto, piano, manifest, evento advisory e proiezione advisory; validazione di DAG, riferimenti, percorsi, standard applicabili e prove di baseline.
@@ -541,7 +555,7 @@ La versione esecutrice di ogni run è fissata e separata dal checkout sviluppato
 
 ### Prossimi incrementi
 
-1. **Step 3b.2 — Report dei gate**: integrare il contratto dei finding in review, QA e AppSec, conservando output grezzi e report immutabili legati a commit/input. Report malformati o attribuzioni insufficienti non autorizzano correzioni automatiche.
+1. **Step 3b.2 — Report dei gate (merged, PR #13)**: contratto dei finding integrato in review, QA e AppSec, con output grezzi e report immutabili legati a commit/input. La preview Step 3b.3a prepara soltanto il bounce mirato; non esegue riparazioni.
 2. **Step 3b.3 — Bounce mirato**: collegare finding, analisi d'impatto, invalidazione, riparazione e rivalidazione topologica; conservare tentativi, contributi e limiti e ripetere i gate globali dopo le modifiche. Implementare un recupero esplicito e tracciato dei candidati interrotti, senza adottare modifiche esterne implicitamente.
 3. **Chiusura Step 3**: completare analisi critica obbligatoria, matrice delle evidenze e consegna su destinazione avanzata con riconciliazione e nuove verifiche sul candidato integrato. Oggi l'approvazione richiede ancora una destinazione pulita e invariata.
 4. **Step 4**: dispatcher per rischio/capacità, matrice indipendente di review per task e interazioni, classificazione dei fallimenti e limiti comuni persistenti per l'intero ticket.

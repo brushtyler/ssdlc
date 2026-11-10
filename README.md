@@ -426,6 +426,51 @@ Host System
 
 Apache-2.0
 
+## Targeted bounce preview
+
+Step 3b.2 / PR #13 merged with **397 tests after review fixes**. This increment
+only prepares targeted bounce: it verifies recorded gate evidence and archives a
+deterministic preview with `execution_authorized=false`. It grants no approval
+or execution authority. The following remain pending: repair execution,
+cumulative recovery, revalidation integration, repeated global gates and
+advanced-target delivery. Provider accounting is tracked in GH issue #14 and is
+not implemented here.
+
+Hashes are unkeyed integrity checks, not authentication. Verification provides
+point-in-time integrity checks; no continuous containment is claimed. A
+coordinated external rewrite of the integrity chain is outside this protection.
+
+```bash
+python3 orchestrator.py bounce-preview --repo . --ticket TKT-001 \
+  --phase 04-review --attempt 1
+```
+
+The host API is `SSDLCOrchestrator.preview_bounce(phase, attempt)`. Select an exact
+recorded task-mode gate (`04-review`, `05-qa` or `05b-appsec`); legacy tickets
+without host provenance are rejected. The existing separately pinned controller
+contract is required and is never recaptured by preview. Preview invokes no
+model, developer, scanner or test runner and preserves raw evidence, checkpoint,
+scheduler state, attempts, ledger and cost totals.
+
+Canonical JSON and a readable summary, with ticket-relative source references,
+SHA-256 hashes and a content-derived revision, live under
+`bounce-preview/<phase>/attempt-<n>/<revision>/`. Publication is locked,
+create-or-verify and registered through artifact references. Identical verified
+reruns, including restarts, perform no artifact or registration writes. Matching
+partial files are verified and completed; conflicting or registered-but-missing
+artifacts block without overwriting old evidence. Changed verified inputs use a
+new revision. Failed post-publication checks never produce a successful preview;
+restart recovery always verifies again.
+
+CLI exits: **0** means candidates with no blockers, ready for a later executor;
+**10** means a produced non-executable or diagnostic preview (including an empty
+plan); **20** means blocked or rejected; **2** means invalid CLI usage. Exit 0
+grants no approval or execution authority. Every result has
+`execution_authorized=false`. Local `preview_counters` track created, reused,
+recovered and blocked-by-reason runs without touching provider accounting.
+Logs contain selectors, revision, status, reason codes and counts, never finding
+text or provider payloads.
+
 ## Task breakdown bootstrap (opt-in)
 
 The first implementation increment provides versioned JSON schemas in `schemas/`,
