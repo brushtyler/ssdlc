@@ -103,3 +103,55 @@ class FakeDocker:
 
     def stop(self, container):
         self.stopped.append(container['id'])
+
+
+class FakeProbe:
+    """Factory for an explicitly registered NativeProbe; no real native calls."""
+    @staticmethod
+    def adapter(result=None, error=None):
+        from ssdlc_supervisor import NativeProbe
+        class Adapter(NativeProbe):
+            def __init__(self):
+                self.calls = []
+
+            def check(self, engine, env, timeout):
+                self.calls.append((engine, dict(env), timeout))
+                if error:
+                    raise error
+                return result
+        return Adapter()
+
+
+class FakeRefresh:
+    @staticmethod
+    def adapter(result=None, error=None):
+        from ssdlc_supervisor import RefreshAdapter
+        class Adapter(RefreshAdapter):
+            def __init__(self):
+                self.calls = []
+
+            def refresh(self, engine, env, runtime_dirs, timeout):
+                self.calls.append((engine, dict(env), dict(runtime_dirs), timeout))
+                if error:
+                    raise error
+                return result
+        return Adapter()
+
+
+def write_controller_events(path, run, events):
+    """Emit the closed typed schema, bound to this controller's launch identity."""
+    import json
+    import os
+    from ssdlc_supervisor import intent_for
+    launch = intent_for(run, 'controller')
+    records = []
+    for seq, event in enumerate(events, 1):
+        records.append(dict(seq=seq, ts=1000., run_id=run['run_id'], role='controller',
+                            gen=launch['generation'], intent=launch['intent_id'], **event))
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w') as stream:
+        for record in records:
+            stream.write(json.dumps(record) + '\n')
+        stream.flush()
+        os.fsync(stream.fileno())
+    return records

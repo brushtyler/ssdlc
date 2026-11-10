@@ -594,6 +594,11 @@ class SquadDispatcher:
         return ["deepseek/deepseek-r1", "anthropic/claude-3.7-sonnet"], effort
 
 
+def resolve_review_entry(entry: str, default_engine: str = "openrouter") -> Tuple[str, str]:
+    """Resolve the qualified/unqualified rule shared by both review paths."""
+    return tuple(entry.split(":", 1)) if ":" in entry and not entry.startswith("http") else (default_engine, entry)
+
+
 DynamicRoutingPolicy = SquadDispatcher
 
 
@@ -2742,7 +2747,7 @@ class SSDLCOrchestrator:
 
         requests = []
         for index, model in enumerate(review_models, 1):
-            effective_engine, effective_model = model.split(':', 1) if ':' in model and not model.startswith('http') else (engine, model)
+            effective_engine, effective_model = resolve_review_entry(model, engine)
             requests.append(EvaluationRequest('review', effective_engine, effective_model, index,
                 attempt, head, system, user, context, evidence, fp, parse_review_verdict, effort))
         roster = self._phase_roster('04-review', attempt, requests)
@@ -2885,11 +2890,7 @@ class SSDLCOrchestrator:
 
         for reviewer_index, mdl in enumerate(review_models, 1):
             self.check_budget_circuit_breaker()
-            if ":" in mdl and not mdl.startswith("http"):
-                effective_engine, effective_model = mdl.split(":", 1)
-            else:
-                effective_engine = review_engine
-                effective_model = mdl
+            effective_engine, effective_model = resolve_review_entry(mdl, review_engine)
             print(f"    -> Running Reviewer: {effective_engine}:{effective_model} (reasoning={rev_effort})...")
             t0 = time.time()
             rev_out, cost, tin, tout, trace_user = EngineRunner.invoke_role(
@@ -4052,12 +4053,22 @@ def main(argv=None) -> int:
     p_start.add_argument('--from-phase', default='00-recon', choices=['00-recon', '03-dev'])
     p_start.add_argument('--recovery-allowance', default='3')
     p_start.add_argument('--json', action='store_true')
-    for command in ('status', 'cancel'):
+    for command in ('status', 'cancel', 'monitor'):
         p_lifecycle = sub.add_parser(command, help=command + ' a supervised run')
-        p_lifecycle.add_argument('--ticket', required=True)
+        p_lifecycle.add_argument('--ticket', required=command != 'status', default=None)
         p_lifecycle.add_argument('--repo', '-r', default='.')
         p_lifecycle.add_argument('--run-id')
         p_lifecycle.add_argument('--json', action='store_true')
+        if command == 'status':
+            p_lifecycle.add_argument('--recovery-matrix', action='store_true')
+        if command == 'monitor':
+            p_lifecycle.add_argument('--interval', type=float, default=1)
+            p_lifecycle.add_argument('--timeout', type=float, default=30)
+            p_lifecycle.add_argument('--restart-worker', '--adopt', action='store_true')
+            goals = p_lifecycle.add_mutually_exclusive_group()
+            goals.add_argument('--goal')
+            goals.add_argument('--goal-file')
+            p_lifecycle.add_argument('--test-cmd')
         if command == 'cancel':
             p_lifecycle.add_argument('--grace', type=float, default=5)
 
@@ -4102,7 +4113,7 @@ def main(argv=None) -> int:
     p_preview.add_argument('--attempt', required=True, type=int)
 
     args = parser.parse_args(argv)
-    if args.subcommand in {'start', 'status', 'cancel'} or (args.subcommand == 'run' and args.detach):
+    if args.subcommand in {'start', 'status', 'cancel', 'monitor'} or (args.subcommand == 'run' and args.detach):
         import ssdlc_supervisor
         return ssdlc_supervisor.cli(args, parser)
     repo_path = Path(getattr(args, "repo", ".")).resolve()

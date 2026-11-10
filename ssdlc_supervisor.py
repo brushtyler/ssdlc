@@ -14,6 +14,9 @@ import os
 from pathlib import Path
 import re
 import select
+import shutil
+import tempfile
+import math
 import signal
 import struct
 import subprocess
@@ -356,7 +359,7 @@ def validate_record(d):
         raise SupervisorIntegrityError('metadata_corrupt')
     if d['status_reason'] not in REASONS:
         raise SupervisorIntegrityError('metadata_corrupt')
-    if d['authorized']['entrypoint'] != 'run' or d['authorized']['from_phase'] not in {'00-recon', '03-dev'} or d['authorized']['tier'] not in {'auto', 'S', 'M', 'L'}:
+    if d['authorized']['entrypoint'] not in {'run', 'plan', 'design'} or d['authorized']['from_phase'] not in {'00-recon', '03-dev'} or d['authorized']['tier'] not in {'auto', 'S', 'M', 'L'}:
         raise SupervisorIntegrityError('metadata_corrupt')
     if d['authorized']['test_cmd_authority'] != 'operator_flag' or 'test_cmd_sha256' not in d['authorized']:
         raise SupervisorIntegrityError('metadata_corrupt')
@@ -377,13 +380,13 @@ def validate_record(d):
         raise SupervisorIntegrityError('metadata_corrupt')
     if set(d) - (set(RUN_SHAPE) | required | {'in_flight'}):
         raise SupervisorIntegrityError('metadata_corrupt')
-    for key, allowed in [('authorized', set(RUN_SHAPE['authorized']) | {'test_cmd_sha256', 'argv_id'}),
+    for key, allowed in [('authorized', set(RUN_SHAPE['authorized']) | {'test_cmd_sha256', 'argv_id', 'compatibility_approved'}),
                          ('fingerprints', set(RUN_SHAPE['fingerprints'])),
                          ('processes', {'worker', 'controller', 'descendants'}),
                          ('handoff', {'outcome', 'at'})]:
         if set(d[key]) - allowed:
             raise SupervisorIntegrityError('metadata_corrupt')
-    if d['authorized'].get('argv_id') != 'orchestrator.run':
+    if d['authorized'].get('argv_id') not in {'orchestrator.run', 'orchestrator.plan', 'orchestrator.design'}:
         raise SupervisorIntegrityError('metadata_corrupt')
     if d['resumes'] is not None and (not isinstance(d['resumes'], str) or not RUN_ID.fullmatch(d['resumes'])):
         raise SupervisorIntegrityError('metadata_corrupt')
@@ -392,6 +395,25 @@ def validate_record(d):
     for key in ('heartbeat', 'preflight', 'classification'):
         if d[key] is not None and not isinstance(d[key], dict):
             raise SupervisorIntegrityError('metadata_corrupt')
+    if d['classification'] is not None:
+        c = d['classification']
+        if (set(c) != {'class', 'reason_code', 'row', 'terminal_bound', 'diagnostics'} or
+                c.get('class') not in RECOVERY_MATRIX or c.get('reason_code') not in REASONS or
+                c.get('row') not in {'1', '2', '3', '3b', '3c', '4', '5', '6', '7', '8'} or
+                type(c.get('terminal_bound')) is not bool or not isinstance(c.get('diagnostics'), list) or
+                any(not isinstance(x, dict) or set(x) != {'code'} or x['code'] not in
+                    {'U1', 'U2', 'U3', 'U4', 'U5', 'U6', 'U7', 'earlier_task_failure'} for x in c['diagnostics'])):
+            raise SupervisorIntegrityError('metadata_corrupt')
+    if d['preflight'] is not None:
+        p = d['preflight']
+        if set(p) != {'at', 'checks'} or type(p['at']) not in (float, int) or not isinstance(p['checks'], list):
+            raise SupervisorIntegrityError('metadata_corrupt')
+        for c in p['checks']:
+            if (not isinstance(c, dict) or set(c) != {'id', 'status', 'code'} or
+                    c.get('status') not in {'ok', 'failed', 'unknown', 'unsupported', 'unverified'} or
+                    c.get('code') not in REASONS or c.get('id') not in
+                    DEPENDENCIES | {'auth_' + x for x in ENGINES} | {'engine', 'routes', 'quality_contract', 'path', 'disk'}):
+                raise SupervisorIntegrityError('metadata_corrupt')
     if not _shape(d['journal_baseline'], dict(failed_attempts=dict, attempts=dict, taken_at_launch=bool)):
         raise SupervisorIntegrityError('metadata_corrupt')
     if not {'code', 'intent_id'} <= set(d['exit_evidence']):
@@ -412,7 +434,8 @@ def validate_record(d):
 
 EVENT_TYPES = {'unsupported_transition', 'launch_pending', 'identity_published', 'shim_released',
                'handoff', 'reconcile', 'launch_abandoned', 'launch_retry', 'controller_exited',
-               'cancel_requested', 'cancel_blocked', 'cancel_term', 'cancel_finished', 'started'}
+               'cancel_requested', 'cancel_blocked', 'cancel_term', 'cancel_finished', 'started',
+               'preflight', 'recovery', 'heartbeat', 'classified', 'completed', 'adopted'}
 REASONS = {'bootstrap', 'launched', 'reconcile', 'uncertain_outcome', 'inputs_required',
            'inputs_incomplete', 'fingerprint_mismatch', 'handoff_timeout', 'exit_evidence_unavailable',
            'cancel_requested', 'cancelled', 'pidfd_unsupported', 'unowned_session_member', 'identity_unknown'}
@@ -592,13 +615,13 @@ def new_record(a, store):
     return dict(schema_version=1, revision=0, worker_generation=1, run_id=store.run_id, nonce=uuid.uuid4().hex,
         resumes=None, project=dict(key=digest(a['repo'])[:16], name='project'), ticket=a['ticket'],
         created_at=float(store.clock.time()), authorized=authorized,
-        fingerprints=dict(config_sha256=config_digest(os.environ),
+        fingerprints=dict(config_sha256=config_digest(build_project_env(a['repo'], os.environ)),
                           controller=dict(path_sha256=digest(str(controller)), sha256=digest(controller.read_bytes())),
                           supervisor_py_sha256=digest(Path(__file__).read_bytes()), inputs_sha256=digest(json.dumps(authorized, sort_keys=True))),
-        base_commit_at_launch='', launch_revoked=False, launches=[],
+        base_commit_at_launch=git_read(a['repo'], 'rev-parse', 'HEAD'), launch_revoked=False, launches=[],
         processes=dict(worker=None, controller=None, descendants=[]), containers=[], status='starting', status_reason='bootstrap',
         completion_kind=None, handoff=dict(outcome=None, at=None), exit_evidence=dict(source='none', code=None, intent_id=None),
-        deadlines=dict(hard_deadline=None, preflight_deadline=None, quiet_threshold_sec=300, handoff_timeout_sec=a['handoff_timeout_sec'], payload_io_timeout_sec=a['payload_io_timeout_sec']),
+        deadlines=dict(hard_deadline=None, preflight_deadline=None, quiet_threshold_sec=300, frozen_limits=configured_limits(build_project_env(a['repo'], os.environ)), handoff_timeout_sec=a['handoff_timeout_sec'], payload_io_timeout_sec=a['payload_io_timeout_sec']),
         recovery=dict(allowance_total=a['recovery_allowance'], used=0, next_retry_at=None, backoff_sec=0, history=[]),
         counters=dict(heartbeats=0, retries=0, classifications={}), heartbeat=None, preflight=None, classification=None,
         journal_baseline=dict(failed_attempts={}, attempts={}, taken_at_launch=False), cancel=None,
@@ -802,7 +825,7 @@ def start(args, clock=None, fault=None):
     if not sys.platform.startswith('linux'):
         return public({}, 'unsupported', 'unsupported_platform')
     store = RunStore(a['repo'], a['ticket'], clock=clock, fault=fault)
-    payload = json.dumps(dict(args=a, env={k: v for k, v in os.environ.items() if not k.startswith(MARK)})).encode()
+    payload = json.dumps(dict(args=a, env=build_project_env(a['repo'], os.environ))).encode()
     if len(payload) > 1048576:
         raise ValueError('inputs_too_large')
     journal = Path(a['repo']) / '.ssdlc' / a['ticket'] / '03-dev/tasks/task-journal.jsonl'
@@ -839,7 +862,7 @@ def start(args, clock=None, fault=None):
                     if (d['authorized']['goal_sha256'] != digest(a['goal']) or
                         d['authorized']['test_cmd_sha256'] != (digest(a['test_cmd']) if a.get('test_cmd') is not None else None) or
                         d['fingerprints']['controller']['sha256'] != digest(Path(build_argv('orchestrator.run', a)[1]).read_bytes()) or
-                        d['fingerprints']['config_sha256'] != config_digest(os.environ)):
+                        d['fingerprints']['config_sha256'] != config_digest(build_project_env(a['repo'], os.environ))):
                         return public(store.handoff('blocked', 'fingerprint_mismatch'))
                     def retry(v):
                         v['worker_generation'] += 1
@@ -871,12 +894,12 @@ def start(args, clock=None, fault=None):
         return public({}, 'locked', 'locked')
 
 
-def status(repo, ticket, run_id=None, proc=None):
+def status(repo, ticket, run_id=None, proc=None, env=None, clock=None):
     if not sys.platform.startswith('linux'):
         return public({}, 'unsupported', 'unsupported_platform')
     store = RunStore(repo, ticket, run_id)
     try:
-        return view(store.read() if run_id else store.current(), proc)
+        return observed_status(store, store.read() if run_id else store.current(), proc, env, clock)
     except FileNotFoundError:
         return public({}, 'blocked', 'run_not_found')
 
@@ -926,16 +949,37 @@ def boot(args):
 
 def worker(store, args):
     d = store.read()
+    if args.payload_fd is None:
+        raise FencedOut()
     try:
         payload = json.loads(transfer(args.payload_fd, timeout=d['deadlines']['payload_io_timeout_sec']))
     finally:
         os.close(args.payload_fd)
+    if payload.get('monitor_only'):
+        if config_digest(payload['env']) != d['fingerprints']['config_sha256']:
+            raise FencedOut()
+        while True:
+            result = monitor_tick(store, payload['env'], generation=args.generation)
+            if result['status'] in TERMINAL or result['status'] == 'reconcile':
+                return 0
+            store.clock.sleep(1)
     a = validate_args(payload['args'])
     argv = build_argv('orchestrator.run', a)
     if digest(a['goal']) != d['authorized']['goal_sha256'] or config_digest(payload['env']) != d['fingerprints']['config_sha256'] or digest(Path(argv[1]).read_bytes()) != d['fingerprints']['controller']['sha256']:
         store.handoff('blocked', 'fingerprint_mismatch', args.generation)
         return 11
     # The worker receives only markers at exec; frozen inputs stay in memory.
+    limits = configured_limits(payload['env'])
+    def deadlines(v):
+        if v['deadlines']['hard_deadline'] is None:
+            seconds = int(payload['env'].get('SSDLC_SUPERVISOR_HARD_TIMEOUT',
+                str(limits['SSDLC_DEV_TIMEOUT'] * limits['SSDLC_MAX_DEV_RETRIES'] +
+                    limits['SSDLC_DEV_TIMEOUT'] * limits['SSDLC_MAX_DESIGN_ROUNDS'])))
+            v['deadlines']['hard_deadline'] = float(store.clock.time() + seconds)
+    store.update(deadlines, (args.generation, 0))
+    if not preflight_loop(store, payload['env'], args.generation):
+        return 10
+    capture_journal_baseline(store, args.generation)
     store.fault.hit('cancel.revokes_pending_launch')
     with store.locked():
         controller, pipe, intent = spawn(store, 'controller', args.generation, True)
@@ -947,12 +991,14 @@ def worker(store, args):
     finally:
         os.close(pipe)
     store.handoff('launched', 'launched', args.generation)
-    code = controller.wait()
-    # T1 cannot attest canonical completion. Even exit zero requires T2 evidence.
+    while controller.poll() is None:
+        monitor_tick(store, payload['env'], generation=args.generation)
+        store.clock.sleep(1)
+    code = controller.returncode
     def exited(v):
         v['exit_evidence'] = dict(source='parent_returncode', code=code, intent_id=intent)
-        v.update(status='blocked', status_reason='exit_evidence_unavailable' if code == 0 else 'uncertain_outcome')
-    store.update(exited, (args.generation, 0), True, 'controller_exited')
+    store.update(exited, (args.generation, 0), event='controller_exited')
+    monitor_tick(store, payload['env'], generation=args.generation)
     return 0
 
 
@@ -1130,13 +1176,880 @@ def _execute_cancel(store, d, grace, proc, token):
     return public(store.update(finish, event='cancel_finished'))
 
 
+
+# The table is both policy and the public recovery-matrix view.
+RECOVERY_MATRIX = {
+    'transient_environment_provider': dict(mode='auto', action='Retry read-only preflight within the persisted allowance.'),
+    'authentication': dict(mode='operator-only', action='Refresh authentication out of band, then start or resume.'),
+    'integrity': dict(mode='operator-only', action='Inspect evidence and reconcile integrity before resuming.'),
+    'limits': dict(mode='operator-only', action='Explicitly raise the exhausted limit before resuming.'),
+    'code_defect': dict(mode='operator-only', action='Configured attempts may be consumed. Explicitly raise the allowance if needed; request resume run from 03-dev, plan or design through orchestrator compatibility checks.'),
+    'uncertain_outcome': dict(mode='operator-only', action='Inspect the invocation outcome and reconcile before any explicit resume.'),
+    'operator_decision': dict(mode='operator-only', action='Resolve the scope or environment decision before explicit resume.'),
+    'unsupported_transition': dict(mode='unsupported', action='Choose a supported orchestrator entrypoint after inspecting compatibility.'),
+}
+ENGINES = {'claude', 'codex', 'agy', 'openrouter'}
+ROLE_KEYS_BY_ENTRYPOINT = {
+    'run': ('00-recon', '01-po', '02-design-arch', '02-design-sec', '03-dev', '05-qa', '05b-appsec', '06-ops', '07-docs'),
+    'plan': ('02-design-arch', '02-design-sec'),
+    'design': ('02-design-arch', '02-design-sec'),
+}
+PROFILES = ('ALGORITHMIC', 'FRONTEND_UI', 'FULLSTACK', 'REFACTOR', 'SECURITY')
+PROBE_CODES = {'auth_missing', 'auth_expired', 'auth_unverified', 'auth_unknown', 'auth_unsupported',
+               'auth_verified', 'probe_unavailable', 'provider_unavailable', 'quota_unknown'}
+SUMMARIES = {
+    'auth_missing': 'Required authentication is missing.',
+    'auth_expired': 'Required authentication has expired.',
+    'auth_unverified': 'Credential presence has not been verified.',
+    'auth_unknown': 'Authentication status is unknown.',
+    'auth_unsupported': 'Native authentication verification is unsupported.',
+    'auth_verified': 'Native authentication verification succeeded.',
+    'probe_unavailable': 'Read-only native verification is unavailable.',
+    'provider_unavailable': 'The provider is temporarily unavailable.',
+    'quota_unknown': 'Quota verification is unavailable.',
+}
+DEPENDENCIES = {'git', 'docker', 'claude', 'codex', 'agy', 'pytest', 'npm', 'ruff', 'mypy'}
+REASONS.update(PROBE_CODES | {'preflight_ok', 'preflight_failed', 'docker_unavailable', 'path_unwritable',
+    'disk_low', 'routes_unavailable', 'engine_unsupported', 'quality_contract_invalid', 'recovery_exhausted',
+    'retry_scheduled', 'hard_deadline', 'completed', 'completion_mismatch', 'observing',
+    'attempt_allowance_exhausted', 'terminal_check_failure', 'terminal_development_blocked',
+    'integrity_failure', 'budget_exceeded', 'resource_limit', 'operator_decision', 'unsupported_transition',
+    'terminal_unbound'} | {x + '_missing' for x in DEPENDENCIES})
+
+
+def build_project_env(repo, host_env):
+    """Construct frozen configuration without activating isolation or writing files."""
+    env = {k: v for k, v in host_env.items() if not k.startswith(MARK)}
+    home = Path(env.get('HOME', str(Path.home())))
+    for path, override in ((home / '.ssdlc/global.env', False), (Path(repo) / '.ssdlc/project.env', True)):
+        if not path.is_file():
+            continue
+        for raw in path.read_text(encoding='utf-8').splitlines():
+            line = raw.strip()
+            if not line or line.startswith('#'):
+                continue
+            if line.startswith('export '):
+                line = line[7:].strip()
+            if '=' in line:
+                k, v = line.split('=', 1)
+                k, v = k.strip(), v.strip().strip('"').strip("'")
+                if override or k not in env:
+                    env[k] = v
+    env = {k: v for k, v in env.items() if not k.startswith(MARK)}
+    runtime = Path(repo).resolve() / '.ssdlc/.runtime'
+    env.update(CODEX_HOME=str(runtime / 'codex_home'), CLAUDE_CONFIG_DIR=str(runtime / 'claude_home'),
+               XDG_CACHE_HOME=str(runtime / 'cache'))
+    env.setdefault('SSDLC_PROJECT_ID', Path(repo).resolve().name)
+    return env
+
+
+def read_document(path):
+    try:
+        value = json.loads(Path(path).read_text())
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError, UnicodeError):
+        return {}
+
+
+def git_read(repo, *args):
+    try:
+        p = subprocess.run(['git', '-C', str(repo), *args], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10,
+                           env={**os.environ, 'GIT_OPTIONAL_LOCKS': '0'})
+        return p.stdout.decode().strip() if p.returncode == 0 else ''
+    except (OSError, subprocess.TimeoutExpired, UnicodeError):
+        return ''
+
+
+def route_child(repo, entrypoint, tier, ticket=''):
+    """Read-only child. Real HOME, uid and PATH preserve Codex's predicate."""
+    from orchestrator import SquadDispatcher, resolve_review_entry
+    state = read_document(Path(repo) / '.ssdlc' / ticket / 'state.json') if ticket else {}
+    plan = read_document(Path(repo) / '.ssdlc' / ticket / '02-design/plan.json') if ticket else {}
+    profiles = sorted({t.get('profile', 'ALGORITHMIC') for t in plan.get('tasks', [])}) if plan.get('tasks') else (
+        PROFILES if state.get('task_breakdown') or os.environ.get('SSDLC_ENABLE_TASK_BREAKDOWN') == 'true'
+        else (state.get('dev_profile', 'ALGORITHMIC'),))
+    routes, panel = {}, []
+    for t in ('S', 'M', 'L') if tier == 'auto' else (tier,):
+        for role in ROLE_KEYS_BY_ENTRYPOINT[entrypoint]:
+            if entrypoint == 'run' and role.startswith('02-design') and t == 'S':
+                continue
+            if role == '05b-appsec' and t != 'L' and 'APPSEC_SUPPLY_CHAIN_REDTEAM' not in state.get('specialists_triggered', []):
+                continue
+            for profile in profiles if role == '03-dev' else (state.get('dev_profile', 'ALGORITHMIC'),):
+                engine = SquadDispatcher.dispatch_role(role, 'M' if role == '00-recon' else t, profile, 1)[0]
+                routes.setdefault(role, []).append(engine)
+        if entrypoint == 'run':
+            for model in SquadDispatcher.resolve_review_models(t, attempt=1)[0]:
+                engine, model = resolve_review_entry(model, os.environ.get('SSDLC_REVIEW_ENGINE', 'openrouter'))
+                panel.append(dict(engine=engine, model=model))
+    return dict(routes={k: sorted(set(v)) for k, v in routes.items()}, review_panel=panel)
+
+
+def claude_credential_present(env):
+    project = Path(env['CLAUDE_CONFIG_DIR']) / '.credentials.json'
+    host = Path(env.get('HOME', str(Path.home()))) / '.claude/.credentials.json'
+    return project.is_file() or (env.get('SSDLC_INHERIT_HOST_CLAUDE_AUTH', 'true').lower() == 'true' and host.is_file())
+
+
+def resolve_routes(repo, entrypoint, tier, env, ticket=''):
+    # Only an empty marker is materialized, outside project and host runtime.
+    # The route child itself never creates files, including import bytecode.
+    with tempfile.TemporaryDirectory(prefix='ssdlc-routes-') as temp:
+        child_env = dict(env, CLAUDE_CONFIG_DIR=temp, PYTHONDONTWRITEBYTECODE='1')
+        if claude_credential_present(env):
+            fd = os.open(Path(temp) / '.credentials.json', os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.close(fd)
+        p = subprocess.run([sys.executable, str(Path(__file__).resolve()), '_routes', '--repo', str(repo),
+                            '--entrypoint', entrypoint, '--tier', tier, '--ticket', ticket], env=child_env,
+                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15)
+        if p.returncode:
+            raise ValueError('routes_unavailable')
+        result = json.loads(p.stdout)
+    engines = {e for values in result['routes'].values() for e in values}
+    engines.update(x['engine'] for x in result['review_panel'])
+    return engines
+
+
+class NativeProbe:
+    """Explicitly registered bounded read-only adapter. No built-in commands ship.
+
+    Implementations must respect timeout and never login, infer, or write auth.
+    Only normalized statuses/codes escape this interface; all other data dies in memory.
+    """
+    def check(self, engine, env, timeout):
+        raise NotImplementedError()
+
+
+class RefreshAdapter:
+    """An authorized isolated auth_expired refresh; no implementation ships."""
+    def refresh(self, engine, env, runtime_dirs, timeout):
+        raise NotImplementedError()
+
+
+def normalized_probe(value):
+    if not isinstance(value, dict):
+        return dict(status='unknown', code='auth_unknown', summary=SUMMARIES['auth_unknown'])
+    code = value.get('code')
+    status = value.get('status')
+    if code not in PROBE_CODES or status not in {'ok', 'failed', 'unknown', 'unsupported', 'unverified'}:
+        code, status = 'auth_unknown', 'unknown'
+    # Presence cannot masquerade as native verification.
+    if code == 'auth_unverified':
+        status = 'unverified'
+    elif code in {'auth_missing', 'auth_expired'}:
+        status = 'failed'
+    elif code == 'auth_verified' and status != 'ok':
+        code, status = 'auth_unknown', 'unknown'
+    return dict(status=status, code=code, summary=SUMMARIES[code])
+
+
+def credential_present(engine, env):
+    home = Path(env.get('HOME', str(Path.home())))
+    if engine == 'openrouter':
+        return bool(env.get('OPENROUTER_API_KEY', '').strip())
+    if engine == 'claude':
+        return bool(env.get('CLAUDE_CODE_OAUTH_TOKEN')) or claude_credential_present(env)
+    if engine == 'codex':
+        return (Path(env['CODEX_HOME']) / 'auth.json').is_file() or (
+            env.get('SSDLC_INHERIT_HOST_CODEX_AUTH', 'true').lower() == 'true' and
+            any(p.is_file() for p in ([home / '.codex/auth.json'] + ([Path('/root/.codex/auth.json')] if os.geteuid() == 0 else []))))
+    return None  # No verified credential inventory for agy.
+
+
+def quality_dependencies(repo, ticket):
+    root = Path(repo)
+    for path in (root / '.ssdlc' / ticket / '00-recon/quality-contract.json', root / '.ssdlc/quality-contract.json'):
+        if path.is_file():
+            contract = json.loads(path.read_text())
+            checks = contract['checks']
+            return {x for check in checks if check.get('required', True) for x in DEPENDENCIES
+                    if x in check.get('argv', [])}
+    needed = set()
+    for path in (root / 'tests').rglob('test_*.py'):
+        if re.search(r'^def test_|^import pytest|^from pytest', path.read_text(), re.M):
+            needed.add('pytest')
+    package = read_document(root / 'package.json')
+    if any(x in package.get('scripts', {}) for x in ('test', 'lint', 'typecheck')):
+        needed.add('npm')
+    return needed
+
+
+def preflight(repo, ticket, env, entrypoint='run', tier='auto', probes=None, refresh=None,
+              route_resolver=None, which=None, runner=None, disk_usage=None):
+    """Read-only scoped checks; adapters see a copy of only this project's env."""
+    env, checks = dict(env), []
+    probes = probes or {}
+    which, runner = which or shutil.which, runner or subprocess.run
+    def add(name, status, code):
+        checks.append(dict(id=name, status=status, code=code))
+    try:
+        engines = (route_resolver or resolve_routes)(repo, entrypoint, tier, env, ticket)
+    except (OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+        engines = set()
+        add('routes', 'failed', 'routes_unavailable')
+    tools = {'git'} | (engines & {'claude', 'codex', 'agy'})
+    if env.get('SSDLC_EXECUTION_MODE', 'docker') == 'docker':
+        tools.add('docker')
+    try:
+        tools.update(quality_dependencies(repo, ticket))
+    except (ValueError, OSError, KeyError, TypeError):
+        add('quality_contract', 'failed', 'quality_contract_invalid')
+    for tool in sorted(tools):
+        present = bool(which(tool, path=env.get('PATH', os.defpath)))
+        add(tool, 'ok' if present else 'failed', 'preflight_ok' if present else tool + '_missing')
+        if tool == 'docker' and present:
+            try:
+                p = runner(['docker', 'info'], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=10)
+                if p.returncode:
+                    checks[-1].update(status='failed', code='docker_unavailable')
+            except (OSError, subprocess.TimeoutExpired):
+                checks[-1].update(status='failed', code='docker_unavailable')
+    for engine in sorted(engines):
+        if engine not in ENGINES:
+            add('engine', 'unsupported', 'engine_unsupported')
+            continue
+        adapter = probes.get(engine)
+        if adapter is not None and isinstance(adapter, NativeProbe):
+            try:
+                result = normalized_probe(adapter.check(engine, dict(env), timeout=10))
+            except Exception:
+                result = normalized_probe(dict(status='unknown', code='probe_unavailable'))
+        else:
+            present = credential_present(engine, env)
+            result = normalized_probe(dict(status='failed' if present is False else 'unverified' if present else 'unsupported',
+                code='auth_missing' if present is False else 'auth_unverified' if present else 'auth_unsupported'))
+        if result['code'] == 'auth_expired' and isinstance(refresh, RefreshAdapter):
+            try:
+                runtime = Path(repo).resolve() / '.ssdlc/.runtime'
+                dirs = {k: env[k] for k in ('CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'XDG_CACHE_HOME')}
+                if any(runtime not in Path(v).resolve().parents for v in dirs.values()):
+                    raise ValueError('refresh_not_isolated')
+                result = normalized_probe(refresh.refresh(engine, dict(env), dirs, timeout=10))
+            except Exception:
+                result = normalized_probe(dict(status='failed', code='auth_expired'))
+        add('auth_' + engine, result['status'], result['code'])
+    root = Path(repo)
+    ancestor = root
+    while not ancestor.exists() and ancestor != ancestor.parent:
+        ancestor = ancestor.parent
+    paths = [ancestor] + [p for p in (root / '.ssdlc', root / '.ssdlc/.runtime') if p.exists()]
+    if any(not os.access(p, os.W_OK | os.X_OK) or p.stat().st_mode & 0o222 == 0 for p in paths):
+        add('path', 'failed', 'path_unwritable')
+    else:
+        add('path', 'ok', 'preflight_ok')
+    try:
+        minimum = int(env.get('SSDLC_PREFLIGHT_MIN_FREE_MB', '100')) * 1024 * 1024
+        free = (disk_usage or shutil.disk_usage)(ancestor).free
+        add('disk', 'failed' if free < minimum else 'ok', 'disk_low' if free < minimum else 'preflight_ok')
+    except (OSError, ValueError):
+        add('disk', 'unknown', 'probe_unavailable')
+    failures = [c for c in checks if c['status'] == 'failed']
+    auth = next((c for c in failures if c['code'].startswith('auth_')), None)
+    failure = auth or next(iter(failures), None)
+    return dict(checks=checks, ok=not failures and all(c['code'] != 'engine_unsupported' for c in checks),
+                code=failure['code'] if failure else 'preflight_failed' if any(c['code'] == 'engine_unsupported' for c in checks) else 'preflight_ok')
+
+
+def peek_journal(repo, ticket):
+    directory = Path(repo) / '.ssdlc' / ticket / '03-dev/tasks'
+    if not directory.is_dir() or not (directory / 'task-journal.jsonl').is_file():
+        return None, False
+    from ssdlc_tasks import TaskJournal, TaskError
+    try:
+        return TaskJournal(directory).peek(), False
+    except (TaskError, OSError, ValueError, KeyError, TypeError):
+        return None, True
+
+
+def capture_journal_baseline(store, generation):
+    journal, corrupt = peek_journal(store.root.parent.parent, store.ticket)
+    if corrupt:
+        raise SupervisorIntegrityError('integrity_failure')
+    tasks = (journal or {}).get('tasks', {})
+    def save(v):
+        v['journal_baseline'] = dict(failed_attempts={k: len(t.get('failed_attempts', [])) for k, t in tasks.items()},
+            attempts={k: t.get('attempts', 0) for k, t in tasks.items()}, taken_at_launch=True)
+    store.update(save, (generation, 0))
+
+
+CATEGORIES = {'INTEGRITY', 'ENVIRONMENT_RESOURCE', 'SCOPE_REQUIRED', 'ENVIRONMENT_BLOCKED', 'PLAN_ERROR',
+              'TASK_EXECUTION', 'CHECK_FAILURE', 'REPAIR_STALLED', 'DEVELOPER_PROTOCOL', 'DEVELOPER_INVOCATION',
+              'AUTHENTICATION', 'AUTH_MISSING', 'AUTH_EXPIRED'}
+EXC_TYPES = {'TaskError', 'DevelopmentBlocked', 'ResourceLimitError', 'PlanError', 'RuntimeError', 'TimeoutError',
+             'TimeoutExpired', 'ConnectionError', 'OSError', 'ValueError', 'SystemExit', 'KeyboardInterrupt',
+             'SupervisorIntegrityError', 'FencedOut', 'Exception'}
+CONTROLLER_TYPES = {'shim_released', 'phase_started', 'phase_finished', 'failure', 'progress',
+                    'dispatch_started', 'dispatch_finished', 'run_ended'}
+PHASES = {'00-recon', '01-po', '02-design', '02-design-arch', '02-design-sec', '03-dev', '04-review',
+          '05-qa', '05b-appsec', '06-ops', '07-docs', '08-supervisor'}
+
+
+def valid_controller_event(x, d):
+    allowed = {'seq', 'ts', 'run_id', 'role', 'gen', 'intent', 'type', 'phase', 'step', 'category',
+               'exc_type', 'outcome', 'exit_code', 'dispatch_id', 'engine', 'task_id', 'attempt'}
+    launch = intent_for(d, 'controller')
+    if not isinstance(x, dict) or set(x) - allowed or not launch:
+        return False
+    if not (x.get('run_id') == d['run_id'] and x.get('role') == 'controller' and
+            x.get('gen') == launch['generation'] and x.get('intent') == launch['intent_id']):
+        return False
+    if x.get('type') not in CONTROLLER_TYPES or type(x.get('seq')) is not int or x['seq'] < 1:
+        return False
+    if type(x.get('ts')) not in (int, float) or not math.isfinite(x['ts']):
+        return False
+    if 'phase' in x and x['phase'] not in PHASES:
+        return False
+    if 'step' in x and x['step'] not in {'started', 'finished', 'running', 'verification', 'development', 'review'}:
+        return False
+    if 'category' in x and x['category'] not in CATEGORIES:
+        return False
+    if 'exc_type' in x and x['exc_type'] is not None and x['exc_type'] not in EXC_TYPES:
+        return False
+    if 'engine' in x and x['engine'] not in ENGINES:
+        return False
+    if 'task_id' in x and (not isinstance(x['task_id'], str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', x['task_id'])):
+        return False
+    if 'attempt' in x and (type(x['attempt']) is not int or x['attempt'] < 1):
+        return False
+    if 'task_id' in x and 'attempt' not in x:
+        return False
+    if x['type'].startswith('dispatch_'):
+        if not isinstance(x.get('dispatch_id'), str) or not RUN_ID.fullmatch(x['dispatch_id']):
+            return False
+        if x['type'] == 'dispatch_started' and x.get('engine') not in ENGINES:
+            return False
+        if x['type'] == 'dispatch_finished' and x.get('outcome') not in {'returned', 'raised'}:
+            return False
+    if x['type'] == 'failure' and (x.get('category') not in CATEGORIES or x.get('exc_type') not in EXC_TYPES):
+        return False
+    if 'exit_code' in x and type(x['exit_code']) is not int:
+        return False
+    return x['type'] != 'run_ended' or type(x.get('exit_code')) is int
+
+
+def controller_events(store, d):
+    records, malformed, seq = [], 0, 0
+    try:
+        fd = open_safe(store.root, store.path('controller-events.jsonl'), os.O_RDONLY)
+    except FileNotFoundError:
+        return [], 0
+    with os.fdopen(fd, 'rb') as f:
+        for line in f:
+            try:
+                x = json.loads(line)
+                if not valid_controller_event(x, d) or x['seq'] <= seq:
+                    raise ValueError()
+                records.append(x)
+                seq = x['seq']
+            except (ValueError, UnicodeError, TypeError, KeyError):
+                malformed += 1
+    starts = [x['dispatch_id'] for x in records if x['type'] == 'dispatch_started']
+    finishes = [x['dispatch_id'] for x in records if x['type'] == 'dispatch_finished']
+    malformed += len(starts) - len(set(starts)) + len(finishes) - len(set(finishes))
+    malformed += sum(x not in starts for x in finishes)
+    return records, malformed
+
+
+@dataclass(frozen=True)
+class TerminalOutcome:
+    dispatches: tuple
+    last_dispatch: object
+    final_failure: object
+    dispatch_count: int
+
+
+def terminal_outcome(events):
+    """Join by dispatch identity, never by event position."""
+    finished = {e['dispatch_id']: e for e in events if e['type'] == 'dispatch_finished'}
+    dispatches = []
+    for e in events:
+        if e['type'] != 'dispatch_started':
+            continue
+        end = finished.get(e['dispatch_id'])
+        if end is not None and end['seq'] <= e['seq']:
+            end = None
+        dispatches.append(dict(e, outcome=end['outcome'] if end else 'open', finished_seq=end['seq'] if end else None))
+    failures = [e for e in events if e['type'] == 'failure']
+    return TerminalOutcome(tuple(dispatches), dispatches[-1] if dispatches else None,
+                           failures[-1] if failures else None, len(dispatches))
+
+
+def configured_limits(env):
+    return {key: int(env.get(key, default)) for key, default in (
+        ('SSDLC_MAX_DEV_RETRIES', '3'), ('SSDLC_MAX_DESIGN_ROUNDS', '5'), ('SSDLC_DEV_TIMEOUT', '2400'))}
+
+
+def classification_predicates(evidence):
+    """Independent predicates used by the classifier and disjointness tests."""
+    e = evidence
+    outcome = terminal_outcome(e.get('events', []))
+    final, last = outcome.final_failure or {}, outcome.last_dispatch or {}
+    state, journal = e.get('state', {}), e.get('journal') or {}
+    tasks, baseline = journal.get('tasks', {}), e.get('baseline', {}).get('failed_attempts', {})
+    limit = configured_limits(e.get('env', {}))['SSDLC_MAX_DEV_RETRIES']
+    new = {k: t for k, t in tasks.items() if len(t.get('failed_attempts', [])) > baseline.get(k, 0)}
+    failed = {k: t for k, t in new.items() if t.get('status') == 'FAILED'}
+    binding = False
+    category = None
+    if len(failed) == 1:
+        task_id, task = next(iter(failed.items()))
+        attempt = task['failed_attempts'][-1]
+        category = attempt.get('category')
+        binding = (attempt.get('attempt') == task.get('attempts') and last.get('outcome') == 'returned' and
+                   last.get('task_id') == task_id and last.get('attempt') == task.get('attempts'))
+    guards = []
+    if any(x['outcome'] == 'open' for x in outcome.dispatches):
+        guards.append('U1')
+    finishes = [x for x in e.get('events', []) if x['type'] == 'dispatch_finished']
+    if finishes and finishes[-1].get('outcome') == 'raised':
+        guards.append('U2')
+    for task_id, task in new.items():
+        attempt = task['failed_attempts'][-1]
+        if last.get('task_id') != task_id or last.get('attempt') != attempt.get('attempt'):
+            guards.append('U3')
+        if last.get('outcome') == 'returned' and attempt.get('category') not in {'CHECK_FAILURE', 'REPAIR_STALLED', 'DEVELOPER_PROTOCOL'}:
+            guards.append('U7')
+    failure = state.get('failure')
+    canonical_failure = isinstance(failure, dict) and failure.get('category') in CATEGORIES
+    ended = [x for x in e.get('events', []) if x['type'] == 'run_ended']
+    if e.get('exit_code') not in (None, 0) and not final and not canonical_failure and not ended:
+        guards.append('U4')
+    if e.get('malformed') or final.get('category') not in CATEGORIES | {None}:
+        guards.append('U5')
+    if e.get('released') and not final and not ended and not canonical_failure:
+        guards.append('U6')
+    row3 = state.get('status') == 'HALTED_BUDGET_EXCEEDED' or final.get('category') == 'ENVIRONMENT_RESOURCE' or e.get('hard_deadline', False)
+    row3c = (not row3 and final.get('exc_type') == 'TaskError' and outcome.dispatch_count == 0 and any(
+        t.get('attempts', 0) >= limit and t.get('status') != 'COMPLETED' and k not in new for k, t in tasks.items()))
+    consistent = ((category == 'CHECK_FAILURE' and final.get('exc_type') == 'TaskError' and
+                   next(iter(failed.values())).get('attempts', 0) >= limit) if failed else False) or (
+                   category in {'REPAIR_STALLED', 'DEVELOPER_PROTOCOL'} and final.get('exc_type') == 'DevelopmentBlocked' and final.get('category') == category)
+    row6 = bool(not row3 and not row3c and not guards and binding and consistent and
+                final.get('seq', 0) > (last.get('finished_seq') or 0))
+    row4 = state.get('status') == 'ESCALATED_TO_SUPERVISOR' or (binding and final.get('category') in {'SCOPE_REQUIRED', 'ENVIRONMENT_BLOCKED'})
+    return dict(row3=bool(row3), row3c=bool(row3c), row4=bool(row4), row6=row6, guards=sorted(set(guards)),
+                diagnostics=[dict(code='earlier_task_failure') for _ in new])
+
+
+def classify(evidence):
+    """Pure rev-5 table. Raw output and exception messages are never inspected."""
+    e = evidence
+    p = classification_predicates(e)
+    final = terminal_outcome(e.get('events', [])).final_failure or {}
+    checks = e.get('preflight', {}).get('checks', [])
+    auth = next((c for c in checks if c.get('status') == 'failed' and c.get('code') in {'auth_missing', 'auth_expired'}), None)
+    if auth:
+        cls, code, row = 'authentication', auth['code'], '1'
+    elif e.get('integrity') or e.get('journal_corrupt') or final.get('category') == 'INTEGRITY':
+        cls, code, row = 'integrity', 'integrity_failure', '2'
+    elif p['row3']:
+        code = 'hard_deadline' if e.get('hard_deadline') else 'resource_limit' if final.get('category') == 'ENVIRONMENT_RESOURCE' else 'budget_exceeded'
+        cls, row = 'limits', '3'
+    elif not e.get('controller_launched') and any(c.get('status') == 'failed' and c.get('code') in {'docker_unavailable', 'provider_unavailable', 'probe_unavailable'} for c in checks):
+        cls, code, row = 'transient_environment_provider', 'preflight_failed', '3b'
+    elif p['row3c']:
+        cls, code, row = 'limits', 'attempt_allowance_exhausted', '3c'
+    elif p['row4']:
+        cls, code, row = 'operator_decision', 'operator_decision', '4'
+    elif p['guards']:
+        cls, code, row = 'uncertain_outcome', 'terminal_unbound', '5'
+    elif p['row6']:
+        cls, code, row = 'code_defect', 'terminal_check_failure' if final.get('exc_type') == 'TaskError' else 'terminal_development_blocked', '6'
+    elif final.get('category') == 'PLAN_ERROR' and e.get('entrypoint') in {'plan', 'design'} and e.get('compatibility_approved'):
+        cls, code, row = 'unsupported_transition', 'unsupported_transition', '7'
+    else:
+        cls, code, row = 'uncertain_outcome', 'terminal_unbound', '8'
+    return dict(**{'class': cls}, reason_code=code, row=row, terminal_bound=row == '6',
+                diagnostics=p['diagnostics'] + [dict(code=g) for g in p['guards']])
+
+
+def evidence_for(store, d, env, events=None, malformed=0):
+    repo = store.root.parent.parent
+    env = dict(env)
+    for key, value in d['deadlines'].get('frozen_limits', {}).items():
+        env[key] = str(value)
+    journal, corrupt = peek_journal(repo, store.ticket)
+    if events is None:
+        events, malformed = controller_events(store, d)
+    return dict(state=read_document(repo / '.ssdlc' / store.ticket / 'state.json'), journal=journal,
+        journal_corrupt=corrupt, events=events, malformed=malformed, baseline=d['journal_baseline'], env=env,
+        preflight=d.get('preflight') or {}, controller_launched=any(x['role'] == 'controller' for x in d['launches']),
+        exit_code=d['exit_evidence'].get('code'), entrypoint=d['authorized']['entrypoint'],
+        compatibility_approved=d['authorized'].get('compatibility_approved', False),
+        released=any(x['type'] == 'shim_released' and x.get('role') == 'controller' for x in store.events()),
+        hard_deadline=d['deadlines'].get('hard_deadline') is not None and store.clock.time() > d['deadlines']['hard_deadline'])
+
+
+def completion(store, d, state):
+    repo = store.root.parent.parent
+    base = d['base_commit_at_launch']
+    if not base or state.get('base_commit') != base or git_read(repo, 'rev-parse', 'HEAD') != base:
+        return False
+    kind = d['authorized']['entrypoint']
+    if kind == 'run':
+        if state.get('status') != 'AWAITING_SUPERVISOR_SIGNOFF':
+            return False
+        worktree = repo / '.ssdlc' / store.ticket / 'worktree'
+        return (worktree.is_dir() and bool(state.get('task_verified_head')) and
+                git_read(worktree, 'rev-parse', 'HEAD') == state['task_verified_head'] and
+                git_read(worktree, 'status', '--porcelain') == '')
+    if state.get('status') != {'plan': 'PLAN_READY', 'design': 'DESIGN_READY'}.get(kind):
+        return False
+    paths = ['02-design/plan.json'] if kind == 'plan' else ['02-design/adr.md'] + (
+        [] if state.get('risk_tier', d['authorized']['tier']) == 'S' else ['02-design/threat-model.md'])
+    for rel in paths:
+        path = repo / '.ssdlc' / store.ticket / rel
+        if not path.is_file() or digest(path.read_bytes()) != state.get('artifacts', {}).get(rel, {}).get('sha256'):
+            return False
+    return True
+
+
+def exit_evidence(d, events):
+    launch = intent_for(d, 'controller')
+    current = d['exit_evidence']
+    ended = [e for e in events if e['type'] == 'run_ended']
+    if current['source'] == 'parent_returncode' and launch and current.get('intent_id') == launch['intent_id']:
+        if ended and ended[-1]['exit_code'] != current['code']:
+            return dict(source='none', code=None, intent_id=None)
+        return current
+    if ended and launch:
+        return dict(source='run_ended', code=ended[-1]['exit_code'], intent_id=launch['intent_id'])
+    return dict(source='none', code=None, intent_id=None)
+
+
+def observed_status(store, d, proc=None, env=None, clock=None):
+    if clock:
+        store.clock = clock
+    env = dict(env) if env is not None else build_project_env(store.root.parent.parent, os.environ)
+    # Cancellation owns the lifecycle even after TERM makes the controller
+    # disappear. Missing exit evidence must not mask a resumable cancellation.
+    if d.get('cancel'):
+        return status_fields(d, view(d, proc), store.clock.time())
+    if d['status_reason'] == 'hard_deadline':
+        return status_fields(d, public(d), store.clock.time())
+    if identity_state(d, 'controller', proc) != GONE or not intent_for(d, 'controller'):
+        out = copy.deepcopy(d)
+        if d['deadlines'].get('hard_deadline') is not None and store.clock.time() > d['deadlines']['hard_deadline'] and d['status'] not in TERMINAL:
+            out.update(status='failed', status_reason='hard_deadline', classification=classify(dict(hard_deadline=True, env=env)))
+            return status_fields(out, public(out), store.clock.time())
+        return status_fields(out, view(out, proc), store.clock.time())
+    events, malformed = controller_events(store, d)
+    out = copy.deepcopy(d)
+    out['exit_evidence'] = exit_evidence(d, events)
+    evidence = evidence_for(store, out, env, events, malformed)
+    out['classification'] = classify(evidence)
+    if out['exit_evidence']['code'] is None:
+        out.update(status='reconcile', status_reason='exit_evidence_unavailable')
+    elif out['exit_evidence']['code'] == 0:
+        if completion(store, out, evidence['state']):
+            out.update(status='completed', status_reason='completed', completion_kind=out['authorized']['entrypoint'])
+        else:
+            out.update(status='reconcile', status_reason='completion_mismatch')
+    elif out['status'] not in {'cancelled', 'operator_wait'}:
+        out.update(status='operator_wait', status_reason=out['classification']['reason_code'])
+    return status_fields(out, public(out), store.clock.time())
+
+
+def status_fields(d, result, now):
+    hb = d.get('heartbeat') or {}
+    recovery = d.get('recovery') or {}
+    result.update(state=result['status'], heartbeat_age=max(0, now - hb['at']) if 'at' in hb else None,
+        progress={k: hb.get(k) for k in ('progress_at', 'progress_source')}, phase=hb.get('phase'),
+        activity=hb.get('activity'), deadlines=d.get('deadlines', {}),
+        recovery=dict(used=recovery.get('used', 0), remaining=max(0, recovery.get('allowance_total', 0) - recovery.get('used', 0)),
+                      next_retry_at=recovery.get('next_retry_at')),
+        preflight=d.get('preflight'), classification=d.get('classification'), counters=d.get('counters', {}),
+        completion_kind=d.get('completion_kind'), diagnostics=hb.get('diagnostics', []))
+    classification = d.get('classification')
+    if classification:
+        result['next_action'] = RECOVERY_MATRIX[classification['class']]['action']
+    elif result['status'] == 'operator_wait':
+        result['next_action'] = RECOVERY_MATRIX['authentication']['action'] if result['status_reason'].startswith('auth_') else 'Inspect preflight checks before explicitly starting again.'
+    result['deadline_remaining'] = {k: max(0, v - now) for k, v in d.get('deadlines', {}).items()
+                                    if k in {'hard_deadline', 'preflight_deadline'} and type(v) in (int, float)}
+    return result
+
+
+def human_status(result):
+    return (f"{result['status']}: {result['status_reason']}\n" +
+            f"heartbeat_age={result.get('heartbeat_age')} phase={result.get('phase')} deadlines={json.dumps(result.get('deadlines', {}), sort_keys=True)} " +
+            f"recovery={json.dumps(result.get('recovery', {}), sort_keys=True)}\n" +
+            f"checks={json.dumps(result.get('preflight'), sort_keys=True)}\n" +
+            f"classification={json.dumps(result.get('classification'), sort_keys=True)}\n" +
+            f"next_action: {result['next_action']}")
+
+
+class DockerObservation:
+    def list(self, run_id, project):
+        try:
+            p = subprocess.run(['docker', 'ps', '-aq', '--filter', 'label=ssdlc.run_id=' + run_id,
+                                '--filter', 'label=ssdlc.project=' + project], timeout=10, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True)
+            ids = p.stdout.decode().split()
+            if not ids:
+                return []
+            p = subprocess.run(['docker', 'inspect', *ids], timeout=10, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True)
+            return [dict(id=c['Id'], name=c['Name'], labels=c['Config'].get('Labels') or {}, state=c['State']['Status'])
+                    for c in json.loads(p.stdout)]
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+            return []
+
+
+def monitor_tick(store, env, proc=None, docker=None, generation=None):
+    """Observe only; quiet runs never trigger cancellation or retry."""
+    d = store.read()
+    proc = proc or Proc()
+    now = store.clock.time()
+    if generation is not None and generation != d['worker_generation']:
+        raise FencedOut()
+    if d.get('cancel') or d['status'] in {'completed', 'cancelled'}:
+        return status_fields(d, public(d), now)
+    repo = store.root.parent.parent
+    events, malformed = controller_events(store, d)
+    tokens, descendants, containers = {}, [], []
+    for role in ('worker', 'controller'):
+        if identity_state(d, role, proc) != OWNED:
+            continue
+        leader = d['processes'][role]
+        for pid in proc.pids():
+            try:
+                ident, state, _ = proc.stat(pid)
+                if (state != 'Z' and ident.sid == leader['sid'] and ident.boot_id == leader['boot_id'] and
+                        ident.uid == leader['uid'] and ident.start_ticks >= leader['start_ticks']):
+                    descendants.append(dict(pid=pid, start_ticks=ident.start_ticks, role=role))
+            except (OSError, ValueError):
+                continue
+    tokens['descendants'] = digest(json.dumps(descendants, sort_keys=True))
+    if env.get('SSDLC_EXECUTION_MODE', 'docker') == 'docker':
+        for c in (docker or DockerObservation()).list(d['run_id'], d['project']['key']):
+            if (c.get('labels', {}).get('ssdlc.run_id') == d['run_id'] and
+                    c.get('labels', {}).get('ssdlc.project') == d['project']['key'] and
+                    isinstance(c.get('id'), str) and re.fullmatch(r'[a-f0-9]{12,64}', c['id'])):
+                # Names and other provider-controlled text are not persisted.
+                containers.append(dict(id=c['id'], name='owned_container',
+                    labels={'ssdlc.run_id': d['run_id'], 'ssdlc.project': d['project']['key']},
+                    state=c.get('state') if c.get('state') in {'running', 'exited', 'paused', 'created', 'dead', 'restarting'} else 'unknown'))
+    tokens['containers'] = digest(json.dumps(containers, sort_keys=True))
+    state_path = repo / '.ssdlc' / store.ticket / 'state.json'
+    state = read_document(state_path)
+    for name, path in [('state', state_path), ('journal', repo / '.ssdlc' / store.ticket / '03-dev/tasks/task-journal.jsonl')]:
+        try:
+            st = path.stat()
+            if name != 'state' or state:
+                tokens[name] = [st.st_size, st.st_mtime_ns]
+        except FileNotFoundError:
+            pass
+    tokens['events'] = events[-1]['seq'] if events else 0
+    old = d.get('heartbeat') or {}
+    changed = tokens != old.get('tokens')
+    progress_at = now if changed else old.get('progress_at', now)
+    phase = state.get('current_phase') if state.get('current_phase') in PHASES else None
+    activity = None
+    for e in events:
+        if e['type'] == 'dispatch_started':
+            activity = {k: e[k] for k in ('engine', 'task_id', 'attempt') if k in e}
+    diagnostics = []
+    if malformed:
+        diagnostics.append('controller_events_malformed')
+    if state_path.is_file() and not state:
+        diagnostics.append('state_malformed')
+    if now - progress_at > d['deadlines'].get('quiet_threshold_sec', 300):
+        diagnostics.append('suspect_silence')
+    hb = dict(at=float(now), progress_at=float(progress_at), progress_source='structured' if changed else old.get('progress_source'),
+              phase=phase, activity=activity, diagnostics=diagnostics, tokens=tokens)
+    expired = d['deadlines'].get('hard_deadline') is not None and now > d['deadlines']['hard_deadline']
+    observed = observed_status(store, d, proc, env)
+    def save(v):
+        v['heartbeat'] = hb
+        v['processes']['descendants'] = descendants
+        v['containers'] = containers
+        v['counters']['heartbeats'] += 1
+        if expired:
+            v.update(status='failed', status_reason='hard_deadline')
+            v['classification'] = classify(dict(hard_deadline=True, env=env))
+        elif identity_state(d, 'controller', proc) == GONE and intent_for(d, 'controller'):
+            v.update(status=observed['status'], status_reason=observed['status_reason'], completion_kind=observed['completion_kind'])
+            v['classification'] = observed['classification']
+            v['exit_evidence'] = exit_evidence(d, events)
+        elif observed['status'] == 'reconcile' and v['status'] not in TERMINAL:
+            v.update(status='reconcile', status_reason='reconcile')
+        if v.get('classification'):
+            cls = v['classification']['class']
+            v['counters']['classifications'][cls] = v['counters']['classifications'].get(cls, 0) + 1
+    if observed['status'] == 'completed':
+        store.fault.hit('complete.observed_before_state')
+    store.fault.hit('classify.before_persist')
+    result = store.update(save, (generation, 0) if generation else None, event='heartbeat')
+    return status_fields(result, public(result), now)
+
+
+def schedule_recovery(store, classification, generation, base=1, cap=60):
+    d = store.read()
+    if (RECOVERY_MATRIX[classification['class']]['mode'] != 'auto' or
+            any(x['role'] == 'controller' for x in d['launches'])):
+        return False
+    def save(v):
+        r = v['recovery']
+        if r['used'] >= r['allowance_total']:
+            v.update(status='operator_wait', status_reason='recovery_exhausted')
+            r['next_retry_at'] = None
+            if v['handoff']['outcome'] is None:
+                v['handoff'] = dict(outcome='operator_wait', at=float(store.clock.time()))
+        else:
+            delay = min(base * 2 ** r['used'], cap)
+            r['used'] += 1
+            r['backoff_sec'] = delay
+            r['next_retry_at'] = float(store.clock.time() + delay)
+            r['history'].append(dict(used=r['used'], next_retry_at=r['next_retry_at'], code='retry_scheduled'))
+            v['counters']['retries'] += 1
+            v.update(status='starting', status_reason='retry_scheduled')
+        v['classification'] = classification
+    d = store.update(save, (generation, 0), event='recovery')
+    store.fault.hit('recovery.after_counter_before_sleep')
+    return d['status_reason'] == 'retry_scheduled'
+
+
+def preflight_loop(store, env, generation, check=None):
+    check = check or preflight
+    while True:
+        d = store.read()
+        delay = max(0, (d['recovery'].get('next_retry_at') or 0) - store.clock.time())
+        while delay > 0:
+            store.clock.sleep(min(delay, 1))
+            d = store.read()
+            if d['worker_generation'] != generation or d.get('cancel') or d['launch_revoked']:
+                raise FencedOut()
+            delay = max(0, (d['recovery'].get('next_retry_at') or 0) - store.clock.time())
+        if d['worker_generation'] != generation or d.get('cancel') or d['launch_revoked']:
+            raise FencedOut()
+        if d['deadlines'].get('hard_deadline') is not None and store.clock.time() > d['deadlines']['hard_deadline']:
+            def expired(v):
+                v.update(status='failed', status_reason='hard_deadline', classification=classify(dict(hard_deadline=True, env=env)))
+                if v['handoff']['outcome'] is None:
+                    v['handoff'] = dict(outcome='failed', at=float(store.clock.time()))
+            store.update(expired, (generation, 0), event='classified')
+            return False
+        result = check(store.root.parent.parent, store.ticket, env, d['authorized']['entrypoint'], d['authorized']['tier'])
+        def save(v):
+            v['preflight'] = dict(at=float(store.clock.time()), checks=result['checks'])
+        d = store.update(save, (generation, 0))
+        if result['ok']:
+            def ready(v):
+                v['recovery']['next_retry_at'] = None
+                if v.get('classification') and v['classification']['row'] == '3b':
+                    v['classification'] = None
+            store.update(ready, (generation, 0))
+            return True
+        classification = classify(dict(preflight=result, controller_launched=False, env=env))
+        if classification['class'] == 'transient_environment_provider':
+            if schedule_recovery(store, classification, generation):
+                continue
+            return False
+        def wait(v):
+            v['classification'] = classification
+        store.update(wait, (generation, 0))
+        store.handoff('operator_wait', result['code'], generation)
+        return False
+
+
+def restart_worker(store, goal=None, test_cmd=None, env=None, proc=None):
+    proc = proc or Proc()
+    repo = store.root.parent.parent
+    env = dict(env) if env is not None else build_project_env(repo, os.environ)
+    with lock(store.root, str(Path(store.ticket) / 'ownership.lock'), False):
+        with store.locked():
+            d = store.read()
+            if d.get('cancel') or d['launch_revoked'] or d['status'] in {'completed', 'cancelled', 'failed'}:
+                return public(d, 'blocked', 'reconcile')
+            worker_state, controller_state = identity_state(d, 'worker', proc), identity_state(d, 'controller', proc)
+            if worker_state == OWNED:
+                return public(d, 'already_running', 'already_running')
+            if worker_state == UNKNOWN or controller_state in {UNKNOWN, NOT_OWNED}:
+                return public(d, 'blocked', 'reconcile')
+            # Unpublished candidates are ambiguous; never duplicate them.
+            for pid in proc.pids():
+                try:
+                    ident, state, _ = proc.stat(pid)
+                    if ident.uid == os.getuid() and state != 'Z':
+                        candidate = proc.environ(pid)
+                        if candidate.get(MARK + 'RUN_ID') == d['run_id'] and candidate.get(MARK + 'ROLE') == 'worker':
+                            return public(d, 'blocked', 'reconcile')
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    return public(d, 'blocked', 'reconcile')
+            precontroller = not any(x['role'] == 'controller' and x['state'] != 'abandoned' for x in d['launches'])
+            if not precontroller and controller_state != OWNED:
+                return public(d, 'reconcile', 'exit_evidence_unavailable')
+            payload = json.dumps(dict(monitor_only=True, env=env)).encode()
+            if not precontroller and config_digest(env) != d['fingerprints']['config_sha256']:
+                return public(d, 'blocked', 'fingerprint_mismatch')
+            if precontroller:
+                if goal is None:
+                    return public(d, 'blocked', 'inputs_required')
+                a = validate_args(dict(repo=str(repo), ticket=store.ticket, goal=goal, test_cmd=test_cmd,
+                                       tier=d['authorized']['tier'], from_phase=d['authorized']['from_phase']))
+                if (digest(goal) != d['authorized']['goal_sha256'] or
+                    (digest(test_cmd) if test_cmd is not None else None) != d['authorized']['test_cmd_sha256'] or
+                    config_digest(env) != d['fingerprints']['config_sha256'] or
+                    digest(Path(build_argv('orchestrator.run', a)[1]).read_bytes()) != d['fingerprints']['controller']['sha256']):
+                    return public(d, 'blocked', 'fingerprint_mismatch')
+                payload = json.dumps(dict(args=a, env=env)).encode()
+            def bump(v):
+                v['worker_generation'] += 1
+                v['processes']['worker'] = None
+                for x in v['launches']:
+                    if x['role'] == 'worker':
+                        x['state'] = 'abandoned'
+                v.update(status='starting' if precontroller else 'running', status_reason='bootstrap' if precontroller else 'observing')
+            d = store.update(bump, event='adopted', locked=True)
+            store.fault.hit('adopt.after_generation_bump_before_spawn')
+            _, pipe, _ = spawn(store, 'worker', d['worker_generation'], payload is not None)
+        if pipe is not None:
+            try:
+                transfer(pipe, payload, d['deadlines']['payload_io_timeout_sec'], store.clock)
+            finally:
+                os.close(pipe)
+    return status_fields(store.read(), public(store.read()), store.clock.time())
+
+
+def monitor(repo, ticket, run_id=None, timeout=30, interval=1, restart=False, goal=None, goal_file=None,
+            test_cmd=None, clock=None, proc=None, docker=None, env=None):
+    if not (0 <= timeout <= 86400 and 0 < interval <= 3600):
+        raise ValueError('invalid_interval')
+    store = RunStore(repo, ticket, run_id, clock)
+    d = store.read() if run_id else store.current()
+    if goal_file is not None:
+        goal = Path(goal_file).read_text()
+    env = dict(env) if env is not None else build_project_env(repo, os.environ)
+    if restart:
+        return restart_worker(store, goal, test_cmd, env, proc)
+    deadline = store.clock.time() + timeout
+    while True:
+        result = monitor_tick(store, env, proc, docker)
+        if result['status'] in TERMINAL or store.clock.time() >= deadline:
+            return result
+        store.clock.sleep(min(interval, deadline - store.clock.time()))
+
 def cli(args, parser):
     try:
         command = args.subcommand
         if command == 'start' or command == 'run':
             result = start(args)
         elif command == 'status':
+            if getattr(args, 'recovery_matrix', False):
+                print(json.dumps(RECOVERY_MATRIX, sort_keys=True) if args.json else '\n'.join(
+                    f"{k}: {v['mode']}; {v['action']}" for k, v in RECOVERY_MATRIX.items()))
+                return 0
+            if not args.ticket:
+                parser.error('--ticket is required')
             result = status(args.repo, args.ticket, args.run_id)
+        elif command == 'monitor':
+            result = monitor(args.repo, args.ticket, args.run_id, args.timeout, args.interval,
+                             args.restart_worker, args.goal, args.goal_file, args.test_cmd)
         else:
             result = cancel(args.repo, args.ticket, args.run_id, args.grace)
     except ValueError:
@@ -1147,12 +2060,22 @@ def cli(args, parser):
         result = public({}, 'blocked', 'run_not_found')
     except OSError:
         result = public({}, 'blocked', 'filesystem_unavailable')
-    print(json.dumps(result, sort_keys=True) if args.json else f"{result['status']}: {result['status_reason']}")
+    print(json.dumps(result, sort_keys=True) if args.json else human_status(result))
     return exit_code(result)
 
 
 def _main():
     p = argparse.ArgumentParser()
+    if len(sys.argv) > 1 and sys.argv[1] == '_routes':
+        r = argparse.ArgumentParser()
+        r.add_argument('command')
+        r.add_argument('--repo', required=True)
+        r.add_argument('--ticket', default='')
+        r.add_argument('--entrypoint', choices=tuple(ROLE_KEYS_BY_ENTRYPOINT), required=True)
+        r.add_argument('--tier', choices=['auto', 'S', 'M', 'L'], required=True)
+        a = r.parse_args()
+        print(json.dumps(route_child(a.repo, a.entrypoint, a.tier, a.ticket), sort_keys=True))
+        return 0
     p.add_argument('command', choices=['_boot'])
     for name in ('repo', 'ticket', 'run-id', 'role', 'intent'):
         p.add_argument('--' + name, required=True)

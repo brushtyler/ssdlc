@@ -27,7 +27,24 @@ class CoreCase(unittest.TestCase):
         self.repo = Path(self.tmp.name)
         self.home = self.repo / 'home'
         self.home.mkdir()
-        self.env_patch = patch.dict(os.environ, {'HOME': str(self.home)})
+        # Lifecycle tests launch a fake controller, but still exercise the real
+        # read-only preflight in its detached worker. Supply isolated prerequisites
+        # instead of depending on host subscriptions/tools or bypassing preflight.
+        auth = self.home / '.codex'
+        auth.mkdir()
+        (auth / 'auth.json').write_text('{}')
+        tools = self.home / 'bin'
+        tools.mkdir()
+        fake_codex = tools / 'codex'
+        fake_codex.write_text('#!/bin/sh\nexit 99\n')
+        fake_codex.chmod(0o700)  # Any accidental inference invocation must fail.
+        env = {'HOME': str(self.home), 'PATH': str(tools) + os.pathsep + os.environ.get('PATH', os.defpath),
+               'SSDLC_EXECUTION_MODE': 'native', 'SSDLC_REVIEW_MODELS': 'codex:fixture',
+               'SSDLC_INHERIT_HOST_CODEX_AUTH': 'true'}
+        for roles in sup.ROLE_KEYS_BY_ENTRYPOINT.values():
+            for role in roles:
+                env['SSDLC_' + role.split('-')[-1].upper() + '_ENGINE'] = 'codex'
+        self.env_patch = patch.dict(os.environ, env)
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)
         subprocess.run(['git', 'init', '-q', str(self.repo)], check=True, stdout=subprocess.DEVNULL)
@@ -587,6 +604,19 @@ class TestNoSecretsAndCanonicalBoundary(CoreCase):
         self.assertFalse(proc.signals)
 
 
+    def test_pending_cancel_keeps_priority_after_controller_exit(self):
+        store, proc = self.fake_run()
+        store.update(lambda d: d.update(cancel=dict(epoch=1, requested_at=1000., state='requested')))
+        del proc.entries[2002]
+        before = self.snapshot(store.root)
+        with patch.object(sup, 'classify', side_effect=AssertionError('cancel reclassified as a crash')):
+            result = sup.status(self.repo, 'T-1', proc=proc)
+        self.assertEqual(result['status'], 'cancelling')
+        self.assertEqual(result['next_action'], 'repeat_cancel')
+        self.assertEqual(self.snapshot(store.root), before)
+        self.assertFalse(proc.signals)
+
+
 class TestRealProcesses(CoreCase):
     def test_detach_survives_caller_exit_and_exactly_one_concurrent_launch(self):
         received = self.repo / 'launches'
@@ -609,8 +639,11 @@ class TestRealProcesses(CoreCase):
     def test_scoped_cancel_unrelated_session_untouched(self):
         self.controller()
         sibling = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True)
-        self.addCleanup(lambda: sibling.kill() if sibling.poll() is None else None)
-        self.addCleanup(lambda: sibling.wait(timeout=5))
+        def reap_sibling():
+            if sibling.poll() is None:
+                sibling.kill()
+            sibling.wait(timeout=5)
+        self.addCleanup(reap_sibling)
         self.addCleanup(self.cleanup_run)
         self.assertEqual(sup.start(self.args)['status'], 'running')
         self.assertEqual(sup.cancel(self.repo, 'T-1', grace=0)['status'], 'cancelled')
