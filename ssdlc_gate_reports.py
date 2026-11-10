@@ -823,7 +823,7 @@ def _reconcile_candidate_store(root, artifacts, register):
     from ssdlc_tasks import validate_document
     root = Path(root)
     for ref, meta in list(artifacts.items()):
-        if ref.startswith(('candidate-evidence/', 'diagnosis/', 'history/')) and ref != 'diagnosis/store.lock':
+        if (ref.startswith(('candidate-evidence/', 'diagnosis/', 'history/')) or ref in ('06-ops/context-disclosure.json', '07-docs/context-disclosure.json')) and ref != 'diagnosis/store.lock':
             try:
                 data = _candidate_read(root, ref, 'log' if ref.endswith('.log') or ref.startswith('history/') else 'record')
                 if _digest(data) != meta['sha256']:
@@ -832,6 +832,21 @@ def _reconcile_candidate_store(root, artifacts, register):
                 if ref.startswith('diagnosis/'):
                     _diagnosis_inconsistent()
                 raise TaskError('Retained evidence artifact missing or changed')
+    disclosure_pending = []
+    for phase in ('06-ops', '07-docs'):
+        ref = phase + '/context-disclosure.json'
+        path = root / ref
+        if path.exists() or path.is_symlink():
+            try:
+                data = _candidate_read(root, ref, 'record')
+                obj = json.loads(data, object_pairs_hook=_pairs)
+                validate_document('context-disclosure', obj)
+                if data != canon(obj) or obj['phase'] != phase:
+                    raise ValueError()
+            except Exception as exc:
+                raise TaskError('Retained context disclosure invalid') from exc
+            if ref not in artifacts:
+                disclosure_pending.append((ref, path))
     history_pending = []
     for path in sorted((root / 'history').glob('*.json')):
         ref = path.relative_to(root).as_posix()
@@ -845,7 +860,7 @@ def _reconcile_candidate_store(root, artifacts, register):
             history_pending.append((ref, path))
     diagnosis_pending = _diagnosis_inventory(root, artifacts)
     pending = []
-    for directory in ('records', 'logs', 'decisions', 'catalogue'):
+    for directory in ('records', 'logs', 'decisions', 'catalogue', 'probes'):
         base = root / 'candidate-evidence' / directory
         if not base.exists():
             continue
@@ -869,7 +884,7 @@ def _reconcile_candidate_store(root, artifacts, register):
                     raise TaskError('Unregistered candidate record identity mismatch') from exc
                 pending.append((ref, path))
                 pending.append((obj['log']['ref'], root / obj['log']['ref']))
-            elif directory in ('decisions', 'catalogue'):
+            elif directory in ('decisions', 'catalogue', 'probes'):
                 try:
                     obj = json.loads(data, object_pairs_hook=_pairs)
                     if data != canon(obj):
@@ -878,13 +893,16 @@ def _reconcile_candidate_store(root, artifacts, register):
                         validate_document('convergence-decision', obj)
                         if path.stem != _digest(canon(obj))[:32]:
                             raise ValueError()
+                    elif directory == 'probes':
+                        if obj.get('kind') != 'privilege_probe' or obj.get('privilege_mode') not in ('root', 'non-root'):
+                            raise ValueError()
                     elif _digest(obj['block'].encode()) != obj['block_sha256']:
                         raise ValueError()
                 except Exception as exc:
                     raise TaskError('Unregistered candidate artifact identity mismatch') from exc
                 pending.append((ref, path))
             # Orphan logs are deliberately inert, never proof.
-    for ref, path in pending + diagnosis_pending + history_pending:
+    for ref, path in pending + diagnosis_pending + history_pending + disclosure_pending:
         register(ref, path)
 
 
@@ -1312,3 +1330,44 @@ def history_snapshot(root, phase, attempt, artifacts, task_ids, file_refs, curre
     return dict(schema_version='1.0', phase=phase, attempt=attempt,
                 cutoff=dict(attempt=attempt, phase_index=cutoff[1]), sources=sources,
                 relevant=relevant, block=block, block_sha256=_digest(canon(block)))
+
+
+def convergence_metrics(root):
+    """Count structured convergence artifacts without reading command output or mutating state."""
+    root = Path(root)
+    counts = dict.fromkeys(('checks_run', 'checks_reused', 'reuse_declined', 'probes',
+                           'diagnosis_requests', 'reservations', 'results', 'consumed',
+                           'uncertain', 'history_snapshots', 'truncated_contexts'), 0)
+    counts['rejections_by_code'] = {}
+    patterns = {'probes': 'candidate-evidence/probes/*.json',
+                'diagnosis_requests': 'diagnosis/requests/*/request.json',
+                'reservations': 'diagnosis/reservations/*.json',
+                'results': 'diagnosis/requests/*/result.json',
+                'consumed': 'diagnosis/requests/*/consumption.json',
+                'uncertain': 'diagnosis/requests/*/uncertain.json',
+                'history_snapshots': 'history/*.json'}
+    def documents(pattern):
+        for path in sorted(root.glob(pattern)):
+            try:
+                yield json.loads(_candidate_read(root, path.relative_to(root).as_posix(), 'log'), object_pairs_hook=_pairs)
+            except (ProtocolError, ValueError, OSError):
+                continue
+    for key, pattern in patterns.items():
+        counts[key] = sum(1 for _ in documents(pattern))
+    for decision in documents('candidate-evidence/decisions/*.json'):
+        if decision.get('decision') in ('executed', 'invalidated'):
+            counts['checks_run'] += 1
+        elif decision.get('decision') == 'reused':
+            counts['checks_reused'] += 1
+        counts['reuse_declined'] += bool(decision.get('declined'))
+        for rejection in decision.get('considered', []):
+            try:
+                code = (json.loads(rejection) if isinstance(rejection, str) else rejection)['code']
+                if isinstance(code, str):
+                    counts['rejections_by_code'][code] = counts['rejections_by_code'].get(code, 0) + 1
+            except (ValueError, KeyError, TypeError):
+                continue
+    for phase in ('06-ops', '07-docs'):
+        for disclosure in documents(phase + '/context-disclosure.json'):
+            counts['truncated_contexts'] += disclosure.get('full_audit_coverage_permitted') is False
+    return counts

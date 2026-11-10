@@ -41,6 +41,9 @@ from ssdlc_gate_reports import (GateEvaluator, EvaluationRequest, GateTerminalEr
     build_trusted_context, fingerprint, UNTRUSTED_DATA_INSTRUCTION, untrusted_data,
     ProtocolError, ScannerResult, scanner_status_json, discover_manifest_scopes, write_or_verify, canon)
 import ssdlc_gate_reports as candidate_reports
+
+OPS_DOCS_TEXT_CAP = 60000
+OPS_DOCS_COVERAGE_NOTE = "When full_audit_coverage_permitted is false, you must not claim complete audit coverage."
 import ssdlc_bounce as bounce
 from ssdlc_bounce import request_identity
 from ssdlc_catalogues import CatalogueError, requirement_catalogue
@@ -2180,6 +2183,10 @@ class SSDLCOrchestrator:
         with self._registry_lock:
             cr.reconcile_candidate_store(self.ssdlc_root, self.state['artifacts'], self._register_new)
         privilege = self._candidate_privilege(wt)
+        probe_ref = 'candidate-evidence/probes/' + uuid.uuid4().hex + '.json'
+        probe_path = self.ssdlc_root / probe_ref
+        cr.write_exclusive(probe_path, canon(dict(kind='privilege_probe', privilege_mode=privilege)), root=self.ssdlc_root)
+        self._register_new(probe_ref, probe_path)
         source = dict(commit=git(wt, 'rev-parse', 'HEAD'), tree=git(wt, 'rev-parse', 'HEAD^{tree}'))
         if source['commit'] != self.state['task_verified_head'] or git(wt, 'status', '--porcelain'):
             raise GateTerminalError('integrity_blocked', '', 'candidate_source_unverified')
@@ -4066,6 +4073,38 @@ class SSDLCOrchestrator:
     # ------------------------------------------------------------------
     # PHASE 6: DevSecOps Release, Rollback & Observability Engineer
     # ------------------------------------------------------------------
+    def _ops_docs_context(self, phase, diff_text, texts):
+        wt, _ = self._verified_task_review_input(diff_text)
+        disclosure = dict(schema_version='1.0', phase=phase,
+                          verified_commit=git(wt, 'rev-parse', 'HEAD'),
+                          tree=git(wt, 'rev-parse', 'HEAD^{tree}'),
+                          diff=dict(included_chars=len(diff_text), total_chars=len(diff_text), complete=True),
+                          inputs=[dict(name=name, included_chars=min(len(value), OPS_DOCS_TEXT_CAP),
+                                       total_chars=len(value), truncated=len(value) > OPS_DOCS_TEXT_CAP)
+                                  for name, value in texts.items()])
+        disclosure['full_audit_coverage_permitted'] = not any(i['truncated'] for i in disclosure['inputs'])
+        validate_document('context-disclosure', disclosure)
+        ref = phase + '/context-disclosure.json'
+        path = confined(self.ssdlc_root, ref, protect=False)
+        candidate_reports.write_or_verify(path, canon(disclosure), root=self.ssdlc_root)
+        self._register_new(ref, path)
+        block = untrusted_data('verified candidate context', dict(
+            commit=disclosure['verified_commit'], tree=disclosure['tree'], worktree_clean=True))
+        block += '\n' + untrusted_data('context disclosure', disclosure)
+        block += '\n' + untrusted_data('implementation diff', diff_text)
+        for name, value in texts.items():
+            block += '\n' + untrusted_data(name, value[:OPS_DOCS_TEXT_CAP])
+        return wt, block, disclosure
+
+    def _ops_docs_enabled(self):
+        return self._task_mode() and candidate_reports.convergence_enabled(self._ensure_quality_contract())
+
+    def _verify_ops_docs_after(self, diff_text):
+        fresh = git(self.worktree_dir, 'diff', '--binary', self.state['base_commit'], 'HEAD') + '\n'
+        self._verified_task_review_input(fresh)
+        if fresh != diff_text or self._read_optional(self.dir_dev / 'implementation.diff', '') != diff_text:
+            raise TaskError('Verified checkpoint diff changed during Ops/Docs invocation')
+
     @_supervised_phase('06-ops')
     def run_phase_ops(self) -> Path:
         risk_tier = self.state.get("risk_tier", "M")
@@ -4091,19 +4130,27 @@ class SSDLCOrchestrator:
         )
         user_prompt = f"ADR:\n{adr_text}\n\nIMPLEMENTATION DIFF:\n```diff\n{diff_text[:50000]}\n```"
 
+        verified_context = self._ops_docs_enabled()
+        role_cwd = self.repo_root
+        if verified_context:
+            role_cwd, user_prompt, disclosure = self._ops_docs_context('06-ops', diff_text, {'ADR': adr_text})
+            sys_prompt += '\n' + UNTRUSTED_DATA_INSTRUCTION + '\n' + OPS_DOCS_COVERAGE_NOTE
+
         t0 = time.time()
         ops_out, cost, tin, tout, trace_user = EngineRunner.invoke_role(
             ops_engine,
             ops_model,
             sys_prompt,
             user_prompt,
-            self.repo_root,
+            role_cwd,
             self.project_id,
             self.ticket_id,
             "06-ops",
             sandbox="read-only",
             reasoning_effort=ops_effort,
         )
+        if verified_context:
+            self._verify_ops_docs_after(diff_text)
         dur = time.time() - t0
 
         ops_path = self.dir_ops / "release-and-rollback.md"
@@ -4145,19 +4192,27 @@ class SSDLCOrchestrator:
         )
         user_prompt = f"PO REQUIREMENTS:\n{req_text}\n\nIMPLEMENTATION DIFF:\n```diff\n{diff_text[:50000]}\n```"
 
+        verified_context = self._ops_docs_enabled()
+        role_cwd = self.repo_root
+        if verified_context:
+            role_cwd, user_prompt, disclosure = self._ops_docs_context('07-docs', diff_text, {'PO requirements': req_text})
+            sys_prompt += '\n' + UNTRUSTED_DATA_INSTRUCTION + '\n' + OPS_DOCS_COVERAGE_NOTE
+
         t0 = time.time()
         docs_out, cost, tin, tout, trace_user = EngineRunner.invoke_role(
             docs_engine,
             docs_model,
             sys_prompt,
             user_prompt,
-            self.repo_root,
+            role_cwd,
             self.project_id,
             self.ticket_id,
             "07-docs",
             sandbox="read-only",
             reasoning_effort=docs_effort,
         )
+        if verified_context:
+            self._verify_ops_docs_after(diff_text)
         dur = time.time() - t0
 
         docs_path = self.dir_docs / "documentation-and-changelog.md"
