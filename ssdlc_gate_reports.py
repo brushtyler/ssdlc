@@ -822,7 +822,7 @@ def reconcile_candidate_store(root, artifacts, register):
             except (ProtocolError, ValueError, KeyError):
                 raise TaskError('Retained evidence artifact missing or changed')
     pending = []
-    for directory in ('records', 'logs'):
+    for directory in ('records', 'logs', 'decisions', 'catalogue'):
         base = root / 'candidate-evidence' / directory
         if not base.exists():
             continue
@@ -846,6 +846,20 @@ def reconcile_candidate_store(root, artifacts, register):
                     raise TaskError('Unregistered candidate record identity mismatch') from exc
                 pending.append((ref, path))
                 pending.append((obj['log']['ref'], root / obj['log']['ref']))
+            elif directory in ('decisions', 'catalogue'):
+                try:
+                    obj = json.loads(data, object_pairs_hook=_pairs)
+                    if data != canon(obj):
+                        raise ValueError()
+                    if directory == 'decisions':
+                        validate_document('convergence-decision', obj)
+                        if path.stem != _digest(canon(obj))[:32]:
+                            raise ValueError()
+                    elif _digest(obj['block'].encode()) != obj['block_sha256']:
+                        raise ValueError()
+                except Exception as exc:
+                    raise TaskError('Unregistered candidate artifact identity mismatch') from exc
+                pending.append((ref, path))
             # Orphan logs are deliberately inert, never proof.
     for ref, path in pending:
         register(ref, path)

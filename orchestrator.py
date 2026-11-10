@@ -2175,6 +2175,7 @@ class SSDLCOrchestrator:
             if reuse:
                 record = min(accepted, key=lambda r: (r['provenance']['produced_at'], r['record_id']))
             else:
+                self._controller_revision()
                 self._candidate_fault('evidence.before_check')
                 try:
                     out, err, rc = EngineRunner.run_sandboxed_cmd(check['argv'], confined(wt, check['cwd']), check['timeout_sec'])
@@ -2182,8 +2183,21 @@ class SSDLCOrchestrator:
                     out, err, rc = '', 'Check timed out', 124
                 self._candidate_fault('evidence.after_check_before_log')
                 self._controller_revision()
-                if source != dict(commit=git(wt, 'rev-parse', 'HEAD'), tree=git(wt, 'rev-parse', 'HEAD^{tree}')) or git(wt, 'status', '--porcelain'):
-                    raise GateTerminalError('integrity_blocked', check['check_id'], 'source_mutated_during_check')
+                changed = source != dict(commit=git(wt, 'rev-parse', 'HEAD'), tree=git(wt, 'rev-parse', 'HEAD^{tree}')) or bool(git(wt, 'status', '--porcelain'))
+                if not changed and hasattr(self, 'dir_dev'):
+                    try:
+                        self._verified_task_review_input((self.dir_dev / 'implementation.diff').read_text())
+                    except TaskError:
+                        changed = True
+                if changed:
+                    decision = dict(schema_version='1.0', kind='candidate_evidence_decision', gate=gate,
+                                    attempt=attempt, check_id=check['check_id'], decision='invalidated',
+                                    record_id='0'*32, binding_sha256=cr._digest(canon(expected)),
+                                    considered=considered, considered_total=len(paths),
+                                    declined='source_mutated_during_check')
+                    self._write_candidate_decision(decision)
+                    self.record_gate('CANDIDATE_CHECK_' + check['check_id'], False, 'source_mutated_during_check')
+                    raise GateTerminalError('integrity_blocked', check['check_id'], 'Source changed during candidate check; proof discarded')
                 nonce = uuid.uuid4().hex
                 ref = f"candidate-evidence/records/{check['check_id']}-{nonce}.json"
                 log_ref = f'candidate-evidence/logs/{nonce}.log'
@@ -2205,17 +2219,33 @@ class SSDLCOrchestrator:
                             considered=considered, considered_total=len(paths))
             if not expected['environment']['reuse_eligible']:
                 decision['declined'] = 'environment_identity_unavailable'
-            ref = 'candidate-evidence/decisions/' + hashlib.sha256(canon(decision)).hexdigest()[:32] + '.json'
-            write_or_verify(self.ssdlc_root / ref, canon(decision), root=self.ssdlc_root)
-            self._register_new(ref, self.ssdlc_root / ref)
+            self._write_candidate_decision(decision)
             decisions.append(decision)
         result = cr.candidate_catalogue(self.ssdlc_root, quality, records, rejected, self.state['artifacts'])
         result.decisions = decisions
-        snapshot = dict(block=result.block, block_sha256=cr._digest(result.block.encode()), controls=result.controls,
+        self._candidate_fault('evidence.after_decision_before_snapshot')
+        snapshot = dict(binding_sha256=cr._digest(canon([r['record_id'] for r in records])), block=result.block, block_sha256=cr._digest(result.block.encode()), controls=result.controls,
                         decisions=decisions, record_refs={r['check']['check_id']: r['provenance']['artifact_path'] for r in records})
         write_or_verify(snapshot_path, canon(snapshot), root=self.ssdlc_root)
         self._register_new(snapshot_ref, snapshot_path)
+        self._candidate_fault('evidence.after_snapshot_before_dispatch')
         return result
+
+    def _write_candidate_decision(self, decision):
+        ref = 'candidate-evidence/decisions/' + candidate_reports._digest(canon(decision))[:32] + '.json'
+        path = self.ssdlc_root / ref
+        write_or_verify(path, canon(decision), root=self.ssdlc_root)
+        self._register_new(ref, path)
+
+    def _verify_candidate_evidence(self, candidate, wt):
+        for record in candidate.records:
+            expected = {k: record[k] for k in ('check', 'environment', 'privilege_mode')}
+            expected.update(source=dict(commit=git(wt, 'rev-parse', 'HEAD'), tree=git(wt, 'rev-parse', 'HEAD^{tree}')),
+                            controller=self._controller_revision(),
+                            quality_contract_sha256=file_hash(self.dir_recon / 'quality-contract.json'))
+            _, rejection = candidate_reports.verify_candidate_record(self.ssdlc_root, record['provenance']['artifact_path'], expected, self.state['artifacts'])
+            if rejection:
+                raise TaskError('Verified checkpoint changed during review; approval withheld')
 
     def _ensure_controller_contract(self) -> dict:
         """Persist the host baseline before planning/development, never inside a task."""
@@ -3228,6 +3258,8 @@ class SSDLCOrchestrator:
         plan = self._gate_plan()
         wt, limit = self._verified_task_review_input(diff)
         head = self.state['task_verified_head']
+        quality = json.loads((self.dir_recon / 'quality-contract.json').read_text())
+        candidate = self._collect_candidate_evidence('review', attempt, wt, quality)
         evidence = []
         inventory = [('ev/requirements', '01-po/requirements.md'), ('ev/plan', '02-design/plan.json'),
                      ('ev/quality-contract', '00-recon/quality-contract.json'), ('ev/diff', '03-dev/implementation.diff')]
@@ -3239,11 +3271,14 @@ class SSDLCOrchestrator:
             meta = self.state.get('artifacts', {}).get(name, {})
             evidence.append(dict(ref=ref, source=str(path), registered_hash=meta.get('sha256')))
         requirements = (self.dir_po / 'requirements.md').read_text()
-        quality = json.loads((self.dir_recon / 'quality-contract.json').read_text())
+        evidence.extend(candidate.entries)
+        quality = candidate.quality
         context = build_trusted_context(head, plan, requirements, quality, [e['ref'] for e in evidence])
         system += '\n' + UNTRUSTED_DATA_INSTRUCTION
         user += '\n' + untrusted_data('approved task plan', plan)
         user += '\n' + untrusted_data('quality contract', quality)
+        if candidate.block:
+            user += '\n' + candidate_reports.CANDIDATE_EVIDENCE_NOTE + '\n' + untrusted_data('candidate evidence catalogue', candidate.block)
         catalogue = requirement_catalogue(requirements)
         definitions = [(d['id'], hashlib.sha256(d['definition'].encode()).hexdigest()) for d in catalogue['definitions']]
         definitions += [(s['standard_id'], hashlib.sha256(json.dumps(s, sort_keys=True).encode()).hexdigest()) for s in quality.get('standards', [])]
@@ -3258,6 +3293,7 @@ class SSDLCOrchestrator:
         results, terminals = [], []
 
         def verify():
+            self._verify_candidate_evidence(candidate, wt)
             if self.state.get('task_verified_head') != head:
                 raise TaskError('Verified checkpoint changed during review; approval withheld')
             try:
@@ -3282,7 +3318,7 @@ class SSDLCOrchestrator:
         for index, model in enumerate(review_models, 1):
             effective_engine, effective_model = resolve_review_entry(model, engine)
             requests.append(EvaluationRequest('review', effective_engine, effective_model, index,
-                attempt, head, system, user, context, evidence, fp, parse_review_verdict, effort))
+                attempt, head, system, user, context, evidence, fp, parse_review_verdict, effort, candidate.controls))
         roster = self._phase_roster('04-review', attempt, requests)
         for index, request in enumerate(requests, 1):
             evaluator = GateEvaluator(gate='review', base_dir=self.dir_review, ssdlc_root=self.ssdlc_root,
@@ -3596,6 +3632,7 @@ class SSDLCOrchestrator:
 
     def _task_verification_gate(self, gate, attempt, engine, model, effort, diff, system, user,
                                 controls, extra_evidence, scanners=None):
+        controls = dict(controls)
         phase = {'qa': '05-qa', 'appsec': '05b-appsec'}[gate]
         base = self.dir_qa if gate == 'qa' else self.dir_appsec
         try:
@@ -3607,6 +3644,9 @@ class SSDLCOrchestrator:
             self.record_gate(f'{gate.upper()}_VERIFICATION_A{attempt}', False, 'Verified checkpoint changed during scanners')
             return False, 'Verified checkpoint changed during scanners; approval withheld'
         head = self.state['task_verified_head']
+        quality = json.loads((self.dir_recon / 'quality-contract.json').read_text())
+        candidate = self._collect_candidate_evidence(gate, attempt, wt, quality)
+        controls.update(candidate.controls)
         plan = self._gate_plan()
         inventory = [('ev/requirements', self.dir_po / 'requirements.md'),
                      ('ev/plan', self.dir_design / 'plan.json'),
@@ -3618,11 +3658,14 @@ class SSDLCOrchestrator:
         evidence = [dict(ref=ref, source=str(path), registered_hash=self.state['artifacts'].get(
                     str(path.relative_to(self.ssdlc_root)), {}).get('sha256')) for ref, path in inventory]
         requirements = (self.dir_po / 'requirements.md').read_text()
-        quality = json.loads((self.dir_recon / 'quality-contract.json').read_text())
+        evidence.extend(candidate.entries)
+        quality = candidate.quality
         context = build_trusted_context(head, plan, requirements, quality, [e['ref'] for e in evidence])
         system += '\n' + UNTRUSTED_DATA_INSTRUCTION
         user += '\n' + untrusted_data('approved task plan', plan)
         user += '\n' + untrusted_data('quality contract', quality)
+        if candidate.block:
+            user += '\n' + candidate_reports.CANDIDATE_EVIDENCE_NOTE + '\n' + untrusted_data('candidate evidence catalogue', candidate.block)
         definitions = [(d['id'], hashlib.sha256(d['definition'].encode()).hexdigest())
                        for d in requirement_catalogue(requirements)['definitions']]
         definitions += [(s['standard_id'], hashlib.sha256(json.dumps(s, sort_keys=True).encode()).hexdigest())
@@ -3637,6 +3680,7 @@ class SSDLCOrchestrator:
         self.record_artifact(str((run / 'inputs.json').relative_to(self.ssdlc_root)), run / 'inputs.json')
 
         def verify():
+            self._verify_candidate_evidence(candidate, wt)
             if self.state.get('task_verified_head') != head:
                 raise TaskError('Verified checkpoint changed')
             self._verified_task_review_input((self.dir_dev / 'implementation.diff').read_text())
@@ -4305,6 +4349,9 @@ To **REJECT** and send feedback back to the team:
             # The read-only compatibility API checks whether baseline state exists.
             # The existing foreground path retains its previous refusal contract.
             _resume_run_refusal(self.ssdlc_root, self.state, self._task_mode(), from_phase)
+        quality_path = self.ssdlc_root / '00-recon' / 'quality-contract.json'
+        if self._task_mode() and quality_path.exists() and candidate_reports.convergence_enabled(json.loads(quality_path.read_text())):
+            candidate_reports.reconcile_candidate_store(self.ssdlc_root, self.state['artifacts'], self._register_new)
         start_idx = self.PHASE_ORDER.index(from_phase) if from_phase in self.PHASE_ORDER else 0
 
         if start_idx <= self.PHASE_ORDER.index("00-recon"):
