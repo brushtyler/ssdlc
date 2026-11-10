@@ -1,7 +1,7 @@
 """Read-only bounce proposals from host-verified evaluation data.
 
-This module does not verify provenance or persist artifacts. Callers must supply
-verified evaluations for one explicit phase/attempt and trusted quality inputs.
+The evidence reader verifies one explicit host phase/attempt without writes.
+The pure planner also accepts already verified evaluations and trusted inputs.
 Stored assessments have no authority. No output grants approval or execution.
 """
 import copy
@@ -201,3 +201,306 @@ def plan_bounce(*, repo, plan, requirements_text, quality, reviewed_commit,
                                            else canonical_json(item)))
     result['revision'] = hashlib.sha256(canonical_json(result).encode('utf-8')).hexdigest()
     return result
+
+
+# These records are controller-owned; hashes provide integrity, not authentication.
+PHASES = {'04-review': 'review', '05-qa': 'qa', '05b-appsec': 'appsec'}
+
+
+def _sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def request_identity(request):
+    """Describe the public evaluator identity before invoking an evaluator."""
+    from ssdlc_gate_reports import canon, slot_key, evaluation_identity
+    schema = json.loads((Path(__file__).parent / 'schemas/gate-findings.schema.json').read_text())
+    c = request.context
+    binding = dict(version=2, fingerprint=request.fingerprint,
+        system_prompt_sha256=_sha(request.system_prompt.encode()),
+        user_prompt_sha256=_sha(request.user_prompt.encode()), schema_sha256=_sha(canon(schema)),
+        reasoning_effort=request.reasoning_effort, controls=request.controls,
+        context=dict(commit=c.expected_commit, task_ids=sorted(c.known_task_ids),
+                     obligations=sorted(c.obligation_ids), evidence=sorted(c.evidence_refs)))
+    fp = _sha(canon(binding))
+    slot = slot_key(request.gate, request.engine, request.model, request.ordinal,
+                    request.attempt, request.reviewed_commit)
+    return dict(gate=request.gate, engine=request.engine, model=request.model,
+                ordinal=request.ordinal, attempt=request.attempt,
+                reviewed_commit=request.reviewed_commit, fingerprint=fp,
+                identity=evaluation_identity(slot, fp), slot=slot)
+
+
+def parse_final_verdict(gate, text):
+    """Same strict final-line contract as the public bridge parsers."""
+    marker, values = {'review': ('REVIEW_STATUS', ('APPROVED', 'CHANGES_REQUESTED')),
+                      'qa': ('QA_STATUS', ('PASSED', 'FAILED')),
+                      'appsec': ('APPSEC_STATUS', ('SECURE', 'VULNERABLE'))}[gate]
+    if len(re.findall(r'\b' + marker + r'\s*:', text)) != 1:
+        return None
+    final = text.rstrip().splitlines()[-1].strip() if text.strip() else ''
+    return next((v for v in values if final == marker + ': ' + v), None)
+
+
+def _safe_path(root, name):
+    from ssdlc_tasks import confined
+    root = Path(root).absolute()
+    path = Path(name)
+    if path.is_absolute():
+        try:
+            path = path.relative_to(root)
+        except ValueError as exc:
+            raise BounceError('contradictory_evidence') from exc
+    current = root
+    if root.is_symlink():
+        raise BounceError('contradictory_evidence')
+    for part in path.parts:
+        current = current / part
+        if current.is_symlink():
+            raise BounceError('contradictory_evidence')
+    return confined(root, str(path), protect=False)
+
+
+def _verify_recorded_evaluation(*, root, registry, directory, expected, context):
+    """Read-only equivalent of evaluator integrity, plus persisted outcome checks.
+
+    Uses only public controller APIs. Unlike live _integrity this never reconciles
+    registrations. Every retained evaluator file must already be registered.
+    """
+    from ssdlc_gate_reports import canon, evaluation_identity, slot_key, verify_evidence, extract_report
+    root = Path(root).absolute()
+    directory = _safe_path(root, directory)
+    records, hashes = {}, {}
+    for path in sorted(directory.rglob('*')):
+        path = _safe_path(root, path)
+        if path.is_file() and not path.name.startswith('.gate-'):
+            name = str(path.relative_to(directory))
+            data = path.read_bytes()
+            ref = str(path.relative_to(root))
+            if ref not in registry or registry[ref]['sha256'] != _sha(data):
+                raise BounceError('integrity_mismatch')
+            hashes[name] = _sha(data)
+            # assessment is integrity-covered, but has no interpretive authority.
+            records[name] = (json.loads(data) if name.endswith('.json') and name != 'assessment.json'
+                             else data.decode() if not name.startswith('evidence/') else data)
+    prefix = str(directory.relative_to(root)) + '/'
+    if any(ref.startswith(prefix) and ref[len(prefix):] not in hashes for ref in registry):
+        raise BounceError('integrity_mismatch')
+    if not {'input.json', 'outcome.json', 'prompt-1.json'} <= records.keys():
+        raise BounceError('incomplete_evidence')
+    metadata, outcome = records['input.json'], records['outcome.json']
+    if type(metadata) is not dict or type(outcome) is not dict:
+        raise BounceError('malformed_record')
+    binding = metadata['decision_inputs']
+    if type(binding) is not dict:
+        raise BounceError('malformed_record')
+    gate = expected['gate']
+    controls = validate_controls(gate, binding.get('controls'), records.get('scanner-status.json'))
+    fp = _sha(canon(binding))
+    slot = slot_key(gate, metadata['engine'], metadata['model'], metadata['ordinal'],
+                    metadata['attempt'], metadata['reviewed_commit'])
+    identity = evaluation_identity(slot, fp)
+    for key in ('gate', 'engine', 'model', 'attempt', 'reviewed_commit', 'fingerprint', 'identity'):
+        if metadata[key] != expected[key] or outcome[key] != expected[key]:
+            raise BounceError('contradictory_evidence')
+    if (metadata['ordinal'] != expected['ordinal'] or expected['slot'] != slot or
+            identity != expected['identity'] or fp != metadata['fingerprint'] or
+            outcome['evidence_catalogue_sha256'] != _sha(canon(metadata))):
+        raise BounceError('contradictory_evidence')
+    manifest = outcome['manifest']
+    if type(manifest) is not dict or set(manifest) != set(hashes) - {'outcome.json'}:
+        raise BounceError('integrity_mismatch')
+    if any(hashes[name] != digest for name, digest in manifest.items()):
+        raise BounceError('integrity_mismatch')
+    entries = metadata['evidence']
+    if type(entries) is not list:
+        raise BounceError('malformed_record')
+    for entry in entries:
+        for key in ('source', 'captured'):
+            path = _safe_path(root, entry[key])
+            ref = str(path.relative_to(root))
+            if ref not in registry or registry[ref]['sha256'] != entry['sha256']:
+                raise BounceError('integrity_mismatch')
+        if _safe_path(root, entry['captured']).parent != directory / 'evidence':
+            raise BounceError('contradictory_evidence')
+    verify_evidence(entries)
+    if gate == 'appsec':
+        status_entries = [e for e in entries if e['ref'] == 'ev/sca-status']
+        if len(status_entries) != 1 or records.get('scanner-status.json') != json.loads(
+                _safe_path(root, status_entries[0]['captured']).read_text()):
+            raise BounceError('contradictory_evidence')
+    expected_context = dict(commit=context.expected_commit, task_ids=sorted(context.known_task_ids),
+                            obligations=sorted(context.obligation_ids), evidence=sorted(context.evidence_refs))
+    if binding['context'] != expected_context or {e['ref'] for e in entries} != set(context.evidence_refs):
+        raise BounceError('contradictory_evidence')
+    prompt = records['prompt-1.json']
+    schema = json.loads((Path(__file__).parent / 'schemas/gate-findings.schema.json').read_text())
+    if (binding['schema_sha256'] != _sha(canon(schema)) or
+            _sha(prompt['system'].encode()) != binding['system_prompt_sha256'] or
+            metadata['system_prompt_sha256'] != binding['system_prompt_sha256'] or
+            metadata['user_prompt_sha256'] != binding['user_prompt_sha256']):
+        raise BounceError('contradictory_evidence')
+    # The original user prompt precedes the evaluator's trusted-context suffix.
+    from ssdlc_gate_reports import untrusted_data
+    suffix = '\n' + untrusted_data('trusted context', dict(source_gate={
+        'review': 'code_review', 'qa': 'qa', 'appsec': 'appsec'}[gate], **expected_context))
+    # The evaluator uses commit/task_ids/obligations/evidence, exactly as above.
+    positions = [m.start() for m in re.finditer(re.escape(suffix), prompt['user'])]
+    if not any(_sha(prompt['user'][:p].encode()) == binding['user_prompt_sha256'] for p in positions):
+        raise BounceError('contradictory_evidence')
+    record = dict(gate=gate, identity=identity, reviewer_ordinal=metadata['ordinal'],
+        outcome_class=outcome['outcome_class'], verdict=outcome['verdict'], controls=controls,
+        evidence_refs=sorted(context.evidence_refs), evidence_state='verified',
+        source_refs={n: str((directory / n).relative_to(root)) for n in hashes}, source_hashes=hashes,
+        scanner_status=records.get('scanner-status.json'))
+    if outcome['outcome_class'] in ('approved', 'rejected_substantive'):
+        n, response = select_response(records)
+        telemetry = f'invocation-{n}.json'
+        if telemetry in records and type(records[telemetry]) is not dict:
+            raise BounceError('malformed_record')
+        report = records['report.json']
+        bind_report(report, gate, context)
+        if extract_report(records[response], identity[:16]) != report:
+            raise BounceError('contradictory_evidence')
+        verdict = parse_final_verdict(gate, records[response])
+        if verdict is None or verdict != outcome['verdict']:
+            raise BounceError('contradictory_evidence')
+        approved, reasons = decide(verdict, assess_report(report, context), controls, True)
+        if (type(outcome['approved']) is not bool or outcome['approved'] != approved or
+                (outcome['outcome_class'] == 'approved') != approved):
+            raise BounceError('contradictory_evidence')
+        record.update(report=report, response_ordinal=n, telemetry_present=telemetry in records,
+                      informational=[] if telemetry in records else ['telemetry_missing'])
+    elif outcome['approved'] is not False:
+        raise BounceError('contradictory_evidence')
+    return record
+
+
+def verify_recorded_evaluation(**kwargs):
+    """Translate persisted-record errors while preserving deliberate crashes."""
+    try:
+        return _verify_recorded_evaluation(**kwargs)
+    except BounceError:
+        raise
+    except ProtocolError as exc:
+        raise BounceError('contradictory_evidence' if exc.code == 'binding_gate'
+                          else 'report_invalid') from exc
+    except FindingsError as exc:
+        raise BounceError('report_invalid') from exc
+    except (TaskError, OSError) as exc:
+        raise BounceError('integrity_mismatch') from exc
+    except (ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
+        raise BounceError('malformed_record') from exc
+
+
+def read_evidence(*, root, state, repo, worktree, phase, attempt):
+    """D12 boundary: read exact host phase records or return a blocked result.
+
+    No provider, scanner, scheduler, registration or state writer is constructed.
+    BaseException deliberately escapes. No older attempt can replace a newer one.
+    """
+    from ssdlc_tasks import git
+    from ssdlc_gate_reports import canon
+    failure = dict(status='blocked', execution_authorized=False, evaluations=[], blockers=[])
+    try:
+        if phase not in PHASES or type(attempt) is not int or attempt < 1:
+            raise BounceError('malformed_record')
+        root = Path(root).absolute()
+        registry = state['artifacts']
+        base = root / phase / 'provenance'
+        rosters = list(base.glob('attempt-*/roster.json'))
+        if not rosters:
+            failure['status'] = 'rejected-legacy'
+            raise BounceError('rejected-legacy')
+        if not state.get('task_breakdown'):
+            failure['status'] = 'rejected-legacy'
+            raise BounceError('rejected-legacy')
+        if any(int(p.parent.name.removeprefix('attempt-')) > attempt for p in rosters):
+            raise BounceError('superseded_attempt')
+
+        def registered(name):
+            path = _safe_path(root, name)
+            ref = str(path.relative_to(root))
+            if ref not in registry or not path.is_file() or _sha(path.read_bytes()) != registry[ref]['sha256']:
+                raise BounceError('integrity_mismatch')
+            return path
+
+        def checkpoint(head):
+            if (head != state.get('task_verified_head') or git(worktree, 'rev-parse', 'HEAD') != head
+                    or git(worktree, 'status', '--porcelain')):
+                raise BounceError('stale_checkpoint')
+            if (root / '03-dev/implementation.diff').read_text() != git(
+                    worktree, 'diff', '--binary', state['base_commit'], 'HEAD') + '\n':
+                raise BounceError('stale_checkpoint')
+
+        roster_path = base / f'attempt-{attempt}/roster.json'
+        completion_path = roster_path.with_name('completion.json')
+        if not roster_path.is_file() or not completion_path.is_file():
+            raise BounceError('incomplete_evidence')
+        roster = json.loads(registered(roster_path).read_text())
+        completion = json.loads(registered(completion_path).read_text())
+        if (roster['phase'] != phase or roster['attempt'] != attempt or
+                completion['roster_sha256'] != _sha(canon(roster)) or
+                completion['phase'] != phase or completion['attempt'] != attempt):
+            raise BounceError('contradictory_evidence')
+        members = roster['evaluators']
+        if (type(members) is not list or not members or
+                [m['ordinal'] for m in members] != list(range(1, len(members) + 1)) or
+                (phase != '04-review' and len(members) != 1) or
+                len(completion['evaluators']) != len(members)):
+            raise BounceError('incomplete_evidence')
+        head = roster['reviewed_commit']
+        checkpoint(head)
+        plan = json.loads(registered('02-design/plan.json').read_text())
+        quality = json.loads(registered('00-recon/quality-contract.json').read_text())
+        requirements = registered('01-po/requirements.md').read_text()
+        if plan['base_commit'] != state['base_commit'] or plan['ticket_id'] != state['ticket_id']:
+            raise BounceError('contradictory_evidence')
+        TaskPlanValidator(Path(repo), requirements, quality, root).validate(plan)
+        evaluations = []
+        for member, finished in zip(members, completion['evaluators']):
+            if finished['evaluator'] != member or member['gate'] != PHASES[phase] or member['attempt'] != attempt or member['reviewed_commit'] != head:
+                raise BounceError('contradictory_evidence')
+            directory = root / phase / 'evaluations' / member['slot'][:16]
+            metadata = json.loads(registered(directory / 'input.json').read_text())
+            refs = [e['ref'] for e in metadata['evidence']]
+            required = {'ev/requirements', 'ev/plan', 'ev/quality-contract', 'ev/diff'}
+            if phase == '05-qa':
+                required.add('ev/qa-deterministic')
+            if phase == '05b-appsec':
+                required.add('ev/sca-status')
+            if len(refs) != len(set(refs)) or not required <= set(refs):
+                raise BounceError('incomplete_evidence')
+            sources = {'ev/requirements': '01-po/requirements.md', 'ev/plan': '02-design/plan.json',
+                       'ev/quality-contract': '00-recon/quality-contract.json', 'ev/diff': '03-dev/implementation.diff',
+                       'ev/adr': '02-design/adr.md', 'ev/threat-model': '02-design/threat-model.md',
+                       'ev/qa-deterministic': f'05-qa/deterministic-checks-a{attempt}.md',
+                       'ev/sca-status': '05b-appsec/scanner-status.json'}
+            for entry in metadata['evidence']:
+                if entry['ref'] in sources and _safe_path(root, entry['source']) != root / sources[entry['ref']]:
+                    raise BounceError('contradictory_evidence')
+            context = build_trusted_context(head, plan, requirements, quality, refs)
+            record = verify_recorded_evaluation(root=root, registry=registry, directory=directory,
+                                                 expected=member, context=context)
+            outcome_path = registered(directory / 'outcome.json')
+            if (finished['outcome_class'] != record['outcome_class'] or
+                    finished['outcome_ref'] != str(outcome_path.relative_to(root)) or
+                    finished['outcome_sha256'] != _sha(outcome_path.read_bytes())):
+                raise BounceError('contradictory_evidence')
+            evaluations.append(record)
+        checkpoint(head)
+        return dict(status='verified', execution_authorized=False, evidence_state='verified',
+                    evaluations=evaluations, plan=plan, quality=quality, requirements_text=requirements,
+                    reviewed_commit=head, phase=phase, attempt=attempt, blockers=[])
+    except BounceError as exc:
+        code = exc.code
+    except ProtocolError as exc:
+        code = 'contradictory_evidence' if exc.code == 'binding_gate' else 'report_invalid'
+    except FindingsError:
+        code = 'report_invalid'
+    except (PlanError, TaskError, OSError):
+        code = 'integrity_mismatch'
+    except (ValueError, TypeError, KeyError, IndexError, AttributeError):
+        code = 'malformed_record'
+    failure['blockers'] = [{'code': code}]
+    return failure

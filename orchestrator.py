@@ -34,7 +34,8 @@ from ssdlc_planning import PlanRepair
 from ssdlc_design import DesignSession
 from ssdlc_gate_reports import (GateEvaluator, EvaluationRequest, GateTerminalError,
     build_trusted_context, fingerprint, UNTRUSTED_DATA_INSTRUCTION, untrusted_data,
-    ScannerResult, scanner_status_json, discover_manifest_scopes)
+    ScannerResult, scanner_status_json, discover_manifest_scopes, write_or_verify, canon)
+from ssdlc_bounce import request_identity
 from ssdlc_catalogues import CatalogueError, requirement_catalogue
 from ssdlc_controller import assert_controller, controller_snapshot
 
@@ -2538,6 +2539,57 @@ class SSDLCOrchestrator:
             phase, outcome = self._gate_terminal
             raise GateTerminalError(outcome, diagnosis=f'Terminal gate outcome in {phase}')
 
+    def _phase_roster(self, phase, attempt, requests):
+        roster = dict(version=1, phase=phase, attempt=attempt,
+                      reviewed_commit=requests[0].reviewed_commit,
+                      evaluators=[request_identity(r) for r in requests])
+        path = self.ssdlc_root / phase / 'provenance' / f'attempt-{attempt}' / 'roster.json'
+        try:
+            write_or_verify(path, canon(roster), root=self.ssdlc_root)
+            ref = str(path.relative_to(self.ssdlc_root))
+            meta = self.state['artifacts'].get(ref)
+            if meta and meta['sha256'] != file_hash(path):
+                raise TaskError('Registered phase roster changed')
+            if not meta:
+                self.record_artifact(ref, path)
+        except (TaskError, OSError) as exc:
+            raise GateTerminalError('integrity_blocked', diagnosis='Phase roster already used with different inputs; use a new gate attempt') from exc
+        return roster
+
+    def _phase_completion(self, roster):
+        # No completion is published for an open evaluator (including a budget
+        # exception or deliberate crash). Resume must finish the same roster.
+        members = []
+        for member in roster['evaluators']:
+            path = (self.ssdlc_root / roster['phase'] / 'evaluations' /
+                    member['slot'][:16] / 'outcome.json')
+            if not path.is_file():
+                return
+            try:
+                outcome = json.loads(path.read_text())
+                outcome_class = outcome['outcome_class']
+            except (OSError, ValueError, KeyError, TypeError):
+                # Preserve the evaluator's terminal error. Invalid evidence must
+                # never acquire a completion record or mask GateTerminalError.
+                return
+            members.append(dict(evaluator=member, outcome_class=outcome_class,
+                                outcome_ref=str(path.relative_to(self.ssdlc_root)),
+                                outcome_sha256=file_hash(path)))
+        completion = dict(version=1, phase=roster['phase'], attempt=roster['attempt'],
+                          roster_sha256=hashlib.sha256(canon(roster)).hexdigest(), evaluators=members)
+        path = (self.ssdlc_root / roster['phase'] / 'provenance' /
+                f"attempt-{roster['attempt']}" / 'completion.json')
+        try:
+            write_or_verify(path, canon(completion), root=self.ssdlc_root)
+            ref = str(path.relative_to(self.ssdlc_root))
+            meta = self.state['artifacts'].get(ref)
+            if meta and meta['sha256'] != file_hash(path):
+                raise TaskError('Registered phase completion changed')
+            if not meta:
+                self.record_artifact(ref, path)
+        except (TaskError, OSError) as exc:
+            raise GateTerminalError('integrity_blocked', diagnosis='Phase completion differs') from exc
+
     def _task_review_gate(self, attempt, review_models, effort, engine, system, user, diff):
         plan = self._gate_plan()
         wt, limit = self._verified_task_review_input(diff)
@@ -2592,15 +2644,19 @@ class SSDLCOrchestrator:
                     details['model'], status, telemetry.get('duration_sec', 0), reasoning_effort=effort,
                     details=details, **{k: v for k, v in telemetry.items() if k != 'duration_sec'}))
 
+        requests = []
         for index, model in enumerate(review_models, 1):
             effective_engine, effective_model = model.split(':', 1) if ':' in model and not model.startswith('http') else (engine, model)
+            requests.append(EvaluationRequest('review', effective_engine, effective_model, index,
+                attempt, head, system, user, context, evidence, fp, parse_review_verdict, effort))
+        roster = self._phase_roster('04-review', attempt, requests)
+        for index, request in enumerate(requests, 1):
             evaluator = GateEvaluator(gate='review', base_dir=self.dir_review, ssdlc_root=self.ssdlc_root,
                 invoke=invoke, check_budget=self.check_budget_circuit_breaker, record_artifact=self.record_artifact,
                 record_ledger=ledger, record_gate=self.record_gate, verify_source=verify,
                 artifacts=self.state['artifacts'], ledger=self.state['ledger'], gates=self.state['gate_history'])
             try:
-                result = evaluator.evaluate(EvaluationRequest('review', effective_engine, effective_model, index,
-                    attempt, head, system, user, context, evidence, fp, parse_review_verdict, effort))
+                result = evaluator.evaluate(request)
                 results.append(result)
                 raw = result.response_text
                 if result.outcome_class not in ('approved', 'rejected_substantive'):
@@ -2612,6 +2668,7 @@ class SSDLCOrchestrator:
             path = run / f'reviewer-{index}.md'
             path.write_text(raw)
             self.record_artifact(str(path.relative_to(self.ssdlc_root)), path)
+        self._phase_completion(roster)
         approved = len(results) == len(review_models) and all(r.approved for r in results)
         report = '\n\n'.join(r.response_text + '\n' + r.summary for r in results)
         for name in (f'review-report-a{attempt}.md', 'review-report.md'):
@@ -2969,10 +3026,16 @@ class SSDLCOrchestrator:
             check_budget=self.check_budget_circuit_breaker, record_artifact=self.record_artifact,
             record_ledger=ledger, record_gate=self.record_gate, verify_source=verify,
             artifacts=self.state['artifacts'], ledger=self.state['ledger'], gates=self.state['gate_history'])
+        request = EvaluationRequest(gate, engine, model, 1, attempt, head, system, user,
+            context, evidence, fp, parse_qa_verdict if gate == 'qa' else parse_appsec_verdict, effort, controls)
+        try:
+            roster = self._phase_roster(phase, attempt, [request])
+        except GateTerminalError:
+            self._gate_terminal = (phase, 'integrity_blocked')
+            return False, 'Phase roster differs; approval withheld'
         terminal = None
         try:
-            result = evaluator.evaluate(EvaluationRequest(gate, engine, model, 1, attempt, head, system, user,
-                context, evidence, fp, parse_qa_verdict if gate == 'qa' else parse_appsec_verdict, effort, controls))
+            result = evaluator.evaluate(request)
             approved, raw = result.approved, result.response_text
             if result.outcome_class not in ('approved', 'rejected_substantive'):
                 terminal = GateTerminalError(result.outcome_class, evaluator.identity, result.diagnostics)
@@ -2981,6 +3044,11 @@ class SSDLCOrchestrator:
             approved = False
             responses = sorted(evaluator.directory.glob('response-*.md'))
             raw = responses[-1].read_text() if responses else str(exc)
+        try:
+            self._phase_completion(roster)
+        except GateTerminalError:
+            self._gate_terminal = (phase, 'integrity_blocked')
+            return False, 'Phase completion differs; approval withheld'
         for path in (run / 'response.md', base / ('qa-traceability-matrix.md' if gate == 'qa' else 'redteam-audit.md')):
             path.write_text(raw)
             self.record_artifact(str(path.relative_to(self.ssdlc_root)), path)
