@@ -420,6 +420,7 @@ def read_evidence(*, root, state, repo, worktree, phase, attempt):
             raise BounceError('malformed_record')
         root = Path(root).absolute()
         registry = state['artifacts']
+        source_hashes = {}
         base = root / phase / 'provenance'
         rosters = list(base.glob('attempt-*/roster.json'))
         if not rosters:
@@ -436,6 +437,7 @@ def read_evidence(*, root, state, repo, worktree, phase, attempt):
             ref = str(path.relative_to(root))
             if ref not in registry or not path.is_file() or _sha(path.read_bytes()) != registry[ref]['sha256']:
                 raise BounceError('integrity_mismatch')
+            source_hashes[ref] = registry[ref]['sha256']
             return path
 
         def checkpoint(head):
@@ -495,6 +497,12 @@ def read_evidence(*, root, state, repo, worktree, phase, attempt):
             context = build_trusted_context(head, plan, requirements, quality, refs)
             record = verify_recorded_evaluation(root=root, registry=registry, directory=directory,
                                                  expected=member, context=context)
+            for name, ref in record['source_refs'].items():
+                source_hashes[ref] = record['source_hashes'][name]
+            for entry in metadata['evidence']:
+                for key in ('source', 'captured'):
+                    ref = str(_safe_path(root, entry[key]).relative_to(root))
+                    source_hashes[ref] = entry['sha256']
             outcome_path = registered(directory / 'outcome.json')
             if (finished['outcome_class'] != record['outcome_class'] or
                     finished['outcome_ref'] != str(outcome_path.relative_to(root)) or
@@ -504,7 +512,8 @@ def read_evidence(*, root, state, repo, worktree, phase, attempt):
         checkpoint(head)
         return dict(status='verified', execution_authorized=False, evidence_state='verified',
                     evaluations=evaluations, plan=plan, quality=quality, requirements_text=requirements,
-                    reviewed_commit=head, phase=phase, attempt=attempt, blockers=[])
+                    reviewed_commit=head, phase=phase, attempt=attempt, blockers=[],
+                    source_hashes=source_hashes)
     except BounceError as exc:
         code = exc.code
     except ProtocolError as exc:

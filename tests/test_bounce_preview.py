@@ -107,6 +107,27 @@ class PreviewTests(GateFixture):
         self.assertEqual(old, {p: p.read_bytes() for p in old})
         self.assert_blocked(self.preview(attempt=1), 'superseded_attempt')
 
+    def test_unrelated_artifacts_do_not_change_or_block_existing_preview(self):
+        self.gate()
+        first = self.preview()
+        original = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in self.files()}
+        unrelated = self.orch.dir_qa / 'unrelated-later-output.md'
+        unrelated.write_text('A later phase registered independent output')
+        ref = str(unrelated.relative_to(self.orch.ssdlc_root))
+        self.orch.record_artifact(ref, unrelated)
+        for change in ('registered', 'missing', 'changed'):
+            with self.subTest(change=change):
+                if change == 'missing':
+                    unrelated.unlink()
+                elif change == 'changed':
+                    unrelated.write_text('Unrelated output changed')
+                self.restart()
+                second = self.preview()
+                self.assertEqual(second['revision'], first['revision'])
+                self.assertEqual(second['publication'], 'reused')
+                self.assertNotIn(ref, second['plan']['source_hashes'])
+                self.assertEqual(original, {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in original})
+
     def test_cli_exit_contract_and_no_authority(self):
         self.gate()
         code, value = self.cli()

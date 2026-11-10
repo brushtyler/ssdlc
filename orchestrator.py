@@ -1514,13 +1514,10 @@ class SSDLCOrchestrator:
                                    git(self.repo_root, 'status', '--porcelain'),
                                    git(self.repo_root, 'diff', '--binary', 'HEAD'))
                     frozen = bounce.preview_snapshot(self.ssdlc_root, self.state)
-                    sources = {}
-                    for ref, entry in self.state['artifacts'].items():
-                        if not ref.startswith('bounce-preview/'):
-                            path = bounce._safe_path(self.ssdlc_root, ref)
-                            if file_hash(path) != entry['sha256']:
-                                raise bounce.BounceError('integrity_mismatch')
-                            sources[ref] = entry['sha256']
+                    # The revision binds consumed evidence, not unrelated phases
+                    # that may register their own outputs between previews.
+                    sources = dict(initial['source_hashes'])
+                    sources[contract_ref] = meta['sha256']
 
                     def verify():
                         fresh = json.loads(bounce._safe_path(self.ssdlc_root, 'state.json').read_text())
