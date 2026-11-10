@@ -20,7 +20,8 @@
         "properties": {
           "id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
           "severity": {"enum": ["critical", "high", "medium", "low", "info"]},
-          "classification": {"enum": ["mandatory_violation_or_regression", "necessary_gap",
+          "classification": {"description": "Choose classification from the actual claim, not severity. mandatory_violation_or_regression requires violates_existing_obligation=true or introduces_regression=true and observed evidence. necessary_gap requires violates_existing_obligation=false, introduces_regression=false, necessary_for_requested_correctness=true and observed evidence. optional_improvement requires all three booleans=false. If correctness is not necessary and there is no existing violation/regression, choose optional_improvement or uncertain_needs_diagnosis, NEVER necessary_gap. Hypotheses cannot be mandatory violations or necessary gaps. Do not promote optional work to a mandatory claim merely to fit a label.",
+                             "enum": ["mandatory_violation_or_regression", "necessary_gap",
                                       "optional_improvement", "uncertain_needs_diagnosis"]},
           "evidence_kind": {"enum": ["observed", "hypothesis"]},
           "scenario": {"type": "string", "minLength": 1, "maxLength": 4000},

@@ -793,5 +793,68 @@ class TestTerminalCleanupAndDeadline(CoreCase):
                 preserved_terminal=dict(status='running', reason='launched'))))
         self.assertIsNone(store.read()['cancel'])
 
+class TestLifecycleObservationBoundaries(CoreCase):
+    def test_owned_worker_preflight_and_backoff_are_not_reconciliation(self):
+        store, proc = self.fake_run(controller=False)
+        store.update(lambda d: d.update(status='starting', status_reason='retry_scheduled'))
+        before = store.read()
+        self.assertEqual(sup.status(self.repo, 'T-1', proc=proc)['status'], 'starting')
+        self.assertEqual(store.read(), before)
+        out = sup.monitor_tick(store, {'SSDLC_EXECUTION_MODE': 'native'}, proc=proc)
+        self.assertEqual(out['status'], 'starting')
+        self.assertEqual(store.read()['status'], 'starting')
+        self.assertEqual(store.read()['recovery']['used'], 0)
+        self.assertFalse(proc.signals)
+        self.assertFalse(any(x['role'] == 'controller' for x in store.read()['launches']))
+
+    def test_missing_published_controller_still_requires_reconciliation(self):
+        store, proc = self.fake_run()
+        del proc.entries[2002]
+        self.assertEqual(sup.status(self.repo, 'T-1', proc=proc)['status'], 'reconcile')
+        self.assertFalse(proc.signals)
+
+    def test_pending_controller_without_identity_still_requires_reconciliation(self):
+        store, proc = self.fake_run(controller=False)
+        store.update(lambda d: d['launches'].append(dict(intent_id='b'*32, role='controller', generation=1,
+            state='pending', at=1000., abandoned_at=None)))
+        self.assertEqual(sup.status(self.repo, 'T-1', proc=proc)['status'], 'reconcile')
+        self.assertFalse(proc.signals)
+
+    def test_postmortem_monitor_preserves_prior_outcome_after_deadline(self):
+        store, proc = self.fake_run()
+        classification = dict(**{'class': 'code_defect'}, reason_code='terminal_check_failure', row='6',
+                              terminal_bound=True, diagnostics=[])
+        for status in ['failed', 'operator_wait', 'blocked']:
+            with self.subTest(status=status):
+                store.update(lambda d: d.update(status=status, status_reason='terminal_check_failure', classification=classification))
+                store.update(lambda d: d['deadlines'].update(hard_deadline=999.))
+                before = store.read()
+                with patch.object(sup, 'classify', side_effect=AssertionError('terminal outcome reclassified')):
+                    out = sup.monitor_tick(store, {'SSDLC_EXECUTION_MODE': 'native'}, proc=proc)
+                self.assertEqual(out['status'], status)
+                self.assertEqual(out['classification'], classification)
+                self.assertEqual(store.read(), before)
+                self.assertFalse(proc.signals)
+                # Also check the normal post-mortem case with a gone controller.
+                controller = proc.entries.pop(2002)
+                try:
+                    with patch.object(sup, 'classify', side_effect=AssertionError('terminal status reclassified')):
+                        view = sup.status(self.repo, 'T-1', proc=proc)
+                    self.assertEqual(view['status'], status)
+                    self.assertEqual(view['classification'], classification)
+                    self.assertEqual(store.read(), before)
+                finally:
+                    proc.entries[2002] = controller
+
+    def test_persisted_deadline_resumes_only_its_pending_cleanup(self):
+        store, proc = self.fake_run()
+        classification = sup.classify(dict(hard_deadline=True))
+        store.update(lambda d: d.update(status='failed', status_reason='hard_deadline', classification=classification))
+        out = sup.monitor_tick(store, {'SSDLC_EXECUTION_MODE': 'native'}, proc=proc)
+        self.assertEqual((out['status'], out['status_reason']), ('failed', 'hard_deadline'))
+        self.assertEqual(out['classification'], classification)
+        self.assertEqual(out['cancellation_state'], 'done')
+        self.assertFalse(proc.entries)
+
 if __name__ == '__main__':
     unittest.main()

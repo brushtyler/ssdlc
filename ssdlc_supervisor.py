@@ -730,9 +730,13 @@ def identity_state(d, role, proc=None):
 def view(d, proc=None):
     out = copy.deepcopy(d)
     states = [identity_state(d, role, proc) for role in ('worker', 'controller')]
+    # An owned worker before any controller intent is ordinary preflight/backoff.
+    # A missing controller after an intent remains ambiguous and fails closed.
+    owned_preflight = (states == [OWNED, GONE] and d['processes']['controller'] is None
+                       and intent_for(d, 'controller') is None)
     if d.get('cancel') and d['cancel']['state'] in {'requested', 'signalling'}:
         out['status'], out['status_reason'] = 'cancelling', 'cancel_pending'
-    elif d['status'] not in TERMINAL and (UNKNOWN in states or NOT_OWNED in states or states != [OWNED, OWNED]):
+    elif d['status'] not in TERMINAL and (UNKNOWN in states or NOT_OWNED in states or (states != [OWNED, OWNED] and not owned_preflight)):
         out['status'], out['status_reason'] = 'reconcile', 'reconcile'
     return public(out)
 
@@ -1902,7 +1906,9 @@ def observed_status(store, d, proc=None, env=None, clock=None, *, events_snapsho
     # disappear. Missing exit evidence must not mask a resumable cancellation.
     if d.get('cancel') and (d['cancel']['state'] != 'done' or d['status'] != 'completed'):
         return status_fields(d, view(d, proc), store.clock.time())
-    if d['status_reason'] == 'hard_deadline':
+    if d['status'] in TERMINAL - {'completed'}:
+        # A recorded failure is bound to its original cause, not elapsed wall
+        # time on a later read. Completed still verifies its current-commit proof.
         return status_fields(d, public(d), store.clock.time())
     if identity_state(d, 'controller', proc) != GONE or not intent_for(d, 'controller'):
         out = copy.deepcopy(d)
@@ -2000,8 +2006,15 @@ def monitor_tick(store, env, proc=None, docker=None, generation=None):
                    clock=store.clock, proc=proc, docker=docker)
             d = store.read()
         return status_fields(d, view(d, proc), store.clock.time())
-    if d['status'] in {'completed', 'cancelled'}:
-        return status_fields(d, public(d), now)
+    if d['status'] in TERMINAL:
+        # Post-mortem observation cannot turn an earlier failure into a new
+        # deadline failure. Resume only cleanup already authorized by a persisted
+        # hard-deadline outcome (including a crash before its cancel intent).
+        if d['status'] == 'failed' and d['status_reason'] == 'hard_deadline':
+            cancel(store.root.parent.parent, store.ticket, run_id=store.run_id, grace=5,
+                   clock=store.clock, proc=proc, docker=docker)
+            d = store.read()
+        return status_fields(d, public(d), store.clock.time())
     repo = store.root.parent.parent
     events, malformed = controller_events(store, d)
     tokens, descendants, containers = {}, [], []
