@@ -894,3 +894,117 @@ only at checkpoints: there is no continuous containment against external writers
 and coordinated changes to content and hashes can defeat them. Strict parsing does
 not establish model honesty or eliminate prompt injection. Scheduler artifacts
 outside the gate evidence inventory and ignored Git files are outside these checks.
+
+### Local detached supervision (#16 milestone)
+
+Plain `run`, `plan`, and `design` remain foreground commands. Detached supervision
+is single-host and Linux only: it uses `/proc`, flock and pidfds. It does not
+provide distributed ownership or authentication against a malicious same-uid
+process. Fingerprints are unkeyed drift checks, including the controller snapshot
+and frozen configuration; they are not signatures.
+
+```bash
+python3 orchestrator.py start --ticket T-1 --goal 'Implement the approved change' --repo . --json
+python3 orchestrator.py status --ticket T-1 --repo . --json
+python3 orchestrator.py status --recovery-matrix --json
+python3 orchestrator.py cancel --ticket T-1 --repo . --grace 5 --json
+python3 orchestrator.py resume --ticket T-1 --entrypoint run --from-phase 03-dev --goal 'Implement the approved change' --repo . --json
+python3 orchestrator.py resume --ticket T-1 --entrypoint plan --review-repairs 2 --repo . --json
+python3 orchestrator.py resume --ticket T-1 --entrypoint design --rounds 4 --repo . --json
+```
+
+`run --detach` is an additive alias for start. `status` is read-only. `monitor
+--restart-worker` (or `--adopt`) explicitly restores a worker after verified loss.
+Pre-controller restart requires operator resupply of `--goal` or `--goal-file`
+and the original `--test-cmd`, if supplied. Raw inputs exist only in the launch
+payload pipe and process memory. They cannot be recovered from a fingerprint.
+A repeated `start` on a terminal run records a refusal (exit 14); use an explicit
+supported resume rather than reusing its old handoff. Resume starts a new run linked by `resumes`; supported transitions are run from
+00-recon or 03-dev, plan before execution, and design before planning or execution.
+Upstream approvals, sealed artifact hashes and baseline compatibility still apply.
+Unsupported resume adds one audit event and creates no run or canonical state.
+Changed goal, tier, test command, environment or controller fingerprints block
+resume; `--reauthorize-fingerprints` records an explicit audited authorization.
+That flag never overrides transition compatibility or approvals. The approved
+configuration digest covers the whole effective environment, excluding only
+reserved supervisor markers, `PWD`, `SHLVL` and `_`. A different shell's `TERM`,
+`OLDPWD` or `SSH_AUTH_SOCK` can therefore block adoption. Restart from the same
+effective environment; there is no reauthorization while adopting a live
+controller. Adoption also fails closed if any same-uid process has unreadable
+`/proc` metadata; a shared host may require a dedicated service user or container.
+A changed environment requires explicit reconciliation and, once the
+old controller is gone, a supported resume with audited reauthorization. Switching from a goal-bearing `run` to `plan` or `design`
+also changes the goal fingerprint to null and explicitly requires
+`--reauthorize-fingerprints`; same-entrypoint examples assume unchanged inputs.
+
+The goal and ticket prose are inert argv data. `--test-cmd` has different authority:
+it is an operator-authorized executable verification command, executed by the
+orchestrator with bash. Only its hash is stored by the supervisor. Do not derive
+it from issue prose. Neither `--issue` nor `--sync-remote` is generated.
+
+### Recovery matrix and safe actions
+
+| Classification | Available action |
+| --- | --- |
+| transient_environment_provider | Bounded read-only preflight retry, consuming the persisted recovery allowance. |
+| authentication | Refresh out of band, then explicitly resume or restart. Presence is `auth_unverified`; there is no shipped native probe or refresh adapter. |
+| integrity | Inspect and reconcile changed or corrupt evidence before explicit resume. |
+| limits | Explicitly authorize a changed limit; no automatic increase. |
+| code_defect | Task mode only, with a returned, terminal-bound failed check or stalled repair; inspect diagnostics and explicitly authorize a supported resume if attempts are exhausted. |
+| uncertain_outcome | Inspect and reconcile the engine result; never retry an open or raised dispatch automatically. |
+| operator_decision | Resolve scope or environment decisions explicitly. |
+| unsupported_transition | Choose a compatible supported entrypoint. |
+
+Classification is terminal-bound: an earlier failed attempt cannot explain a
+later open or raised invocation. Diagnostics U1–U7 report missing, ambiguous or
+unbound evidence. Limits exhaustion and code_defect exhaustion are distinct:
+a budget/deadline/resource cap is a limit, while failed task checks exhaust code
+repair attempts. Legacy development is never classified as code_defect. Quiet
+output alone does not mean a stalled controller. No whole-run hard deadline is
+inferred from per-call development timeouts. To authorize one, explicitly set
+`SSDLC_SUPERVISOR_HARD_TIMEOUT` to a positive number of seconds; otherwise the
+run remains bounded by its existing per-call limits, retry allowances and budget. An adopted controller requires
+intent-bound `run_ended(exit_code=0)` plus the entrypoint's canonical completion
+state; disappearance alone never proves completion. No exit evidence means
+`exit_evidence_unavailable` and operator reconciliation. An adopted worker
+continues read-only observation while reconciliation is needed, so a transient
+exit-time identity change can later resolve to bound completion. It never
+relaunches the controller or a model invocation from that state. If the controller
+is verified gone and exit evidence stays missing for three observation ticks,
+the observer exits while retaining the persisted uncertain result. Stable
+heartbeats update metadata without appending non-transition audit events.
+
+Recovery allowance is an upper bound, not a promise to consume every retry. The
+caller handoff deadline still wins: increase `--handoff-timeout-sec` explicitly
+when a larger allowance or slower probes need more time. No timeout is raised
+automatically. Frozen child environments default `PYTHONCOERCECLOCALE=0` so
+Python cannot silently rewrite an explicitly requested C locale after hashing;
+an explicit override still participates in the strict configuration digest.
+
+Supervisor metadata, locks, audit, observation events and controller-events.jsonl
+live only under `.ssdlc/.supervisor/`. The orchestrator alone owns canonical
+`.ssdlc/<ticket>/state.json`, journals, attempts, ledger and approvals, and its
+project `.ssdlc/.runtime/`. Supervised activation uses the frozen environment
+without reloading env files. Controller hooks carry only whitelisted identifiers,
+never prompts, goals, commands, credentials, exception messages or engine output.
+The no-raw-output rule applies to supervisor files and CLI output; ordinary
+foreground orchestrator reports and canonical artifacts retain their existing
+contracts. Detached controller stdout/stderr go to DEVNULL, avoiding pipe stalls
+and supervisor persistence of raw output.
+
+Cancel revokes launch authority, verifies each process birth and session, and
+signals only admitted pidfds. Containers must have both exact `ssdlc.run_id` and
+`ssdlc.project` labels verified by inspect before stopping by full ID. Other
+projects, ticket-only matches and recycled PID/pgid identities are excluded.
+Repeated cancel reconciles remaining containers after a crash. A hard deadline invokes
+this same scoped cleanup and retains the limits outcome. Cleanup of an already terminal
+run preserves its completed/failed/blocked/operator-wait outcome. Public
+`cancellation_state=done` records cleanup completion separately; exit codes still
+represent the retained run outcome. Native runs do not require an unused Docker runtime. Removing a label
+is not cancel. No GitHub adapter ships in this milestone.
+
+Remaining work: #16 broader operational recovery and remote integration; #1 the
+larger orchestration epic; #4 GitHub intake, publishing and delivery; #14 complete
+provider accounting and quotas. Auto-merge, automatic roadmap advancement and
+unsupported recovery are unavailable. The $10 accounting cap and budget circuit
+breaker remain enforced.

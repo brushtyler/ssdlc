@@ -14,6 +14,10 @@ Key Isolation & Traceability Guarantees:
 
 from __future__ import annotations
 import argparse
+import contextlib
+import functools
+import threading
+import inspect
 import datetime as dt
 import hashlib
 import json
@@ -46,6 +50,240 @@ from ssdlc_tasks import (
     PlanError, TaskError, ResourceLimitError, TaskPlanValidator, TaskScheduler, atomic_json,
     confined, file_hash, git, ticket_lock, validate_document, log_retry_reason, diagnostic_excerpt, test_suite_is_empty, parse_plan_output,
 )
+
+
+_dispatch_local = threading.local()
+
+
+@contextlib.contextmanager
+def _dispatch_context(task_id=None, attempt=None, phase=None):
+    previous = getattr(_dispatch_local, 'context', {})
+    _dispatch_local.context = dict(previous, **{k: v for k, v in
+        dict(task_id=task_id, attempt=attempt, phase=phase).items() if v is not None})
+    try:
+        yield
+    finally:
+        _dispatch_local.context = previous
+
+
+def _supervision_event(event_type, **fields):
+    if not os.environ.get('SSDLC_SUPERVISED_RUN_ID'):
+        return
+    import ssdlc_supervisor as sup
+    import fcntl
+    env = os.environ
+    try:
+        allowed = {'phase', 'step', 'category', 'exc_type', 'outcome', 'exit_code',
+                   'dispatch_id', 'engine', 'task_id', 'attempt'}
+        if set(fields) - allowed:
+            return False
+        # Keep terminal evidence for ordinary or custom exception classes while
+        # never persisting an arbitrary class name or exception message.
+        if isinstance(fields.get('exc_type'), str) and fields['exc_type'] not in sup.EXC_TYPES:
+            fields['exc_type'] = 'Exception'
+        if (not sup.RUN_ID.fullmatch(env.get('SSDLC_SUPERVISED_RUN_ID', '')) or
+                not sup.RUN_ID.fullmatch(env.get('SSDLC_SUPERVISED_INTENT', '')) or
+                int(env['SSDLC_SUPERVISED_GEN']) < 1):
+            return False
+        record = dict(type=event_type, seq=1, ts=time.time(),
+            run_id=env['SSDLC_SUPERVISED_RUN_ID'], role=env['SSDLC_SUPERVISED_ROLE'],
+            gen=int(env['SSDLC_SUPERVISED_GEN']), intent=env['SSDLC_SUPERVISED_INTENT'], **fields)
+        dummy = dict(run_id=record['run_id'], launches=[dict(role='controller',
+            generation=record['gen'], intent_id=record['intent'], state='published')])
+        if not sup.valid_controller_event(record, dummy):
+            return
+        path = Path(env['SSDLC_SUPERVISED_EVENTS'])
+        # The launcher supplies the repository boundary separately from the path.
+        root = Path(env['SSDLC_SUPERVISED_REPO']) / '.ssdlc/.supervisor'
+        relative = path.relative_to(root)
+        fd = sup.open_safe(root, str(relative), os.O_RDWR | os.O_APPEND, True)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            with os.fdopen(os.dup(fd), 'r') as stream:
+                seq = 0
+                for line in stream:
+                    try:
+                        prior = json.loads(line)
+                        if sup.valid_controller_event(prior, dummy):
+                            seq = max(seq, prior['seq'])
+                    except (ValueError, AttributeError):
+                        pass
+            record['seq'] = seq + 1
+            size = os.lseek(fd, 0, os.SEEK_END)
+            prefix = b'\n' if size and os.pread(fd, 1, size - 1) != b'\n' else b''
+            data = prefix + json.dumps(record, sort_keys=True).encode() + b'\n'
+            while data:
+                data = data[os.write(fd, data):]
+            os.fsync(fd)
+            return True
+        finally:
+            os.close(fd)
+    except (OSError, ValueError, KeyError, TypeError, sup.SupervisorIntegrityError):
+        # A missing finish leaves an open dispatch; exception paths keep their
+        # original exception. The dispatcher requires a durable start below.
+        return False
+
+
+def _supervision_fault(point):
+    """Injectable crash boundary; inert in production."""
+    pass
+
+
+def _supervised_dispatch(fn):
+    signature = inspect.signature(fn)
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        if not os.environ.get('SSDLC_SUPERVISED_RUN_ID') or getattr(_dispatch_local, 'depth', 0):
+            return fn(*args, **kwargs)
+        bound = signature.bind(*args, **kwargs).arguments
+        engine = bound.get('engine', fn.__name__.removeprefix('run_'))
+        if isinstance(engine, str):
+            engine = engine.lower().strip()
+        if fn.__name__ == 'call_openrouter' or engine not in {'agy', 'claude', 'codex'}:
+            engine = 'openrouter'
+        fields = dict(getattr(_dispatch_local, 'context', {}))
+        if 'phase' in bound:
+            from ssdlc_supervisor import PHASES
+            phase = bound['phase']
+            matches = [p for p in PHASES if isinstance(phase, str) and (phase == p or phase.startswith(p + '-'))]
+            if matches:
+                fields['phase'] = max(matches, key=len)
+        dispatch_id = uuid.uuid4().hex
+        if not _supervision_event('dispatch_started', dispatch_id=dispatch_id, engine=engine, **fields):
+            from ssdlc_supervisor import SupervisorIntegrityError
+            raise SupervisorIntegrityError('filesystem_integrity')
+        _supervision_fault('dispatch.after_started_before_engine')
+        _dispatch_local.depth = 1
+        try:
+            result = fn(*args, **kwargs)
+        except BaseException as exc:
+            _supervision_event('dispatch_finished', dispatch_id=dispatch_id, outcome='raised', exc_type=type(exc).__name__)
+            raise
+        else:
+            _supervision_fault('dispatch.after_engine_before_finished')
+            _supervision_event('dispatch_finished', dispatch_id=dispatch_id, outcome='returned')
+            return result
+        finally:
+            _dispatch_local.depth = 0
+    wrapped._supervised_dispatch = True
+    return wrapped
+
+
+def _supervised_phase(phase):
+    def decorate(fn):
+        @functools.wraps(fn)
+        def wrapped(*args, **kwargs):
+            if not os.environ.get('SSDLC_SUPERVISED_RUN_ID'):
+                return fn(*args, **kwargs)
+            with _dispatch_context(phase=phase):
+                _supervision_event('phase_started', phase=phase)
+                result = fn(*args, **kwargs)
+                _supervision_event('phase_finished', phase=phase)
+                return result
+        return wrapped
+    return decorate
+
+
+def _supervised_preflight():
+    if not os.environ.get('SSDLC_SUPERVISED_RUN_ID'):
+        return True
+    import ssdlc_supervisor as sup
+    try:
+        env = os.environ
+        store = sup.RunStore(env['SSDLC_SUPERVISED_REPO'], env['SSDLC_SUPERVISED_TICKET'], env['SSDLC_SUPERVISED_RUN_ID'])
+        d = store.read()
+        current = store.current()
+        launch = sup.intent_for(d, 'controller')
+        snapshot_sha256 = sup.controller_snapshot_digest()
+        ok = (current['run_id'] == env['SSDLC_SUPERVISED_RUN_ID'] and
+              env.get('SSDLC_SUPERVISED_ROLE') == 'controller' and
+              d['nonce'] == env.get('SSDLC_SUPERVISED_NONCE') and snapshot_sha256 == env['SSDLC_SUPERVISED_CONTROLLER_SHA'] and
+              sup.config_digest(env) == env['SSDLC_SUPERVISED_CONFIG_SHA'] and
+              launch['intent_id'] == env['SSDLC_SUPERVISED_INTENT'] and
+              launch['generation'] == int(env['SSDLC_SUPERVISED_GEN']) and
+              launch['state'] == 'published' and not d['launch_revoked'] and not d['cancel'])
+        if ok:
+            return True
+    except (OSError, ValueError, KeyError, TypeError, TaskError, subprocess.SubprocessError, sup.SupervisorIntegrityError):
+        pass
+    _supervision_event('failure', category='INTEGRITY', exc_type='SupervisorIntegrityError')
+    return False
+
+
+def _resume_git(repo, *args):
+    proc = subprocess.run(['git', '--no-optional-locks', *args], cwd=repo,
+                          stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
+    if proc.returncode:
+        raise PlanError('Resume baseline is unavailable')
+    return proc.stdout.rstrip('\n')
+
+
+def _resume_plan_refusal(repo, root, state, task_mode):
+    if not task_mode:
+        raise PlanError("Planning resume requires task breakdown")
+    if (root / "worktree").exists() or ((root / "03-dev") / "tasks/task-journal.jsonl").exists():
+        raise PlanError("Execution already started; explicit plan migration is required")
+    gates = [g for g in state.get("gate_history", []) if g['gate'] == 'PAIR_DESIGN_GATE']
+    if not gates or not gates[-1]['passed']:
+        raise PlanError("Design has not been approved")
+    required = ["00-recon/quality-contract.json", "01-po/requirements.md"]
+    if state.get("risk_tier") != "S":
+        required += ["02-design/adr.md", "02-design/threat-model.md"]
+    for name in required:
+        meta = state.get("artifacts", {}).get(name)
+        path = root / name
+        if not meta or not path.is_file() or file_hash(path) != meta['sha256']:
+            raise PlanError(f"Planning input is missing, unapproved or changed: {name}")
+
+
+def _resume_design_refusal(repo, root, state, task_mode, read_git=None):
+    read_git = read_git or _resume_git
+    if (root / "worktree").exists() or ((root / "02-design") / 'plan.json').exists():
+        raise PlanError('Planning or execution already started; explicit design migration required')
+    for gate in ('RECON_BLAST_RADIUS_GATE', 'PO_SPEC_GATE'):
+        history = [g for g in state.get('gate_history', []) if g['gate'] == gate]
+        if not history or not history[-1]['passed']:
+            raise PlanError(f'Design requires approved upstream gate: {gate}')
+    required = ['00-recon/context-and-blast-radius.md', '01-po/requirements.md']
+    if task_mode:
+        required.append('00-recon/quality-contract.json')
+    for name in required:
+        meta = state.get('artifacts', {}).get(name)
+        path = root / name
+        if not meta or not path.is_file() or file_hash(path) != meta['sha256']:
+            raise PlanError(f'Design input changed or disappeared: {name}')
+    if read_git(repo, 'rev-parse', 'HEAD') != state['base_commit'] or read_git(repo, 'status', '--porcelain'):
+        raise PlanError('Design requires the unchanged clean target baseline')
+
+
+def _resume_run_refusal(root, state, task_mode, from_phase, baseline_exists=True):
+    if from_phase not in ('00-recon', '03-dev'):
+        raise TaskError('Bootstrap task mode resumes from 03-dev; skipping later gates requires Step 3 attestations')
+    if from_phase == '03-dev' and not baseline_exists:
+        raise TaskError('Resume requires baseline state')
+    if task_mode and from_phase == '00-recon' and (root / '03-dev/tasks/task-journal.jsonl').exists():
+        raise TaskError('Existing task execution must resume with --from-phase 03-dev to preserve its approved inputs')
+
+
+def resume_compatibility(repo_root, ticket, entrypoint, from_phase=None, env=None):
+    """Read-only transition check; never activates runtime or constructs a controller."""
+    if not isinstance(ticket, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', ticket) or ticket in {'.', '..'}:
+        return dict(ok=False, code='unsupported_transition', reason='invalid_ticket')
+    repo = Path(repo_root).resolve()
+    root = repo / '.ssdlc' / ticket
+    try:
+        path = root / 'state.json'
+        state = json.loads(path.read_text()) if path.is_file() else {}
+        task_mode = bool(state.get('task_breakdown')) or (os.environ if env is None else env).get('SSDLC_ENABLE_TASK_BREAKDOWN', 'false').lower() == 'true'
+        if entrypoint == 'run':
+            _resume_run_refusal(root, state, task_mode, from_phase or '00-recon', path.is_file())
+        elif entrypoint in {'plan', 'design'}:
+            globals()['_resume_' + entrypoint + '_refusal'](repo, root, state, task_mode)
+        else:
+            raise PlanError('Unsupported resume entrypoint')
+        return dict(ok=True, code='compatible', reason='compatible')
+    except (TaskError, OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
+        return dict(ok=False, code='unsupported_transition', reason='incompatible_state')
 
 
 def utc_now() -> str:
@@ -182,11 +420,12 @@ class ProjectRuntimeIsolation:
 
         # 1. Load host-wide defaults from ~/.ssdlc/global.env (if present)
         global_env = Path.home() / ".ssdlc" / "global.env"
-        if global_env.exists():
+        if not os.environ.get("SSDLC_SUPERVISED_RUN_ID") and global_env.exists():
             load_env_file(global_env, override=False)
 
         # 2. Load project-specific .ssdlc/project.env (takes precedence)
-        load_env_file(self.project_env, override=True)
+        if not os.environ.get("SSDLC_SUPERVISED_RUN_ID"):
+            load_env_file(self.project_env, override=True)
 
         # Ensure isolated CODEX_HOME/config.toml has OpenRouter provider, auto_review,
         # sandbox_workspace_write writable_roots, and trusted project paths without touching ~/.codex
@@ -595,6 +834,11 @@ class SquadDispatcher:
         return ["deepseek/deepseek-r1", "anthropic/claude-3.7-sonnet"], effort
 
 
+def resolve_review_entry(entry: str, default_engine: str = "openrouter") -> Tuple[str, str]:
+    """Resolve the qualified/unqualified rule shared by both review paths."""
+    return tuple(entry.split(":", 1)) if ":" in entry and not entry.startswith("http") else (default_engine, entry)
+
+
 DynamicRoutingPolicy = SquadDispatcher
 
 
@@ -683,6 +927,9 @@ class EngineRunner:
             "-v",
             f"{ssdlc_home}:/opt/ssdlc:ro",
         ]
+        if os.environ.get('SSDLC_SUPERVISED_RUN_ID'):
+            docker_cmd[6:6] = ['--label', 'ssdlc.run_id=' + os.environ['SSDLC_SUPERVISED_RUN_ID'],
+                               '--label', 'ssdlc.project=' + os.environ['SSDLC_SUPERVISED_PROJECT_KEY']]
         # Linked checkouts point outside their source directory for Git objects
         # and worktree metadata. Keep that metadata readable, with the same
         # read-only protection as a normal checkout's .git directory.
@@ -874,7 +1121,8 @@ class EngineRunner:
                                    "cleanup_failed": cleanup_failed,
                                    "exit_code": None if proc is None else proc.returncode,
                                    "telemetry_available": bool(metrics), "counters": metrics,
-                                   "resource_failure": failed})
+                                   "resource_failure": failed, **({"run_id": os.environ["SSDLC_SUPERVISED_RUN_ID"]}
+                                       if os.environ.get("SSDLC_SUPERVISED_RUN_ID") else {})})
                 if proc is not None:
                     proc.resource_failure = failed
                     proc.resource_evidence = str(path)
@@ -928,6 +1176,7 @@ class EngineRunner:
         return proc.stdout or "", proc.stderr or "", proc.returncode
 
     @staticmethod
+    @_supervised_dispatch
     def call_openrouter(
         model: str,
         system_prompt: str,
@@ -1028,6 +1277,7 @@ class EngineRunner:
         )
 
     @staticmethod
+    @_supervised_dispatch
     def run_agy(
         prompt: str,
         cwd: Path,
@@ -1068,6 +1318,7 @@ class EngineRunner:
         return combined.strip(), proc.returncode
 
     @staticmethod
+    @_supervised_dispatch
     def run_codex(
         prompt: str,
         cwd: Path,
@@ -1112,6 +1363,7 @@ class EngineRunner:
         return (proc.stdout or "").strip() if proc.returncode == 0 else combined.strip(), proc.returncode
 
     @staticmethod
+    @_supervised_dispatch
     def run_claude(
         prompt: str,
         cwd: Path,
@@ -1181,6 +1433,7 @@ class EngineRunner:
         return result_text, proc.returncode, cost_usd, tokens_in, tokens_out
 
     @staticmethod
+    @_supervised_dispatch
     def invoke_role(
         engine: str,
         model: str,
@@ -1819,21 +2072,7 @@ class SSDLCOrchestrator:
         """Resume only planning against sealed upstream artifacts; never execute code."""
         with ticket_lock(self.ssdlc_root / "ticket.lock"):
             self.state = self._load_or_init_state()
-            if not self._task_mode():
-                raise PlanError("Planning resume requires task breakdown")
-            if self.worktree_dir.exists() or (self.dir_dev / "tasks/task-journal.jsonl").exists():
-                raise PlanError("Execution already started; explicit plan migration is required")
-            gates = [g for g in self.state.get("gate_history", []) if g['gate'] == 'PAIR_DESIGN_GATE']
-            if not gates or not gates[-1]['passed']:
-                raise PlanError("Design has not been approved")
-            required = ["00-recon/quality-contract.json", "01-po/requirements.md"]
-            if self.state.get("risk_tier") != "S":
-                required += ["02-design/adr.md", "02-design/threat-model.md"]
-            for name in required:
-                meta = self.state.get("artifacts", {}).get(name)
-                path = self.ssdlc_root / name
-                if not meta or not path.is_file() or file_hash(path) != meta['sha256']:
-                    raise PlanError(f"Planning input is missing, unapproved or changed: {name}")
+            _resume_plan_refusal(self.repo_root, self.ssdlc_root, self.state, self._task_mode())
             self.state.pop("failure", None)
             self.state.update(current_phase="02-design", current_step="task-plan", status="IN_PROGRESS")
             self._save_state()
@@ -1874,21 +2113,22 @@ class SSDLCOrchestrator:
             t0 = time.time()
             use_or = os.environ.get("SSDLC_DEV_USE_OPENROUTER", "false").lower() == "true"
             cost, tin, tout = 0.0, 0, 0
-            if engine == "claude":
-                tier_budget = {"S": 1.0, "M": 2.5, "L": 8.0}.get(self.state.get("risk_tier", "M"), 2.5)
-                dev_budget = float(os.environ.get("SSDLC_DEV_BUDGET_USD") or tier_budget)
-                out, rc, cost, tin, tout = EngineRunner.run_claude(
-                    prompt, cwd=wt, read_only=False, use_openrouter=use_or,
-                    writable_worktree=wt, model=model, reasoning_effort=effort,
-                    max_budget_usd=dev_budget,
-                )
-            elif engine == "codex":
-                out, rc = EngineRunner.run_codex(
-                    prompt, cwd=wt, sandbox="workspace-write", model=model,
-                    reasoning_effort=effort, use_openrouter=use_or, writable_worktree=wt,
-                )
-            else:
-                raise TaskError(f"Unsupported bootstrap developer engine: {engine}")
+            with _dispatch_context(task_id=task["task_id"], attempt=attempt, phase="03-dev"):
+                if engine == "claude":
+                    tier_budget = {"S": 1.0, "M": 2.5, "L": 8.0}.get(self.state.get("risk_tier", "M"), 2.5)
+                    dev_budget = float(os.environ.get("SSDLC_DEV_BUDGET_USD") or tier_budget)
+                    out, rc, cost, tin, tout = EngineRunner.run_claude(
+                        prompt, cwd=wt, read_only=False, use_openrouter=use_or,
+                        writable_worktree=wt, model=model, reasoning_effort=effort,
+                        max_budget_usd=dev_budget,
+                    )
+                elif engine == "codex":
+                    out, rc = EngineRunner.run_codex(
+                        prompt, cwd=wt, sandbox="workspace-write", model=model,
+                        reasoning_effort=effort, use_openrouter=use_or, writable_worktree=wt,
+                    )
+                else:
+                    raise TaskError(f"Unsupported bootstrap developer engine: {engine}")
             self.record_ledger(CostAndTelemetryEntry(
                 f"03-dev-{task['task_id']}-a{attempt}", "Task Developer", engine, model,
                 "GENERATED" if rc == 0 else f"RC_{rc}", time.time() - t0, cost, tin, tout,
@@ -2042,6 +2282,7 @@ class SSDLCOrchestrator:
     # ------------------------------------------------------------------
     # PHASE 0: Codebase Archaeologist / Recon & Risk-Tier Classification
     # ------------------------------------------------------------------
+    @_supervised_phase('00-recon')
     def run_phase_recon(self, goal: str, requested_tier: str = "auto") -> Tuple[Path, str]:
         print(f"\n==> [{self.project_id} | Phase 0: 00-recon] Codebase Archaeologist mapping blast radius & Risk Tier...")
         self.state["goal"] = goal
@@ -2258,6 +2499,7 @@ class SSDLCOrchestrator:
                 self._save_state()
             return result
 
+    @_supervised_phase('01-po')
     def run_phase_po(self, goal: str) -> Path:
         risk_tier = self.state.get("risk_tier", "M")
         dev_profile = self.state.get("dev_profile", "ALGORITHMIC")
@@ -2380,6 +2622,7 @@ class SSDLCOrchestrator:
                 break
         return sources
 
+    @_supervised_phase('02-design')
     def run_phase_pair_design(self, round_limit=None, import_legacy=None) -> Tuple[Path, Path]:
         """Run/resume pair design; the pipeline or resume entry point holds the lock."""
         print(f'\n==> [{self.project_id} | Phase 2: 02-design] Persistent Pair Design...')
@@ -2510,22 +2753,7 @@ class SSDLCOrchestrator:
         """Resume design only against sealed upstream artifacts; never execute code."""
         with ticket_lock(self.ssdlc_root / 'ticket.lock'):
             self.state = self._load_or_init_state()
-            if self.worktree_dir.exists() or (self.dir_design / 'plan.json').exists():
-                raise PlanError('Planning or execution already started; explicit design migration required')
-            for gate in ('RECON_BLAST_RADIUS_GATE', 'PO_SPEC_GATE'):
-                history = [g for g in self.state.get('gate_history', []) if g['gate'] == gate]
-                if not history or not history[-1]['passed']:
-                    raise PlanError(f'Design requires approved upstream gate: {gate}')
-            required = ['00-recon/context-and-blast-radius.md', '01-po/requirements.md']
-            if self._task_mode():
-                required.append('00-recon/quality-contract.json')
-            for name in required:
-                meta = self.state.get('artifacts', {}).get(name)
-                path = self.ssdlc_root / name
-                if not meta or not path.is_file() or file_hash(path) != meta['sha256']:
-                    raise PlanError(f'Design input changed or disappeared: {name}')
-            if git(self.repo_root, 'rev-parse', 'HEAD') != self.state['base_commit'] or git(self.repo_root, 'status', '--porcelain'):
-                raise PlanError('Design requires the unchanged clean target baseline')
+            _resume_design_refusal(self.repo_root, self.ssdlc_root, self.state, self._task_mode(), read_git=git)
             self.state.update(status='IN_PROGRESS', current_phase='02-design', current_step='pair-design')
             self.state.pop('failure', None)
             self._save_state()
@@ -2573,6 +2801,7 @@ class SSDLCOrchestrator:
     def _read_optional(self, path: Path, fallback: str = "(Skipped in Tier S)") -> str:
         return path.read_text(encoding="utf-8") if path.exists() else fallback
 
+    @_supervised_phase('03-dev')
     def run_phase_dev(self, feedback: str = "", attempt: int = 1) -> Tuple[Path, List[str]]:
         if self._task_mode():
             return self._run_task_development(feedback)
@@ -2878,7 +3107,7 @@ class SSDLCOrchestrator:
 
         requests = []
         for index, model in enumerate(review_models, 1):
-            effective_engine, effective_model = model.split(':', 1) if ':' in model and not model.startswith('http') else (engine, model)
+            effective_engine, effective_model = resolve_review_entry(model, engine)
             requests.append(EvaluationRequest('review', effective_engine, effective_model, index,
                 attempt, head, system, user, context, evidence, fp, parse_review_verdict, effort))
         roster = self._phase_roster('04-review', attempt, requests)
@@ -2913,6 +3142,7 @@ class SSDLCOrchestrator:
             raise terminals[0]
         return approved, report
 
+    @_supervised_phase('04-review')
     def run_phase_review(self, attempt: int = 1) -> Tuple[bool, str]:
         self._gate_terminal = None
         risk_tier = self.state.get("risk_tier", "M")
@@ -3021,11 +3251,7 @@ class SSDLCOrchestrator:
 
         for reviewer_index, mdl in enumerate(review_models, 1):
             self.check_budget_circuit_breaker()
-            if ":" in mdl and not mdl.startswith("http"):
-                effective_engine, effective_model = mdl.split(":", 1)
-            else:
-                effective_engine = review_engine
-                effective_model = mdl
+            effective_engine, effective_model = resolve_review_entry(mdl, review_engine)
             print(f"    -> Running Reviewer: {effective_engine}:{effective_model} (reasoning={rev_effort})...")
             t0 = time.time()
             rev_out, cost, tin, tout, trace_user = EngineRunner.invoke_role(
@@ -3291,6 +3517,7 @@ class SSDLCOrchestrator:
             raise terminal
         return approved, raw
 
+    @_supervised_phase('05-qa')
     def run_phase_qa(self, test_cmd: Optional[str] = None, attempt: int = 1) -> Tuple[bool, str]:
         self._gate_terminal = None
         risk_tier = self.state.get("risk_tier", "M")
@@ -3416,6 +3643,7 @@ class SSDLCOrchestrator:
     # ------------------------------------------------------------------
     # PHASE 5b: AppSec Red-Teamer & Supply-Chain / SCA Auditor
     # ------------------------------------------------------------------
+    @_supervised_phase('05b-appsec')
     def run_phase_appsec(self, attempt: int = 1) -> Tuple[bool, str]:
         self._gate_terminal = None
         risk_tier = self.state.get("risk_tier", "M")
@@ -3539,6 +3767,7 @@ class SSDLCOrchestrator:
     # ------------------------------------------------------------------
     # PHASE 6: DevSecOps Release, Rollback & Observability Engineer
     # ------------------------------------------------------------------
+    @_supervised_phase('06-ops')
     def run_phase_ops(self) -> Path:
         risk_tier = self.state.get("risk_tier", "M")
         dev_profile = self.state.get("dev_profile", "ALGORITHMIC")
@@ -3593,6 +3822,7 @@ class SSDLCOrchestrator:
     # ------------------------------------------------------------------
     # PHASE 7: Documentation & API Contract Steward
     # ------------------------------------------------------------------
+    @_supervised_phase('07-docs')
     def run_phase_docs(self) -> Path:
         risk_tier = self.state.get("risk_tier", "M")
         dev_profile = self.state.get("dev_profile", "ALGORITHMIC")
@@ -3646,6 +3876,7 @@ class SSDLCOrchestrator:
     # ------------------------------------------------------------------
     # PHASE 8: Coordinator Evidence Pack (Human Supervision Gate)
     # ------------------------------------------------------------------
+    @_supervised_phase('08-supervisor')
     def compile_evidence_pack(self, ready_for_signoff: bool) -> Path:
         print(f"\n==> [{self.project_id} | Phase 8: 08-supervisor] Compiling SHA-256 Evidence Pack for Human Supervisor...")
         self.state["current_phase"] = "08-supervisor"
@@ -3873,6 +4104,7 @@ To **REJECT** and send feedback back to the team:
             try:
                 return self._run_pipeline(goal, test_cmd, tier, from_phase)
             except TaskError as exc:
+                _supervision_event('failure', category=getattr(exc, 'category', 'TASK_EXECUTION'), exc_type=type(exc).__name__)
                 failed_phase = self.state.get('current_phase')
                 failed_step = self.state.get('current_step')
                 failed_status = self.state.get('status')
@@ -3896,11 +4128,10 @@ To **REJECT** and send feedback back to the team:
         tier: str = "auto",
         from_phase: str = "00-recon",
     ) -> Path:
-        if self._task_mode():
-            if from_phase not in ("00-recon", "03-dev"):
-                raise TaskError("Bootstrap task mode resumes from 03-dev; skipping later gates requires Step 3 attestations")
-            if from_phase == "00-recon" and (self.dir_dev / "tasks" / "task-journal.jsonl").exists():
-                raise TaskError("Existing task execution must resume with --from-phase 03-dev to preserve its approved inputs")
+        if self._task_mode() or os.environ.get('SSDLC_SUPERVISED_RUN_ID'):
+            # The read-only compatibility API checks whether baseline state exists.
+            # The existing foreground path retains its previous refusal contract.
+            _resume_run_refusal(self.ssdlc_root, self.state, self._task_mode(), from_phase)
         start_idx = self.PHASE_ORDER.index(from_phase) if from_phase in self.PHASE_ORDER else 0
 
         if start_idx <= self.PHASE_ORDER.index("00-recon"):
@@ -4144,7 +4375,7 @@ def cmd_doctor(repo: Path) -> int:
     return 0
 
 
-def main(argv=None) -> int:
+def _foreground_main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Project-Isolated Multi-CLI SSDLC Orchestrator")
     sub = parser.add_subparsers(dest="subcommand", required=True)
 
@@ -4174,6 +4405,56 @@ def main(argv=None) -> int:
         default=None,
         help="Link run to an existing remote Issue number",
     )
+
+    # Additive detached lifecycle commands; legacy foreground dispatch stays below.
+    p_run.add_argument('--detach', action='store_true', help='Hand off to the local supervisor')
+    p_run.add_argument('--json', action='store_true', help='Structured supervisor result')
+    p_run.add_argument('--recovery-allowance', default='3')
+    p_start = sub.add_parser('start', help='Start a detached, locally supervised run')
+    p_start.add_argument('--ticket', '-t', required=True)
+    p_start.add_argument('--goal', '-g', required=True)
+    p_start.add_argument('--tier', default='auto', choices=['auto', 'S', 'M', 'L'])
+    p_start.add_argument('--repo', '-r', default='.')
+    p_start.add_argument('--test-cmd')
+    p_start.add_argument('--from-phase', default='00-recon', choices=['00-recon', '03-dev'])
+    p_start.add_argument('--recovery-allowance', default='3')
+    p_start.add_argument('--json', action='store_true')
+    p_resume = sub.add_parser('resume', help='Start a new compatible supervised run')
+    p_resume.add_argument('--ticket', required=True)
+    p_resume.add_argument('--repo', '-r', default='.')
+    p_resume.add_argument('--run-id')
+    p_resume.add_argument('--entrypoint', choices=['run', 'plan', 'design'], required=True)
+    p_resume.add_argument('--from-phase', choices=['00-recon', '03-dev'], default='03-dev')
+    p_resume.add_argument('--tier', choices=['auto', 'S', 'M', 'L'], default='auto')
+    goals = p_resume.add_mutually_exclusive_group()
+    goals.add_argument('--goal')
+    goals.add_argument('--goal-file')
+    p_resume.add_argument('--test-cmd')
+    p_resume.add_argument('--review-repairs', type=int, choices=range(5))
+    p_resume.add_argument('--rounds', type=int, choices=range(1, 9))
+    p_resume.add_argument('--reauthorize-fingerprints', action='store_true')
+    p_resume.add_argument('--recovery-allowance', default='3')
+    for p_handoff in (p_run, p_start, p_resume):
+        p_handoff.add_argument('--handoff-timeout-sec', default='30', help='Maximum detached handoff wait, 1-3600 seconds')
+    p_resume.add_argument('--json', action='store_true')
+    for command in ('status', 'cancel', 'monitor'):
+        p_lifecycle = sub.add_parser(command, help=command + ' a supervised run')
+        p_lifecycle.add_argument('--ticket', required=command != 'status', default=None)
+        p_lifecycle.add_argument('--repo', '-r', default='.')
+        p_lifecycle.add_argument('--run-id')
+        p_lifecycle.add_argument('--json', action='store_true')
+        if command == 'status':
+            p_lifecycle.add_argument('--recovery-matrix', action='store_true')
+        if command == 'monitor':
+            p_lifecycle.add_argument('--interval', type=float, default=1)
+            p_lifecycle.add_argument('--timeout', type=float, default=30)
+            p_lifecycle.add_argument('--restart-worker', '--adopt', action='store_true')
+            goals = p_lifecycle.add_mutually_exclusive_group()
+            goals.add_argument('--goal')
+            goals.add_argument('--goal-file')
+            p_lifecycle.add_argument('--test-cmd')
+        if command == 'cancel':
+            p_lifecycle.add_argument('--grace', type=float, default=5)
 
     p_plan = sub.add_parser("plan", help="Resume task planning using approved requirements and design only")
     p_plan.add_argument("--ticket", required=True)
@@ -4220,6 +4501,9 @@ def main(argv=None) -> int:
     p_preview.add_argument('--attempt', required=True, type=int)
 
     args = parser.parse_args(argv)
+    if args.subcommand in {'start', 'status', 'cancel', 'monitor', 'resume'} or (args.subcommand == 'run' and args.detach):
+        import ssdlc_supervisor
+        return ssdlc_supervisor.cli(args, parser)
     repo_path = Path(getattr(args, "repo", ".")).resolve()
 
     if args.subcommand == 'po':
@@ -4297,6 +4581,35 @@ def main(argv=None) -> int:
     return 0
 
     return 0
+
+
+def _supervised_exit_code(value) -> int:
+    # sys.exit(None) succeeds; bool is an int for Python's exit semantics, but
+    # lifecycle evidence requires an actual int. Non-numeric messages mean 1.
+    return 0 if value is None else int(value) if isinstance(value, int) else 1
+
+
+def main(argv=None) -> int:
+    words = sys.argv[1:] if argv is None else argv
+    supervised = bool(os.environ.get('SSDLC_SUPERVISED_RUN_ID')) and bool(words) and words[0] in {'run', 'plan', 'design'}
+    if not supervised:
+        return _foreground_main(argv)
+    code, exc_type = 1, None
+    try:
+        if not _supervised_preflight():
+            code = 21
+            return code
+        result = _foreground_main(argv)
+        code = _supervised_exit_code(result)
+        return result
+    except BaseException as exc:
+        exc_type = type(exc).__name__
+        code = _supervised_exit_code(exc.code) if isinstance(exc, SystemExit) else 1
+        if code != 0:
+            _supervision_event('failure', category=getattr(exc, 'category', 'PLAN_ERROR' if isinstance(exc, PlanError) else 'TASK_EXECUTION'), exc_type=exc_type)
+        raise
+    finally:
+        _supervision_event('run_ended', exit_code=code, exc_type=exc_type)
 
 
 if __name__ == "__main__":

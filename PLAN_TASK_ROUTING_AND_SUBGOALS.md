@@ -639,3 +639,21 @@ La [#9](https://github.com/brushtyler/ssdlc/issues/9) sul parallelismo resta suc
 - Un guasto recuperabile riparte dal checkpoint verificato con contatori ed evidenze conservati; un login mancante o una decisione necessaria produce un'unica richiesta d'intervento con causa e azione comprensibili.
 - Una richiesta formale di modifiche viene analizzata, corretta e riverificata sullo stesso candidato/PR soltanto quando il bounce richiesto è disponibile e nei limiti autorizzati.
 - Gli indicatori da misurare sono numero di interventi umani, tempo fermo in attesa, tempo di recupero, ripetizioni evitabili, durata totale e consumi. Ridurre il numero di gate o occultare errori non è un miglioramento del workflow.
+
+### Stato milestone locale #16: T1, T2 e T3
+
+T1 introduce ownership e lancio persistente; T2 preflight, osservazione e recupero
+limitato; T3 aggiunge resume compatibile in sola lettura, cancel per processi e
+container della run, hook strutturati e documentazione. Il controller conserva
+stato canonico, journal, tentativi, ledger e approvazioni; il supervisore scrive
+soltanto `.ssdlc/.supervisor/`. La verifica indipendente della milestone resta
+obbligatoria. Sono supportati soltanto gli entrypoint run da 00-recon/03-dev,
+plan prima dell'esecuzione e design prima della pianificazione/esecuzione, con
+le approvazioni e impronte ancora compatibili. Un dispatch aperto richiede
+riconciliazione dell'operatore, senza retry automatico.
+
+No GitHub adapter ships in this milestone. La pubblicazione #4, il completamento
+operativo #16, l'epic #1 e le quote/contabilità provider #14 restano lavoro futuro.
+Le sezioni 13.3–13.6 descrivono obiettivi successivi, non capacità consegnate.
+Nessuna disponibilità di recupero ulteriore, auto-merge o avanzamento automatico
+della roadmap viene dichiarata da questo aggiornamento di stato.
