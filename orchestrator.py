@@ -2049,6 +2049,38 @@ class SSDLCOrchestrator:
     def _candidate_fault(self, point):
         """Inert persistence-boundary hook for offline crash tests."""
 
+    def _history_fault(self, point):
+        """Inert history persistence-boundary hook for offline recovery tests."""
+
+    def _build_history_snapshot(self, phase, attempt):
+        cr = candidate_reports
+        quality = json.loads((self.dir_recon / 'quality-contract.json').read_text())
+        if not cr.convergence_enabled(quality):
+            return None
+        ref = f'history/{phase}-attempt-{attempt}.json'
+        path = self.ssdlc_root / ref
+        try:
+            cr.reconcile_candidate_store(self.ssdlc_root, self.state['artifacts'], self._register_new)
+            if path.exists():
+                snapshot = cr.validate_history_snapshot(cr.history_read(self.ssdlc_root, ref, self.state['artifacts']))
+                if snapshot['phase'] != phase or snapshot['attempt'] != attempt:
+                    raise ValueError('history identity mismatch')
+                return snapshot['block']
+            self._history_fault('history.before_snapshot')
+            plan = self._gate_plan()
+            snapshot = cr.history_snapshot(self.ssdlc_root, phase, attempt, self.state['artifacts'],
+                [t['task_id'] for t in plan['tasks']],
+                git(self.worktree_dir, 'diff', '--name-only', self.state['base_commit'], 'HEAD').splitlines(),
+                dict(commit=self.state['task_verified_head'], tree=git(self.worktree_dir, 'rev-parse', 'HEAD^{tree}')))
+            cr.validate_history_snapshot(snapshot)
+            write_or_verify(path, canon(snapshot), root=self.ssdlc_root)
+            self._history_fault('history.after_snapshot_before_register')
+            self._register_new(ref, path)
+            self._history_fault('history.after_register_before_roster')
+            return json.loads(canon(snapshot))['block']
+        except (TaskError, ValueError, KeyError, OSError) as exc:
+            raise GateTerminalError('integrity_blocked', '', 'history snapshot invalid') from exc
+
     def _diagnosis_fault(self, point):
         """Inert persistence-boundary hook for diagnosis recovery tests."""
 
@@ -2080,6 +2112,7 @@ class SSDLCOrchestrator:
                     provider=provider, invoke=invoke, register=self._register_new, artifacts=self.state['artifacts'],
                     check_budget=self.check_budget_circuit_breaker, record_gate=self.record_gate,
                     ledger=ledger, fault=self._diagnosis_fault, candidate_block=candidate.block)
+                self._history_fault('history.after_diagnosis_register')
 
     def _register_new(self, ref, path):
         with self._registry_lock:
@@ -3311,6 +3344,9 @@ class SSDLCOrchestrator:
         user += '\n' + untrusted_data('quality contract', quality)
         if candidate.block:
             user += '\n' + candidate_reports.CANDIDATE_EVIDENCE_NOTE + '\n' + untrusted_data('candidate evidence catalogue', candidate.block)
+        history = self._build_history_snapshot('04-review', attempt)
+        if history is not None:
+            user += '\n' + untrusted_data('gate history', history)
         catalogue = requirement_catalogue(requirements)
         definitions = [(d['id'], hashlib.sha256(d['definition'].encode()).hexdigest()) for d in catalogue['definitions']]
         definitions += [(s['standard_id'], hashlib.sha256(json.dumps(s, sort_keys=True).encode()).hexdigest()) for s in quality.get('standards', [])]
@@ -3372,6 +3408,8 @@ class SSDLCOrchestrator:
             path = run / f'reviewer-{index}.md'
             path.write_text(raw)
             self.record_artifact(str(path.relative_to(self.ssdlc_root)), path)
+            if index == 1 and history is not None:
+                self._history_fault('history.after_first_reviewer_complete')
         self._phase_completion(roster)
         approved = len(results) == len(review_models) and all(r.approved for r in results)
         report = '\n\n'.join(r.response_text + '\n' + r.summary for r in results)
@@ -3702,6 +3740,9 @@ class SSDLCOrchestrator:
         user += '\n' + untrusted_data('quality contract', quality)
         if candidate.block:
             user += '\n' + candidate_reports.CANDIDATE_EVIDENCE_NOTE + '\n' + untrusted_data('candidate evidence catalogue', candidate.block)
+        history = self._build_history_snapshot(phase, attempt)
+        if history is not None:
+            user += '\n' + untrusted_data('gate history', history)
         definitions = [(d['id'], hashlib.sha256(d['definition'].encode()).hexdigest())
                        for d in requirement_catalogue(requirements)['definitions']]
         definitions += [(s['standard_id'], hashlib.sha256(json.dumps(s, sort_keys=True).encode()).hexdigest())
@@ -3756,6 +3797,8 @@ class SSDLCOrchestrator:
             approved = False
             responses = sorted(evaluator.directory.glob('response-*.md'))
             raw = responses[-1].read_text() if responses else str(exc)
+        if history is not None:
+            self._history_fault('history.after_first_reviewer_complete')
         try:
             self._phase_completion(roster)
         except GateTerminalError:

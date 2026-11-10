@@ -823,15 +823,26 @@ def _reconcile_candidate_store(root, artifacts, register):
     from ssdlc_tasks import validate_document
     root = Path(root)
     for ref, meta in list(artifacts.items()):
-        if ref.startswith(('candidate-evidence/', 'diagnosis/')) and ref != 'diagnosis/store.lock':
+        if ref.startswith(('candidate-evidence/', 'diagnosis/', 'history/')) and ref != 'diagnosis/store.lock':
             try:
-                data = _candidate_read(root, ref, 'log' if ref.endswith('.log') else 'record')
+                data = _candidate_read(root, ref, 'log' if ref.endswith('.log') or ref.startswith('history/') else 'record')
                 if _digest(data) != meta['sha256']:
                     raise ValueError()
             except (ProtocolError, ValueError, KeyError):
                 if ref.startswith('diagnosis/'):
                     _diagnosis_inconsistent()
                 raise TaskError('Retained evidence artifact missing or changed')
+    history_pending = []
+    for path in sorted((root / 'history').glob('*.json')):
+        ref = path.relative_to(root).as_posix()
+        try:
+            obj = validate_history_snapshot(json.loads(_candidate_read(root, ref, 'log'), object_pairs_hook=_pairs))
+            if ref != f"history/{obj['phase']}-attempt-{obj['attempt']}.json":
+                raise ValueError()
+        except Exception as exc:
+            raise TaskError('Retained history snapshot invalid') from exc
+        if ref not in artifacts:
+            history_pending.append((ref, path))
     diagnosis_pending = _diagnosis_inventory(root, artifacts)
     pending = []
     for directory in ('records', 'logs', 'decisions', 'catalogue'):
@@ -873,7 +884,7 @@ def _reconcile_candidate_store(root, artifacts, register):
                     raise TaskError('Unregistered candidate artifact identity mismatch') from exc
                 pending.append((ref, path))
             # Orphan logs are deliberately inert, never proof.
-    for ref, path in pending + diagnosis_pending:
+    for ref, path in pending + diagnosis_pending + history_pending:
         register(ref, path)
 
 
@@ -1146,3 +1157,158 @@ def run_diagnosis(root, *, gate, finding, reviewed_commit, tree, evaluation_iden
         for transition in ('requested', 'reserved', 'consumed', 'result'):
             ledger(dict(diagnosis_request_id=rid, transition=transition, slot=slot))
         return load_diagnosis(root, rid, artifacts)
+
+
+HISTORY_MAX_ENTRIES = 20
+HISTORY_MAX_CHARS = 24000
+HISTORY_MAX_RELEVANT = 200
+HISTORY_PHASES = {'04-review': ('review', 0), '05-qa': ('qa', 1), '05b-appsec': ('appsec', 2)}
+
+
+def history_read(root, ref, artifacts):
+    """Read only confined, registered bytes; historical prose has no authority."""
+    data = _candidate_read(root, ref, 'log' if ref.startswith('history/') else 'record')
+    if ref not in artifacts or _digest(data) != artifacts[ref]['sha256']:
+        raise ValueError('history digest mismatch')
+    return json.loads(data, object_pairs_hook=_pairs)
+
+
+def validate_history_snapshot(obj):
+    from ssdlc_tasks import validate_document
+    validate_document('history-snapshot', obj)
+    if _digest(canon(obj['block'])) != obj['block_sha256']:
+        raise ValueError('history block digest mismatch')
+    if len(canon(obj['block']).decode()) > HISTORY_MAX_CHARS:
+        raise ValueError('history block overflow')
+    if obj['cutoff'] != dict(attempt=obj['attempt'], phase_index=HISTORY_PHASES[obj['phase']][1]):
+        raise ValueError('history cutoff mismatch')
+    block = obj['block']
+    if block['history_truncated'] != dict(included=len(block['entries']), total=len(obj['relevant'])):
+        raise ValueError('history count mismatch')
+    if any(e['diagnosed'] != (e['diagnosis'] is not None) for e in block['entries']):
+        raise ValueError('history diagnosis mismatch')
+    index = obj['relevant']
+    if obj['block']['omitted_index_sha256'] != _digest(canon(index)):
+        raise ValueError('history index digest mismatch')
+    return obj
+
+
+def history_snapshot(root, phase, attempt, artifacts, task_ids, file_refs, current_source):
+    """Select earlier completed groups by exact sets, never resolve findings."""
+    root = Path(root)
+    cutoff = (attempt, HISTORY_PHASES[phase][1])
+    entries, sources, unverified = [], [], 0
+    groups = []
+    covered_slots = set()
+    for directory, (gate, phase_index) in HISTORY_PHASES.items():
+        for path in sorted((root / directory / 'provenance').glob('attempt-*/roster.json')):
+            try:
+                number = int(path.parent.name.removeprefix('attempt-'))
+            except ValueError:
+                unverified += 1
+                continue
+            if (number, phase_index) < cutoff:
+                groups.append((number, phase_index, directory, gate, path))
+    for number, phase_index, directory, gate, path in sorted(groups):
+        roster_ref = path.relative_to(root).as_posix()
+        completion_ref = path.with_name('completion.json').relative_to(root).as_posix()
+        roster = None
+        try:
+            roster = history_read(root, roster_ref, artifacts)
+            completion = history_read(root, completion_ref, artifacts)
+            if (roster['phase'], roster['attempt']) != (directory, number):
+                raise ValueError()
+            if (completion['phase'], completion['attempt']) != (directory, number):
+                raise ValueError()
+            if completion['roster_sha256'] != _digest(canon(roster)):
+                raise ValueError()
+            if [m['evaluator'] for m in completion['evaluators']] != roster['evaluators']:
+                raise ValueError()
+        except (ValueError, KeyError, TypeError, ProtocolError):
+            members = roster.get('evaluators', []) if isinstance(roster, dict) else []
+            slots = [m.get('slot', '')[:16] for m in members if isinstance(m, dict)]
+            covered_slots.update((directory, slot) for slot in slots)
+            unverified += max(1, len(slots))
+            continue
+        sources.append(dict(group=dict(attempt=number, phase_index=phase_index),
+                            completion_ref=completion_ref, completion_sha256=artifacts[completion_ref]['sha256']))
+        for member in completion['evaluators']:
+            covered_slots.add((directory, member['evaluator']['slot'][:16]))
+            try:
+                ref = member['outcome_ref']
+                expected = f"{directory}/evaluations/{member['evaluator']['slot'][:16]}/outcome.json"
+                if ref != expected:
+                    raise ValueError()
+                outcome = history_read(root, ref, artifacts)
+                if artifacts[ref]['sha256'] != member['outcome_sha256']:
+                    raise ValueError()
+                base = ref.rsplit('/', 1)[0]
+                assessment_ref, report_ref = base + '/assessment.json', base + '/report.json'
+                assessment = history_read(root, assessment_ref, artifacts)
+                report = history_read(root, report_ref, artifacts)
+                if assessment['findings'] != report['findings']:
+                    raise ValueError()
+                findings = sorted(report['findings'], key=lambda f: f['id'])
+            except (ValueError, KeyError, TypeError, ProtocolError):
+                unverified += 1
+                continue
+            for finding in findings:
+                reasons = []
+                if set(finding.get('task_attribution', [])) & set(task_ids):
+                    reasons.append('task_attribution')
+                if set(finding.get('file_refs', [])) & set(file_refs):
+                    reasons.append('file_refs')
+                if not reasons:
+                    continue
+                source = dict(gate=gate, attempt=number, evaluation_identity=outcome['identity'],
+                              assessment_ref=assessment_ref, assessment_sha256=artifacts[assessment_ref]['sha256'],
+                              report_ref=report_ref, report_sha256=artifacts[report_ref]['sha256'],
+                              outcome_ref=ref, outcome_sha256=artifacts[ref]['sha256'])
+                diagnosis = None
+                # Exact logical request identity, never a semantic finding matcher.
+                body = dict(gate=gate, finding_id=finding['id'], finding_sha256=_digest(canon(finding)),
+                            reviewed_commit=outcome['reviewed_commit'], tree='')
+                for dref in sorted(artifacts):
+                    if not dref.startswith('diagnosis/requests/') or not dref.endswith('/request.json'):
+                        continue
+                    try:
+                        request = history_read(root, dref, artifacts)
+                        if any(request.get(k) != body[k] for k in ('gate', 'finding_id', 'finding_sha256', 'reviewed_commit')):
+                            continue
+                        result = load_diagnosis(root, request['request_id'], artifacts)
+                        result_ref = dref.removesuffix('request.json') + 'result.json'
+                        diagnosis = dict(ref=result_ref, sha256=artifacts[result_ref]['sha256'],
+                            request_id=request['request_id'], source_matches_current=result['source'] == current_source,
+                            truncated=result['truncated'] or len(result['text']) > 1500, excerpt=result['text'][:1500])
+                        break
+                    except (TaskError, ValueError, KeyError, ProtocolError):
+                        continue
+                cut = {k: finding[k] for k in ('id', 'severity', 'classification', 'scenario', 'rationale')}
+                cut['truncated'] = any(len(cut[k]) > 500 for k in ('scenario', 'rationale'))
+                for k in ('scenario', 'rationale'):
+                    cut[k] = cut[k][:500]
+                entries.append(dict(source=source, finding=cut, relevant_because=reasons,
+                                    diagnosed=diagnosis is not None, diagnosis=diagnosis))
+                if len(entries) > HISTORY_MAX_RELEVANT:
+                    raise GateTerminalError('integrity_blocked', '', 'history_overflow')
+    for directory, (_, phase_index) in HISTORY_PHASES.items():
+        for slot in sorted((root / directory / 'evaluations').glob('*')):
+            if (directory, slot.name) in covered_slots or slot.name.startswith('.gate-'):
+                continue
+            try:
+                path = slot / ('outcome.json' if (slot / 'outcome.json').exists() else 'input.json')
+                data = history_read(root, path.relative_to(root).as_posix(), artifacts)
+                if (data['attempt'], phase_index) < cutoff:
+                    unverified += 1
+            except (ValueError, KeyError, TypeError, ProtocolError):
+                unverified += 1
+    relevant = [dict(id=e['finding']['id'], source=e['source']) for e in entries]
+    block = dict(entries=entries[:HISTORY_MAX_ENTRIES], history_unverified=unverified,
+                 history_truncated=dict(included=min(len(entries), HISTORY_MAX_ENTRIES), total=len(entries)),
+                 omitted_index_sha256=_digest(canon(relevant)))
+    while len(canon(block).decode()) > HISTORY_MAX_CHARS and block['entries']:
+        block['entries'].pop()
+        block['history_truncated']['included'] = len(block['entries'])
+    return dict(schema_version='1.0', phase=phase, attempt=attempt,
+                cutoff=dict(attempt=attempt, phase_index=cutoff[1]), sources=sources,
+                relevant=relevant, block=block, block_sha256=_digest(canon(block)))
