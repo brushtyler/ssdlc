@@ -101,8 +101,9 @@ class FakeDocker:
         return [c for c in self.containers if c['labels'].get('ssdlc.run_id') == run_id
                 and c['labels'].get('ssdlc.project') == project]
 
-    def stop(self, container):
+    def stop(self, container, grace=5):
         self.stopped.append(container['id'])
+        container['state'] = 'exited'
 
 
 class FakeProbe:
@@ -155,3 +156,17 @@ def write_controller_events(path, run, events):
         stream.flush()
         os.fsync(stream.fileno())
     return records
+
+
+def hook_environment(store):
+    """Reserved hook markers, bound to the published controller intent."""
+    from ssdlc_supervisor import markers, intent_for, MARK
+    d = store.read()
+    launch = intent_for(d, 'controller')
+    env = markers(d, 'controller', launch['generation'], launch['intent_id'])
+    env.update({MARK + k: str(v) for k, v in dict(
+        REPO=store.root.parent.parent, TICKET=store.ticket,
+        EVENTS=store.root / store.path('controller-events.jsonl'),
+        PROJECT_KEY=d['project']['key'], CONFIG_SHA=d['fingerprints']['config_sha256'],
+        CONTROLLER_SHA=d['fingerprints']['controller']['snapshot_sha256']).items()})
+    return env

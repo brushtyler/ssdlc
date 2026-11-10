@@ -48,6 +48,9 @@ class CoreCase(unittest.TestCase):
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)
         subprocess.run(['git', 'init', '-q', str(self.repo)], check=True, stdout=subprocess.DEVNULL)
+        docker_patch = patch.object(sup, 'DockerCancellation', return_value=FakeDocker())
+        docker_patch.start()
+        self.addCleanup(docker_patch.stop)
         self.clock = FakeClock()
         self.args = dict(repo=str(self.repo), ticket='T-1', goal='inert goal', tier='L')
 
@@ -212,8 +215,10 @@ class TestVerticalSliceAndArgv(CoreCase):
             '--test-cmd', a['test_cmd'], '--no-sync-remote'])
         self.assertNotIn('--sync-remote', argv)
         self.assertNotIn('--issue', argv)
+        self.assertEqual(sup.build_argv('orchestrator.plan', a),
+                         [sys.executable, str(ROOT / 'orchestrator.py'), 'plan', '--ticket', 'T-1', '--repo', str(self.repo)])
         with self.assertRaises(ValueError):
-            sup.build_argv('orchestrator.plan', a)
+            sup.build_argv('orchestrator.unknown', a)
         self.assertFalse((self.repo / 'injected').exists())
 
     def test_invalid_inputs_rejected_before_lock_or_spawn(self):
@@ -634,7 +639,8 @@ class TestRealProcesses(CoreCase):
         self.wait_for(received.exists)
         self.assertEqual(received.read_text(), 'launch\n')
         self.assertEqual(sup.status(self.repo, 'T-1')['status'], 'running')
-        self.assertEqual(sup.cancel(self.repo, 'T-1', grace=0)['status'], 'cancelled')
+        cancelled = sup.cancel(self.repo, 'T-1', grace=0)
+        self.assertEqual(cancelled['status'], 'cancelled', cancelled)
 
     def test_scoped_cancel_unrelated_session_untouched(self):
         self.controller()
@@ -673,6 +679,46 @@ class TestRealProcesses(CoreCase):
             sup.cancel(self.repo, 'T-1', grace=0, fault=CrashAt('cancel.after_term_before_kill'))
         self.assertEqual(sup.status(self.repo, 'T-1')['status'], 'cancelling')
         self.assertEqual(sup.cancel(self.repo, 'T-1', grace=0)['status'], 'cancelled')
+
+
+class TestCancellationExitRace(CoreCase):
+    def check_admission(self, transition):
+        store, proc = self.fake_run()
+        real_environ = proc.environ
+        def exiting(pid):
+            if pid == 2002:
+                if transition == 'gone':
+                    del proc.entries[pid]
+                    raise ProcessLookupError()
+                if transition == 'zombie':
+                    proc.entries[pid][1] = 'Z'
+                elif transition == 'reused':
+                    proc.entries[pid][0] = replace(proc.entries[pid][0], start_ticks=999)
+                elif transition == 'changed-session':
+                    proc.entries[pid][0] = replace(proc.entries[pid][0], sid=9999, pgid=9999)
+                proc.entries[pid][3] = {}
+            return real_environ(pid)
+        with patch.object(proc, 'environ', side_effect=exiting):
+            admitted, error = sup._admit_session(store.read(), 'controller', proc)
+        self.assertEqual(admitted, [])
+        self.assertEqual(error, 'unowned_session_member' if transition in {'live-unowned', 'changed-session'} else None)
+        self.assertEqual(proc.closed.count((2002, 200)), 1)
+        self.assertFalse(proc.signals)
+
+    def test_zombie_during_environment_read_is_not_a_live_unowned_member(self):
+        self.check_admission('zombie')
+
+    def test_disappeared_process_is_ignored(self):
+        self.check_admission('gone')
+
+    def test_reused_pid_closes_only_the_old_pinned_descriptor(self):
+        self.check_admission('reused')
+
+    def test_live_unowned_session_member_still_blocks(self):
+        self.check_admission('live-unowned')
+
+    def test_live_identity_change_still_blocks(self):
+        self.check_admission('changed-session')
 
 
 if __name__ == '__main__':

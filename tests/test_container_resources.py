@@ -171,3 +171,34 @@ class ContainerResourceTests(unittest.TestCase):
                         self.fail('Timeout was swallowed')
                 evidence = root/'.ssdlc/.runtime/resources/owned-test.json'
                 self.assertTrue(json.loads(evidence.read_text())['cleanup_failed'])
+
+
+class SupervisedContainerLabels(unittest.TestCase):
+    def test_only_supervised_labels_exact_legacy_argv_and_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / '.ssdlc').mkdir()
+            with patch('orchestrator.uuid.uuid4') as uid:
+                uid.return_value.hex = 'c' * 32
+                with patch.dict(os.environ, {'SSDLC_SUPERVISED_RUN_ID': ''}):
+                    legacy = EngineRunner._wrap_in_role_container(['true'], root, pass_ai_keys=False)
+                with patch.dict(os.environ, {'SSDLC_SUPERVISED_RUN_ID': 'a'*32, 'SSDLC_SUPERVISED_PROJECT_KEY': 'b'*16, 'SSDLC_SUPERVISED_NONCE': 'private'}):
+                    supervised = EngineRunner._wrap_in_role_container(['true'], root, pass_ai_keys=False)
+            self.assertEqual(supervised[6:10], ['--label', 'ssdlc.run_id='+'a'*32, '--label', 'ssdlc.project='+'b'*16])
+            self.assertEqual(supervised[:6] + supervised[10:], legacy)
+            self.assertEqual(legacy[5], 'ssdlc-role-' + 'c'*32)
+            self.assertNotIn('--label', legacy)
+            self.assertFalse(any('NONCE' in word or word == 'private' for word in supervised))
+
+    def test_resource_run_id_only_supervised(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / '.ssdlc').mkdir()
+            for run_id in ('', 'a'*32):
+                with patch.dict(os.environ, {'SSDLC_SUPERVISED_RUN_ID': run_id, 'SSDLC_SUPERVISED_PROJECT_KEY': 'b'*16}):
+                    cmd = EngineRunner._wrap_in_role_container(['true'], root, pass_ai_keys=False)
+                    with patch('orchestrator.subprocess.run', return_value=subprocess.CompletedProcess(cmd, 0, 'OK', '')):
+                        result = EngineRunner._run_role_command(cmd, cwd=root, env=None, timeout=10)
+                record = json.loads(Path(result.resource_evidence).read_text())
+                if run_id: self.assertEqual(record['run_id'], run_id)
+                else: self.assertNotIn('run_id', record)

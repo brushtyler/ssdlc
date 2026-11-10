@@ -4,6 +4,7 @@ Only the in-memory payload carries executable inputs. Durable records contain
 identities, digests and closed-vocabulary lifecycle evidence.
 """
 import argparse
+import fcntl
 import contextlib
 import copy
 from dataclasses import asdict, dataclass
@@ -26,6 +27,8 @@ import uuid
 
 
 class SupervisorIntegrityError(Exception):
+    category = 'INTEGRITY'
+
     def __init__(self, code='filesystem_integrity'):
         self.code = code
         super().__init__(code)
@@ -74,6 +77,9 @@ def validate_args(args):
     a = dict(vars(args)) if isinstance(args, argparse.Namespace) else dict(args)
     if not isinstance(a.get('ticket'), str) or not TICKET.fullmatch(a['ticket']) or a['ticket'] in {'.', '..'}:
         raise ValueError('invalid_ticket')
+    a.setdefault('entrypoint', 'run')
+    if a['entrypoint'] not in {'run', 'plan', 'design'}:
+        raise ValueError('unsupported_transition')
     if a.get('tier') is None:
         a['tier'] = 'auto'
     if a['tier'] not in {'auto', 'S', 'M', 'L'}:
@@ -90,7 +96,7 @@ def validate_args(args):
         a[key] = int(v)
     for key, limit in [('goal', 65536), ('test_cmd', 262144)]:
         v = a.get(key)
-        if key == 'goal' and not literal(v):
+        if key == 'goal' and a['entrypoint'] == 'run' and not literal(v):
             raise ValueError('invalid_goal')
         if v is not None and (not isinstance(v, str) or '\0' in v or len(v.encode()) > limit):
             raise ValueError('inputs_too_large')
@@ -98,16 +104,31 @@ def validate_args(args):
         raise ValueError('invalid_repo')
     if a.get('issue') is not None or a.get('sync_remote') is True:
         raise ValueError('unsupported_transition')
+    for key, low, high in [('review_repairs', 0, 4), ('rounds', 1, 8)]:
+        v = a.get(key)
+        if v is not None and (isinstance(v, bool) or not re.fullmatch(r'[0-9]+', str(v)) or not low <= int(v) <= high):
+            raise ValueError('invalid_number')
+        if v is not None:
+            a[key] = int(v)
+    if a['entrypoint'] != 'run':
+        a['goal'] = None
+        a['test_cmd'] = None
     a['repo'] = str(Path(a.get('repo', '.')).resolve())
     return a
 
 
 def build_argv(entrypoint_id, validated_args):
     """Only this allow-list may construct controller commands (never a shell)."""
-    if entrypoint_id != 'orchestrator.run':
+    if entrypoint_id not in {'orchestrator.run', 'orchestrator.plan', 'orchestrator.design'}:
         raise ValueError('unsupported_transition')
-    a = validate_args(validated_args)
+    a = validate_args(dict(validated_args, entrypoint=entrypoint_id.split('.')[1]))
     controller = str(Path(a.get('controller', Path(__file__).with_name('orchestrator.py'))).resolve())
+    if a['entrypoint'] != 'run':
+        argv = [sys.executable, controller, a['entrypoint'], '--ticket', a['ticket'], '--repo', a['repo']]
+        key = 'review_repairs' if a['entrypoint'] == 'plan' else 'rounds'
+        if a.get(key) is not None:
+            argv += ['--' + key.replace('_', '-'), str(a[key])]
+        return argv
     argv = [sys.executable, controller, 'run', '--ticket', a['ticket'], '--goal', a['goal'],
             '--tier', a['tier'], '--repo', a['repo'], '--from-phase', a['from_phase']]
     if a.get('test_cmd') is not None:
@@ -325,6 +346,9 @@ def validate_record(d):
     shape = copy.deepcopy(RUN_SHAPE)
     shape.pop('processes')
     shape.pop('handoff')
+    if isinstance(d.get('authorized'), dict) and d['authorized'].get('entrypoint') in {'plan', 'design'}:
+        shape['authorized']['goal_sha256'] = None if d['authorized'].get('goal_sha256') is None else str
+        shape['authorized']['goal_len'] = None if d['authorized'].get('goal_len') is None else int
     if not _shape(d, shape):
         raise SupervisorIntegrityError('metadata_corrupt')
     if d['worker_generation'] < 1 or d['revision'] < 0:
@@ -363,13 +387,20 @@ def validate_record(d):
         raise SupervisorIntegrityError('metadata_corrupt')
     if d['authorized']['test_cmd_authority'] != 'operator_flag' or 'test_cmd_sha256' not in d['authorized']:
         raise SupervisorIntegrityError('metadata_corrupt')
-    for value in [d['authorized']['goal_sha256'], d['fingerprints']['config_sha256'],
+    for value in ([d['authorized']['goal_sha256']] if d['authorized']['goal_sha256'] is not None else []) + [d['fingerprints']['config_sha256'],
                   d['fingerprints']['controller']['sha256'], d['fingerprints']['controller']['path_sha256'],
                   d['fingerprints']['supervisor_py_sha256'], d['fingerprints']['inputs_sha256']]:
         if not isinstance(value, str) or not re.fullmatch(r'[a-f0-9]{64}', value):
             raise SupervisorIntegrityError('metadata_corrupt')
     value = d['authorized']['test_cmd_sha256']
     if value is not None and (not isinstance(value, str) or not re.fullmatch(r'[a-f0-9]{64}', value)):
+        raise SupervisorIntegrityError('metadata_corrupt')
+    for key, low, high in [('review_repairs', 0, 4), ('rounds', 1, 8)]:
+        value = d['authorized'].get(key)
+        if value is not None and (type(value) is not int or not low <= value <= high):
+            raise SupervisorIntegrityError('metadata_corrupt')
+    snapshot = d['fingerprints']['controller'].get('snapshot_sha256')
+    if snapshot is not None and (not isinstance(snapshot, str) or not re.fullmatch(r'[a-f0-9]{64}', snapshot)):
         raise SupervisorIntegrityError('metadata_corrupt')
     if d['recovery']['used'] < 0 or d['recovery']['used'] > d['recovery']['allowance_total']:
         raise SupervisorIntegrityError('metadata_corrupt')
@@ -380,7 +411,7 @@ def validate_record(d):
         raise SupervisorIntegrityError('metadata_corrupt')
     if set(d) - (set(RUN_SHAPE) | required | {'in_flight'}):
         raise SupervisorIntegrityError('metadata_corrupt')
-    for key, allowed in [('authorized', set(RUN_SHAPE['authorized']) | {'test_cmd_sha256', 'argv_id', 'compatibility_approved'}),
+    for key, allowed in [('authorized', set(RUN_SHAPE['authorized']) | {'test_cmd_sha256', 'argv_id', 'compatibility_approved', 'review_repairs', 'rounds'}),
                          ('fingerprints', set(RUN_SHAPE['fingerprints'])),
                          ('processes', {'worker', 'controller', 'descendants'}),
                          ('handoff', {'outcome', 'at'})]:
@@ -435,7 +466,7 @@ def validate_record(d):
 EVENT_TYPES = {'unsupported_transition', 'launch_pending', 'identity_published', 'shim_released',
                'handoff', 'reconcile', 'launch_abandoned', 'launch_retry', 'controller_exited',
                'cancel_requested', 'cancel_blocked', 'cancel_term', 'cancel_finished', 'started',
-               'preflight', 'recovery', 'heartbeat', 'classified', 'completed', 'adopted'}
+               'preflight', 'recovery', 'heartbeat', 'classified', 'completed', 'adopted', 'reauthorization'}
 REASONS = {'bootstrap', 'launched', 'reconcile', 'uncertain_outcome', 'inputs_required',
            'inputs_incomplete', 'fingerprint_mismatch', 'handoff_timeout', 'exit_evidence_unavailable',
            'cancel_requested', 'cancelled', 'pidfd_unsupported', 'unowned_session_member', 'identity_unknown'}
@@ -606,17 +637,60 @@ def config_digest(env):
                                    if not k.startswith(MARK) and k not in {'PWD', 'SHLVL', '_'})))
 
 
+def goal_digest(a):
+    return digest(a['goal']) if a.get('goal') is not None else None
+
+
+def controller_snapshot_digest():
+    # Use the canonical snapshot implementation in a read-only child. Git status
+    # must not refresh the index, and environment overrides must not change the
+    # parent's frozen configuration (or another dispatch thread's environment).
+    root = Path(__file__).resolve().parent
+    code = ('import json; from pathlib import Path; '
+            'from ssdlc_controller import controller_snapshot; '
+            'print(json.dumps(controller_snapshot(Path.cwd()), sort_keys=True))')
+    result = subprocess.run([sys.executable, '-B', '-c', code], cwd=root,
+        env=dict(os.environ, GIT_OPTIONAL_LOCKS='0', PYTHONDONTWRITEBYTECODE='1'),
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15)
+    if result.returncode:
+        raise SupervisorIntegrityError('filesystem_integrity')
+    return digest(json.dumps(json.loads(result.stdout), sort_keys=True))
+
+
+def compatibility(a, env=None):
+    from orchestrator import resume_compatibility
+    return resume_compatibility(a['repo'], a['ticket'], a['entrypoint'], a['from_phase'], env)
+
+
+def refusal(store, reason='unsupported_transition'):
+    store.prepare()
+    # One durable audit line is the sole refusal evidence. No lock file is created.
+    fd = open_safe(store.root, str(Path(store.ticket) / 'audit.jsonl'), os.O_RDWR | os.O_APPEND, True)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        data = json.dumps(dict(type='unsupported_transition', ts=float(store.clock.time()))).encode() + b'\n'
+        while data:
+            data = data[os.write(fd, data):]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    result = public({}, 'unsupported', 'unsupported_transition')
+    result['next_action'] = 'inspect_compatibility'
+    return result
+
+
 def new_record(a, store):
     controller = Path(a.get('controller', Path(__file__).with_name('orchestrator.py'))).resolve()
-    authorized = dict(entrypoint='run', from_phase=a['from_phase'], goal_sha256=digest(a['goal']),
-                      goal_len=len(a['goal'].encode()), tier=a['tier'],
+    authorized = dict(entrypoint=a['entrypoint'], from_phase=a['from_phase'], goal_sha256=goal_digest(a),
+                      goal_len=len(a['goal'].encode()) if a.get('goal') is not None else None, tier=a['tier'],
                       test_cmd_sha256=digest(a['test_cmd']) if a.get('test_cmd') is not None else None,
-                      test_cmd_authority='operator_flag', reauthorization=[], argv_id='orchestrator.run')
+                      test_cmd_authority='operator_flag', reauthorization=a.get('_reauthorization', []), argv_id='orchestrator.' + a['entrypoint'],
+                      review_repairs=a.get('review_repairs'), rounds=a.get('rounds'), compatibility_approved=True)
     return dict(schema_version=1, revision=0, worker_generation=1, run_id=store.run_id, nonce=uuid.uuid4().hex,
-        resumes=None, project=dict(key=digest(a['repo'])[:16], name='project'), ticket=a['ticket'],
+        resumes=a.get('_resumes'), project=dict(key=digest(a['repo'])[:16], name='project'), ticket=a['ticket'],
         created_at=float(store.clock.time()), authorized=authorized,
         fingerprints=dict(config_sha256=config_digest(build_project_env(a['repo'], os.environ)),
-                          controller=dict(path_sha256=digest(str(controller)), sha256=digest(controller.read_bytes())),
+                          controller=dict(path_sha256=digest(str(controller)), sha256=digest(controller.read_bytes()), snapshot_sha256=controller_snapshot_digest()),
                           supervisor_py_sha256=digest(Path(__file__).read_bytes()), inputs_sha256=digest(json.dumps(authorized, sort_keys=True))),
         base_commit_at_launch=git_read(a['repo'], 'rev-parse', 'HEAD'), launch_revoked=False, launches=[],
         processes=dict(worker=None, controller=None, descendants=[]), containers=[], status='starting', status_reason='bootstrap',
@@ -821,21 +895,15 @@ def reconcile(store, proc=None):
 
 def start(args, clock=None, fault=None):
     a = validate_args(args)  # validation must precede filesystem/lock side effects
-    build_argv('orchestrator.run', a)
+    build_argv('orchestrator.' + a['entrypoint'], a)
     if not sys.platform.startswith('linux'):
         return public({}, 'unsupported', 'unsupported_platform')
     store = RunStore(a['repo'], a['ticket'], clock=clock, fault=fault)
     payload = json.dumps(dict(args=a, env=build_project_env(a['repo'], os.environ))).encode()
     if len(payload) > 1048576:
         raise ValueError('inputs_too_large')
-    journal = Path(a['repo']) / '.ssdlc' / a['ticket'] / '03-dev/tasks/task-journal.jsonl'
-    state = Path(a['repo']) / '.ssdlc' / a['ticket'] / 'state.json'
-    if (a['from_phase'] == '00-recon' and journal.exists()) or (a['from_phase'] == '03-dev' and not state.is_file()):
-        store.prepare()
-        with lock(store.root, str(Path(store.ticket) / 'audit.lock')):
-            store.append(str(Path(store.ticket) / 'audit.jsonl'),
-                         dict(type='unsupported_transition', ts=float(store.clock.time())))
-        return public({}, 'unsupported', 'unsupported_transition')
+    if not compatibility(a, build_project_env(a['repo'], os.environ))['ok']:
+        return refusal(store)
     store.fault.hit('lock.before_acquire')
     store.prepare()
     try:
@@ -850,6 +918,17 @@ def start(args, clock=None, fault=None):
                     d = store.current()
                 except FileNotFoundError:
                     raise SupervisorIntegrityError('metadata_corrupt') from None
+            if a.get('_resumes'):
+                if d is None or d['run_id'] != a['_resumes'] or view(d)['status'] in {'running', 'starting', 'cancelling'}:
+                    return public(d or {}, 'blocked', 'reconcile')
+                if any(identity_state(d, role) != GONE for role in ('worker', 'controller')):
+                    return public(d, 'blocked', 'reconcile')
+                candidate = new_record(a, store)
+                changes = fingerprint_changes(d, candidate)
+                if changes and not a.get('reauthorize_fingerprints'):
+                    return public(d, 'blocked', 'fingerprint_mismatch')
+                a['_reauthorization'] = reauthorization_entries(d, changes, store.clock)
+                d = None
             if d is not None:
                 result = view(d)
                 if result['status'] == 'running':
@@ -859,9 +938,9 @@ def start(args, clock=None, fault=None):
                     d = reconcile(store)
                     if d['status_reason'] != 'inputs_required':
                         return public(store.handoff('blocked', 'reconcile'))
-                    if (d['authorized']['goal_sha256'] != digest(a['goal']) or
+                    if (d['authorized']['goal_sha256'] != goal_digest(a) or
                         d['authorized']['test_cmd_sha256'] != (digest(a['test_cmd']) if a.get('test_cmd') is not None else None) or
-                        d['fingerprints']['controller']['sha256'] != digest(Path(build_argv('orchestrator.run', a)[1]).read_bytes()) or
+                        d['fingerprints']['controller']['sha256'] != digest(Path(build_argv('orchestrator.' + a['entrypoint'], a)[1]).read_bytes()) or
                         d['fingerprints']['config_sha256'] != config_digest(build_project_env(a['repo'], os.environ))):
                         return public(store.handoff('blocked', 'fingerprint_mismatch'))
                     def retry(v):
@@ -892,6 +971,44 @@ def start(args, clock=None, fault=None):
             return public(store.handoff('blocked', 'handoff_timeout'))
     except BlockingIOError:
         return public({}, 'locked', 'locked')
+
+
+def fingerprint_changes(old, new):
+    changes = []
+    for section, fields in [('authorized', ('goal_sha256', 'tier', 'test_cmd_sha256')),
+                            ('fingerprints', ('config_sha256', 'controller'))]:
+        for field in fields:
+            a, b = old[section].get(field), new[section].get(field)
+            if a != b:
+                changes.append(dict(field=field, old_sha256=digest(json.dumps(a, sort_keys=True)),
+                                    new_sha256=digest(json.dumps(b, sort_keys=True))))
+    return changes
+
+
+def reauthorization_entries(old, changes, clock):
+    return old['authorized']['reauthorization'] + [dict(at=float(clock.time()),
+        old_sha=c['old_sha256'], new_sha=c['new_sha256'], fields=[c['field']]) for c in changes]
+
+
+def resume(args, clock=None, fault=None):
+    a = dict(vars(args)) if isinstance(args, argparse.Namespace) else dict(args)
+    if a.get('goal_file'):
+        a['goal'] = Path(a['goal_file']).read_text()
+    a = validate_args(a)
+    build_argv('orchestrator.' + a['entrypoint'], a)
+    store = RunStore(a['repo'], a['ticket'], a.get('run_id'), clock, fault)
+    if not compatibility(a, build_project_env(a['repo'], os.environ))['ok']:
+        return refusal(store)
+    old = store.read() if store.run_id else store.current()
+    candidate = new_record(a, store)
+    changes = fingerprint_changes(old, candidate)
+    if changes and not a.get('reauthorize_fingerprints'):
+        return public(old, 'blocked', 'fingerprint_mismatch')
+    a['_resumes'] = old['run_id']
+    if changes:
+        a['_reauthorization'] = reauthorization_entries(old, changes, store.clock)
+        store.append(str(Path(store.ticket) / 'audit.jsonl'), dict(type='reauthorization', ts=float(store.clock.time()), run_id=old['run_id']))
+    return start(a, clock, fault)
 
 
 def status(repo, ticket, run_id=None, proc=None, env=None, clock=None):
@@ -925,8 +1042,8 @@ def boot(args):
             payload = json.loads(transfer(args.payload_fd, timeout=d['deadlines']['payload_io_timeout_sec']))
             os.close(args.payload_fd)
             a = validate_args(payload['args'])
-            argv = build_argv('orchestrator.run', a)
-            if digest(a['goal']) != d['authorized']['goal_sha256'] or config_digest(payload['env']) != d['fingerprints']['config_sha256'] or digest(Path(argv[1]).read_bytes()) != d['fingerprints']['controller']['sha256']:
+            argv = build_argv('orchestrator.' + a['entrypoint'], a)
+            if goal_digest(a) != d['authorized']['goal_sha256'] or config_digest(payload['env']) != d['fingerprints']['config_sha256'] or digest(Path(argv[1]).read_bytes()) != d['fingerprints']['controller']['sha256'] or controller_snapshot_digest() != d['fingerprints']['controller'].get('snapshot_sha256'):
                 raise FencedOut()
             with store.locked():
                 d = store.read()
@@ -934,6 +1051,11 @@ def boot(args):
                     raise FencedOut()
             env = payload['env']
             env.update(markers(d, 'controller', args.generation, args.intent))
+            env.update({MARK + k: str(v) for k, v in dict(
+                REPO=a['repo'], TICKET=a['ticket'], PROJECT_KEY=d['project']['key'],
+                EVENTS=str(store.root / store.path('controller-events.jsonl')),
+                CONTROLLER_SHA=d['fingerprints']['controller']['snapshot_sha256'],
+                CONFIG_SHA=d['fingerprints']['config_sha256']).items()})
             os.execve(argv[0], argv, env)
         store.fault.hit('launch.payload_reader_stalled')
         return worker(store, args)
@@ -964,8 +1086,8 @@ def worker(store, args):
                 return 0
             store.clock.sleep(1)
     a = validate_args(payload['args'])
-    argv = build_argv('orchestrator.run', a)
-    if digest(a['goal']) != d['authorized']['goal_sha256'] or config_digest(payload['env']) != d['fingerprints']['config_sha256'] or digest(Path(argv[1]).read_bytes()) != d['fingerprints']['controller']['sha256']:
+    argv = build_argv('orchestrator.' + a['entrypoint'], a)
+    if goal_digest(a) != d['authorized']['goal_sha256'] or config_digest(payload['env']) != d['fingerprints']['config_sha256'] or digest(Path(argv[1]).read_bytes()) != d['fingerprints']['controller']['sha256'] or controller_snapshot_digest() != d['fingerprints']['controller'].get('snapshot_sha256'):
         store.handoff('blocked', 'fingerprint_mismatch', args.generation)
         return 11
     # The worker receives only markers at exec; frozen inputs stay in memory.
@@ -981,6 +1103,9 @@ def worker(store, args):
         return 10
     capture_journal_baseline(store, args.generation)
     store.fault.hit('cancel.revokes_pending_launch')
+    if not compatibility(a, payload['env'])['ok']:
+        store.handoff('blocked', 'unsupported_transition', args.generation)
+        return 14
     with store.locked():
         controller, pipe, intent = spawn(store, 'controller', args.generation, True)
     try:
@@ -1041,7 +1166,9 @@ def _admit_session(d, role, proc):
                         for k, v in markers(d, role, launch['generation'], launch['intent_id']).items())
                 except (FileNotFoundError, ProcessLookupError):
                     pending.remove((ident, ppid, fd))
+                    candidates.remove((ident, ppid, fd))
                     proc.close(fd)
+                    progress = True
                     continue
                 except OSError:
                     matched = False
@@ -1053,6 +1180,24 @@ def _admit_session(d, role, proc):
                     pending.remove((ident, ppid, fd))
                     progress = True
             if not progress:
+                # TERM can make a candidate a zombie while /proc/environ is
+                # being read. Recheck its birth/state before declaring it an
+                # unowned live session member; never signal a recycled PID.
+                for item in pending[:]:
+                    ident, _, fd = item
+                    try:
+                        fresh, state, _ = proc.stat(ident.pid)
+                        gone = state == 'Z' or (
+                            fresh.boot_id == ident.boot_id and fresh.start_ticks != ident.start_ticks)
+                    except (FileNotFoundError, ProcessLookupError):
+                        gone = True
+                    if gone:
+                        pending.remove(item)
+                        candidates.remove(item)
+                        proc.close(fd)
+                        progress = True
+                if progress:
+                    continue
                 for _, _, fd in pending:
                     proc.close(fd)
                 for _, fd in admitted:
@@ -1068,7 +1213,7 @@ def _admit_session(d, role, proc):
         return [], 'identity_unknown'
 
 
-def cancel(repo, ticket, run_id=None, grace=5, clock=None, proc=None, fault=None):
+def cancel(repo, ticket, run_id=None, grace=5, clock=None, proc=None, fault=None, docker=None):
     if not sys.platform.startswith('linux'):
         return public({}, 'unsupported', 'unsupported_platform')
     if isinstance(grace, bool) or not isinstance(grace, (float, int)) or not 0 <= grace <= 300:
@@ -1104,7 +1249,7 @@ def cancel(repo, ticket, run_id=None, grace=5, clock=None, proc=None, fault=None
         store.fault.hit('cancel.after_intent_before_signal')
         if d['processes']['controller'] is None:
             store.fault.hit('cancel.worker_only_preflight')
-        return _execute_cancel(store, d, grace, proc, token)
+        return _execute_cancel(store, d, grace, proc, token, docker)
     finally:
         # A real crash leaves the birth-bound lease for restart verification.
         # Graceful errors (including injected exceptions) release it safely.
@@ -1114,7 +1259,7 @@ def cancel(repo, ticket, run_id=None, grace=5, clock=None, proc=None, fault=None
         store.update(release)
 
 
-def _execute_cancel(store, d, grace, proc, token):
+def _execute_cancel(store, d, grace, proc, token, docker=None):
     def blocked(reason):
         def apply(v):
             v.update(status='blocked', status_reason=reason)
@@ -1168,6 +1313,18 @@ def _execute_cancel(store, d, grace, proc, token):
     if error:
         return blocked(error)
     store.fault.hit('cancel.after_kill_before_record')
+    docker = docker or DockerCancellation()
+    try:
+        for container in docker.list(d['run_id'], d['project']['key']):
+            labels = container.get('labels', {})
+            if (labels.get('ssdlc.run_id') == d['run_id'] and
+                    labels.get('ssdlc.project') == d['project']['key'] and
+                    re.fullmatch(r'[a-f0-9]{64}', container.get('id', '')) and
+                    container.get('state') in {'running', 'restarting', 'paused'}):
+                docker.stop(container, grace)
+                store.fault.hit('cancel.after_container_stop_before_record')
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return blocked('docker_unavailable')
     def finish(v):
         v.update(status='cancelled', status_reason='cancelled', in_flight='uncertain')
         v['cancel'].update(state='done', kill_at=float(store.clock.time()))
@@ -1214,7 +1371,7 @@ REASONS.update(PROBE_CODES | {'preflight_ok', 'preflight_failed', 'docker_unavai
     'retry_scheduled', 'hard_deadline', 'completed', 'completion_mismatch', 'observing',
     'attempt_allowance_exhausted', 'terminal_check_failure', 'terminal_development_blocked',
     'integrity_failure', 'budget_exceeded', 'resource_limit', 'operator_decision', 'unsupported_transition',
-    'terminal_unbound'} | {x + '_missing' for x in DEPENDENCIES})
+    'terminal_unbound', 'cancel_pending'} | {x + '_missing' for x in DEPENDENCIES})
 
 
 def build_project_env(repo, host_env):
@@ -1719,7 +1876,7 @@ def exit_evidence(d, events):
     return dict(source='none', code=None, intent_id=None)
 
 
-def observed_status(store, d, proc=None, env=None, clock=None):
+def observed_status(store, d, proc=None, env=None, clock=None, *, events_snapshot=None):
     if clock:
         store.clock = clock
     env = dict(env) if env is not None else build_project_env(store.root.parent.parent, os.environ)
@@ -1735,7 +1892,7 @@ def observed_status(store, d, proc=None, env=None, clock=None):
             out.update(status='failed', status_reason='hard_deadline', classification=classify(dict(hard_deadline=True, env=env)))
             return status_fields(out, public(out), store.clock.time())
         return status_fields(out, view(out, proc), store.clock.time())
-    events, malformed = controller_events(store, d)
+    events, malformed = events_snapshot if events_snapshot is not None else controller_events(store, d)
     out = copy.deepcopy(d)
     out['exit_evidence'] = exit_evidence(d, events)
     evidence = evidence_for(store, out, env, events, malformed)
@@ -1744,7 +1901,7 @@ def observed_status(store, d, proc=None, env=None, clock=None):
         out.update(status='reconcile', status_reason='exit_evidence_unavailable')
     elif out['exit_evidence']['code'] == 0:
         if completion(store, out, evidence['state']):
-            out.update(status='completed', status_reason='completed', completion_kind=out['authorized']['entrypoint'])
+            out.update(status='completed', status_reason='completed', completion_kind=out['authorized']['entrypoint'], classification=None)
         else:
             out.update(status='reconcile', status_reason='completion_mismatch')
     elif out['status'] not in {'cancelled', 'operator_wait'}:
@@ -1782,12 +1939,12 @@ def human_status(result):
 
 
 class DockerObservation:
-    def list(self, run_id, project):
+    def list(self, run_id, project, strict=False):
         try:
             p = subprocess.run(['docker', 'ps', '-aq', '--filter', 'label=ssdlc.run_id=' + run_id,
                                 '--filter', 'label=ssdlc.project=' + project], timeout=10, stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True)
-            ids = p.stdout.decode().split()
+            ids = [x for x in p.stdout.decode().split() if re.fullmatch(r'[a-f0-9]{12,64}', x)]
             if not ids:
                 return []
             p = subprocess.run(['docker', 'inspect', *ids], timeout=10, stdin=subprocess.DEVNULL,
@@ -1795,7 +1952,19 @@ class DockerObservation:
             return [dict(id=c['Id'], name=c['Name'], labels=c['Config'].get('Labels') or {}, state=c['State']['Status'])
                     for c in json.loads(p.stdout)]
         except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+            if strict:
+                raise OSError('docker_unavailable') from None
             return []
+
+    def stop(self, container, grace):
+        subprocess.run(['docker', 'stop', '-t', str(int(grace)), container['id']],
+                       timeout=max(10, grace + 10), stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+
+
+class DockerCancellation(DockerObservation):
+    def list(self, run_id, project):
+        return super().list(run_id, project, strict=True)
 
 
 def monitor_tick(store, env, proc=None, docker=None, generation=None):
@@ -1861,7 +2030,9 @@ def monitor_tick(store, env, proc=None, docker=None, generation=None):
     hb = dict(at=float(now), progress_at=float(progress_at), progress_source='structured' if changed else old.get('progress_source'),
               phase=phase, activity=activity, diagnostics=diagnostics, tokens=tokens)
     expired = d['deadlines'].get('hard_deadline') is not None and now > d['deadlines']['hard_deadline']
-    observed = observed_status(store, d, proc, env)
+    # Decision and persisted exit evidence must use one event snapshot. A late
+    # run_ended event is considered on the next tick, never half of this one.
+    observed = observed_status(store, d, proc, env, events_snapshot=(events, malformed))
     def save(v):
         v['heartbeat'] = hb
         v['processes']['descendants'] = descendants
@@ -1977,7 +2148,7 @@ def restart_worker(store, goal=None, test_cmd=None, env=None, proc=None):
                         candidate = proc.environ(pid)
                         if candidate.get(MARK + 'RUN_ID') == d['run_id'] and candidate.get(MARK + 'ROLE') == 'worker':
                             return public(d, 'blocked', 'reconcile')
-                except FileNotFoundError:
+                except (FileNotFoundError, ProcessLookupError):
                     continue
                 except OSError:
                     return public(d, 'blocked', 'reconcile')
@@ -1988,14 +2159,17 @@ def restart_worker(store, goal=None, test_cmd=None, env=None, proc=None):
             if not precontroller and config_digest(env) != d['fingerprints']['config_sha256']:
                 return public(d, 'blocked', 'fingerprint_mismatch')
             if precontroller:
-                if goal is None:
+                if goal is None and d['authorized']['entrypoint'] == 'run':
                     return public(d, 'blocked', 'inputs_required')
                 a = validate_args(dict(repo=str(repo), ticket=store.ticket, goal=goal, test_cmd=test_cmd,
-                                       tier=d['authorized']['tier'], from_phase=d['authorized']['from_phase']))
-                if (digest(goal) != d['authorized']['goal_sha256'] or
+                                       tier=d['authorized']['tier'], from_phase=d['authorized']['from_phase'],
+                                       entrypoint=d['authorized']['entrypoint'], review_repairs=d['authorized'].get('review_repairs'),
+                                       rounds=d['authorized'].get('rounds')))
+                if (goal_digest(a) != d['authorized']['goal_sha256'] or
                     (digest(test_cmd) if test_cmd is not None else None) != d['authorized']['test_cmd_sha256'] or
                     config_digest(env) != d['fingerprints']['config_sha256'] or
-                    digest(Path(build_argv('orchestrator.run', a)[1]).read_bytes()) != d['fingerprints']['controller']['sha256']):
+                    digest(Path(build_argv('orchestrator.' + a['entrypoint'], a)[1]).read_bytes()) != d['fingerprints']['controller']['sha256'] or
+                    controller_snapshot_digest() != d['fingerprints']['controller'].get('snapshot_sha256')):
                     return public(d, 'blocked', 'fingerprint_mismatch')
                 payload = json.dumps(dict(args=a, env=env)).encode()
             def bump(v):
@@ -2039,6 +2213,8 @@ def cli(args, parser):
         command = args.subcommand
         if command == 'start' or command == 'run':
             result = start(args)
+        elif command == 'resume':
+            result = resume(args)
         elif command == 'status':
             if getattr(args, 'recovery_matrix', False):
                 print(json.dumps(RECOVERY_MATRIX, sort_keys=True) if args.json else '\n'.join(
