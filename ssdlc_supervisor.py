@@ -973,6 +973,10 @@ def start(args, clock=None, fault=None):
                         v.update(status='starting', status_reason='bootstrap')
                     d = store.update(retry, event='launch_retry')
                 else:
+                    if result['status'] in TERMINAL:
+                        # A prior successful handoff belongs to that run, not
+                        # this start request. Record an explicit refusal instead.
+                        return refusal(store)
                     return result
             else:
                 store.run_id = uuid.uuid4().hex
@@ -1062,7 +1066,7 @@ def boot(args):
                 v['pending_events'].append(dict(event_id=f"{v['run_id']}:{v['revision'] + 1}:shim:{args.role}",
                     ts=float(store.clock.time()), type='shim_released', intent=args.intent, role=args.role,
                     gen=args.generation, run_id=v['run_id']))
-            store.update(release, (args.generation, 0), True, locked=True)
+            store.update(release, (args.generation, 0) if args.role == 'worker' else None, True, locked=True)
         if args.role == 'controller':
             payload = json.loads(transfer(args.payload_fd, timeout=d['deadlines']['payload_io_timeout_sec']))
             os.close(args.payload_fd)
@@ -1072,7 +1076,10 @@ def boot(args):
                 raise FencedOut()
             with store.locked():
                 d = store.read()
-                if d['launch_revoked'] or d.get('cancel') or d['worker_generation'] != args.generation:
+                current_intent = intent_for(d, 'controller')
+                if (d['launch_revoked'] or d.get('cancel') or d['status'] in TERMINAL or
+                        not current_intent or current_intent['intent_id'] != args.intent or
+                        current_intent['generation'] != args.generation):
                     raise FencedOut()
             env = payload['env']
             env.update(markers(d, 'controller', args.generation, args.intent))
@@ -2259,6 +2266,11 @@ def restart_worker(store, goal=None, test_cmd=None, env=None, proc=None):
                     if x['role'] == 'worker':
                         x['state'] = 'abandoned'
                 v.update(status='starting' if precontroller else 'running', status_reason='bootstrap' if precontroller else 'observing')
+                if precontroller:
+                    # This generation owns a new preflight-to-controller handoff.
+                    # Preserve recovery allowance/history, but not the old wait.
+                    v['handoff'] = dict(outcome=None, at=None)
+                    v['classification'] = None
             d = store.update(bump, event='adopted', locked=True)
             store.fault.hit('adopt.after_generation_bump_before_spawn')
             _, pipe, _ = spawn(store, 'worker', d['worker_generation'], payload is not None)

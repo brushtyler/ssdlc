@@ -972,5 +972,71 @@ class TestSharedHostBoundaries(CoreCase):
         self.assertEqual(store.read(), before)
         self.assertFalse(proc.signals)
 
+class TestRestartLifecycleRegressions(CoreCase):
+    def test_start_on_terminal_run_records_refusal_not_stale_success(self):
+        store, proc = self.fake_run()
+        for status in ['completed', 'cancelled', 'failed', 'blocked', 'operator_wait']:
+            with self.subTest(status=status):
+                store.update(lambda d: d.update(status=status, status_reason='reconcile'))
+                before = store.read()
+                with patch.object(sup, 'Proc', return_value=proc), patch.object(sup, 'compatibility', return_value={'ok': True}), patch.object(sup, 'spawn', side_effect=AssertionError('duplicate launch')):
+                    out = sup.start(self.args)
+                self.assertEqual(sup.exit_code(out), 14)
+                self.assertEqual(out['handoff']['outcome'], 'blocked')
+                self.assertEqual(store.read(), before)
+        self.assertEqual(len((store.root / store.ticket / 'audit.jsonl').read_text().splitlines()), 5)
+
+    def test_precontroller_restart_resets_handoff_but_preserves_recovery_allowance(self):
+        store, proc = self.fake_run(controller=False)
+        del proc.entries[1001]
+        def waiting(d):
+            d.update(status='operator_wait', status_reason='recovery_exhausted')
+            d['handoff'] = dict(outcome='operator_wait', at=1000.)
+            d['recovery']['used'] = 2
+        store.update(waiting)
+        def spawn(current, role, generation, payload):
+            self.assertEqual(role, 'worker')
+            self.assertIsNone(current.read()['handoff']['outcome'])
+            def publish(d):
+                d['handoff'] = dict(outcome='launched', at=1000.)
+                d.update(status='running', status_reason='launched')
+            current.update(publish, (generation, 0), authority=True, locked=True)
+            return None, None, 'a'*32
+        with patch.object(sup, 'spawn', side_effect=spawn):
+            sup.restart_worker(store, self.args['goal'], proc=proc)
+        d = store.read()
+        self.assertEqual((d['status'], d['handoff']['outcome']), ('running', 'launched'))
+        self.assertEqual(d['worker_generation'], 2)
+        self.assertEqual(d['recovery']['used'], 2)
+
+    def test_unknown_worker_identity_blocks_before_adoption(self):
+        store, proc = self.fake_run()
+        proc.entries[1001][3] = PermissionError()
+        before = store.read()
+        with patch.object(sup, 'spawn', side_effect=AssertionError('unknown worker duplicated')):
+            out = sup.restart_worker(store, proc=proc)
+        self.assertEqual((out['status'], out['status_reason']), ('blocked', 'reconcile'))
+        self.assertEqual(store.read(), before)
+
+    def test_controller_shim_keeps_own_generation_after_worker_replacement(self):
+        import types
+        store, proc = self.fake_run()
+        store.update(lambda d: d.update(worker_generation=2))
+        go_r, go_w = os.pipe()
+        payload_r, payload_w = os.pipe()
+        for fd in [go_r, go_w, payload_r, payload_w]:
+            def close(fd=fd):
+                with contextlib.suppress(OSError): os.close(fd)
+            self.addCleanup(close)
+        os.write(go_w, b'GO')
+        args = types.SimpleNamespace(repo=str(self.repo), ticket='T-1', run_id=store.run_id,
+            role='controller', generation=1, intent='b'*32, go_fd=go_r, payload_fd=payload_r, shim_ttl=1)
+        payload = dict(args=self.args, env=sup.build_project_env(self.repo, os.environ))
+        with patch.object(sup, 'transfer', return_value=json.dumps(payload).encode()), patch.object(sup.os, 'execve', side_effect=RuntimeError('exec intercepted')) as execute:
+            sup.boot(args)
+        execute.assert_called_once()
+        self.assertEqual(execute.call_args.args[2][sup.MARK+'GEN'], '1')
+        self.assertEqual(store.read()['worker_generation'], 2)
+
 if __name__ == '__main__':
     unittest.main()

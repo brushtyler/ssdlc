@@ -200,7 +200,7 @@ def _supervised_preflight():
               sup.config_digest(env) == env['SSDLC_SUPERVISED_CONFIG_SHA'] and
               launch['intent_id'] == env['SSDLC_SUPERVISED_INTENT'] and
               launch['generation'] == int(env['SSDLC_SUPERVISED_GEN']) and
-              d['worker_generation'] == launch['generation'] and not d['launch_revoked'] and not d['cancel'])
+              launch['state'] == 'published' and not d['launch_revoked'] and not d['cancel'])
         if ok:
             return True
     except (OSError, ValueError, KeyError, TypeError, TaskError, subprocess.SubprocessError, sup.SupervisorIntegrityError):

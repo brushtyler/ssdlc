@@ -422,6 +422,17 @@ class TestFrozenActivationAndPreflight(Case):
             o.ProjectRuntimeIsolation(self.repo).activate()
             self.assertEqual(os.environ['PRIVATE'], 'frozen')
 
+    def test_controller_preflight_keeps_launch_generation_after_worker_adoption(self):
+        store, proc = self.live()
+        markers = hook_environment(store)
+        store.update(lambda d: d.update(worker_generation=2))
+        with patch.dict(os.environ, dict(self.env, **markers), clear=True):
+            self.assertTrue(o._supervised_preflight())
+            with patch.dict(os.environ, {'SSDLC_SUPERVISED_GEN': '2'}):
+                self.assertFalse(o._supervised_preflight())
+            store.update(lambda d: d.update(launch_revoked=True))
+            self.assertFalse(o._supervised_preflight())
+
     def test_preflight_frozen_snapshot_config_and_currency_no_canonical_write(self):
         store, proc = self.live()
         markers = hook_environment(store)

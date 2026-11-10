@@ -296,8 +296,9 @@ class TestCrashRecoveryT3(CoreCase):
         self.assertEqual(s.verify(leader, d['nonce'], 'worker', launch['generation'], intent_id=launch['intent_id'], run_id=d['run_id']), s.OWNED)
         os.kill(leader['pid'], signal.SIGKILL)
         deadline = time.monotonic() + 3
-        while s.identity_state(store.read(), 'worker') == s.OWNED and time.monotonic() < deadline:
+        while s.identity_state(store.read(), 'worker') != s.GONE and time.monotonic() < deadline:
             time.sleep(.01)
+        self.assertEqual(s.identity_state(store.read(), 'worker'), s.GONE)
         # This real-helper test controls only its two child processes. A shared
         # host can contain unrelated same-uid non-dumpable processes; the production
         # all-process scan intentionally refuses adoption in that environment.

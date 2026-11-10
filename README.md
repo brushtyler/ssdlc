@@ -889,7 +889,8 @@ python3 orchestrator.py resume --ticket T-1 --entrypoint design --rounds 4 --rep
 Pre-controller restart requires operator resupply of `--goal` or `--goal-file`
 and the original `--test-cmd`, if supplied. Raw inputs exist only in the launch
 payload pipe and process memory. They cannot be recovered from a fingerprint.
-Resume starts a new run linked by `resumes`; supported transitions are run from
+A repeated `start` on a terminal run records a refusal (exit 14); use an explicit
+supported resume rather than reusing its old handoff. Resume starts a new run linked by `resumes`; supported transitions are run from
 00-recon or 03-dev, plan before execution, and design before planning or execution.
 Upstream approvals, sealed artifact hashes and baseline compatibility still apply.
 Unsupported resume adds one audit event and creates no run or canonical state.
