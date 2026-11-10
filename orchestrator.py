@@ -40,6 +40,7 @@ from ssdlc_design import DesignSession
 from ssdlc_gate_reports import (GateEvaluator, EvaluationRequest, GateTerminalError,
     build_trusted_context, fingerprint, UNTRUSTED_DATA_INSTRUCTION, untrusted_data,
     ProtocolError, ScannerResult, scanner_status_json, discover_manifest_scopes, write_or_verify, canon)
+import ssdlc_gate_reports as candidate_reports
 import ssdlc_bounce as bounce
 from ssdlc_bounce import request_identity
 from ssdlc_catalogues import CatalogueError, requirement_catalogue
@@ -1697,6 +1698,7 @@ class SSDLCOrchestrator:
         sync_remote: Optional[bool] = None,
         issue_id: Optional[int] = None,
     ):
+        self._registry_lock = threading.RLock()
         self._gate_terminal = None
         self.repo_root = repo_root.resolve()
         self.isolation = ProjectRuntimeIsolation(self.repo_root)
@@ -2043,6 +2045,177 @@ class SSDLCOrchestrator:
         self.record_artifact("02-design/plan.json", plan_path)
         self.record_gate("TASK_PLAN_GATE", True, "Validated plan and independent semantic review")
         return plan
+
+    def _candidate_fault(self, point):
+        """Inert persistence-boundary hook for offline crash tests."""
+
+    def _register_new(self, ref, path):
+        with self._registry_lock:
+            meta = self.state.get('artifacts', {}).get(ref)
+            if meta:
+                if not path.is_file() or file_hash(path) != meta['sha256']:
+                    raise TaskError('Retained evidence artifact missing or changed')
+            else:
+                self.record_artifact(ref, path)
+
+    def _controller_revision(self):
+        ref = '00-recon/controller-contract.json'
+        try:
+            data = candidate_reports._candidate_read(self.ssdlc_root, ref, 'record')
+            if hashlib.sha256(data).hexdigest() != self.state['artifacts'][ref]['sha256']:
+                raise ValueError()
+            snapshot = json.loads(data)
+            assert_controller(Path(__file__).resolve().parent, snapshot)
+            return {k: snapshot[k] for k in ('head', 'files_sha256')}
+        except (TaskError, candidate_reports.ProtocolError, OSError, ValueError, KeyError):
+            raise GateTerminalError('integrity_blocked', '', 'controller_unavailable')
+
+    def _verification_environment(self, argv):
+        container = EngineRunner._should_spawn_role_container()
+        result = dict(mode='role_container' if container else 'local', platform=sys.platform, reuse_eligible=True)
+        try:
+            if container:
+                probe = subprocess.run(['docker', 'image', 'inspect', '--format', '{{.Id}}', EngineRunner.IMAGE_NAME],
+                                       capture_output=True, text=True, timeout=30)
+                if probe.returncode or not re.fullmatch(r'sha256:[0-9a-f]{64}', probe.stdout.strip()):
+                    raise ValueError()
+                result.update(image_name=EngineRunner.IMAGE_NAME, image_id=probe.stdout.strip(),
+                              limits=dict(pids=os.environ.get('SSDLC_CONTAINER_PIDS_LIMIT', '1024'),
+                                          memory=os.environ.get('SSDLC_CONTAINER_MEMORY', '4g'),
+                                          cpus=os.environ.get('SSDLC_CONTAINER_CPUS', '2')),
+                              no_new_privileges=True,
+                              verification_env=dict(PYTEST_ADDOPTS_base=os.environ.get('PYTEST_ADDOPTS', '')))
+            else:
+                tool = shutil.which(argv[0])
+                if not tool or not Path(tool).is_file():
+                    raise ValueError()
+                names = ('PATH', 'PYTHONPATH', 'PYTHONHASHSEED', 'VIRTUAL_ENV', 'NODE_OPTIONS',
+                         'NODE_PATH', 'LANG', 'LC_ALL', 'CI')
+                result.update(python=dict(version=sys.version, executable_sha256=file_hash(Path(sys.executable))),
+                              tool=dict(argv0=argv[0], resolved_realpath=str(Path(tool).resolve()), sha256=file_hash(Path(tool))),
+                              env=dict({k: os.environ[k] for k in names if k in os.environ},
+                                       PYTEST_ADDOPTS_base=os.environ.get('PYTEST_ADDOPTS', '')))
+        except (OSError, ValueError, subprocess.SubprocessError):
+            result.update(reuse_eligible=False, reason='environment_identity_unavailable')
+        return result
+
+    def _candidate_privilege(self, wt):
+        out, err, rc = EngineRunner.run_sandboxed_cmd(['id', '-u'], wt, 30)
+        if rc != 0 or re.fullmatch(r'[0-9]+', out.strip()) is None:
+            raise GateTerminalError('integrity_blocked', '', 'privilege_probe_malformed')
+        return 'root' if int(out.strip()) == 0 else 'non-root'
+
+    def _collect_candidate_evidence(self, gate, attempt, wt, quality):
+        cr = candidate_reports
+        if not cr.convergence_enabled(quality):
+            return cr.CandidateEvidence(quality=quality)
+        checks = [c for c in quality['checks'] if c.get('required') and c.get('candidate_proof') is True]
+        if len(checks) > cr.MAX_CANDIDATE_CHECKS:
+            raise GateTerminalError('integrity_blocked', '', 'too_many_candidate_checks')
+        with self._registry_lock:
+            cr.reconcile_candidate_store(self.ssdlc_root, self.state['artifacts'], self._register_new)
+        privilege = self._candidate_privilege(wt)
+        source = dict(commit=git(wt, 'rev-parse', 'HEAD'), tree=git(wt, 'rev-parse', 'HEAD^{tree}'))
+        if source['commit'] != self.state['task_verified_head'] or git(wt, 'status', '--porcelain'):
+            raise GateTerminalError('integrity_blocked', '', 'candidate_source_unverified')
+        for check in checks:
+            if len(list((self.ssdlc_root / 'candidate-evidence/records').glob(check['check_id'] + '-*'))) > cr.MAX_RECORD_FILES_PER_CHECK:
+                raise GateTerminalError('integrity_blocked', check['check_id'], 'record_store_overflow')
+        snapshot_ref = f'candidate-evidence/catalogue/{gate}-attempt-{attempt}.json'
+        snapshot_path = confined(self.ssdlc_root, snapshot_ref, protect=False)
+        if snapshot_path.exists():
+            try:
+                data = cr._candidate_read(self.ssdlc_root, snapshot_ref, 'record')
+                if cr._digest(data) != self.state['artifacts'][snapshot_ref]['sha256']:
+                    raise ValueError()
+                snapshot = json.loads(data)
+                if cr._digest(snapshot['block'].encode()) != snapshot['block_sha256']:
+                    raise ValueError()
+                retained = []
+                for check in checks:
+                    ref = snapshot['record_refs'][check['check_id']]
+                    expected = dict(source=source, controller=self._controller_revision(),
+                                    quality_contract_sha256=self.state['artifacts']['00-recon/quality-contract.json']['sha256'],
+                                    check={k: check[k] for k in ('check_id', 'argv', 'cwd', 'timeout_sec')},
+                                    environment=self._verification_environment(check['argv']), privilege_mode=privilege)
+                    record, rejection = cr.verify_candidate_record(self.ssdlc_root, ref, expected, self.state['artifacts'])
+                    if rejection:
+                        raise ValueError()
+                    retained.append(record)
+                result = cr.candidate_catalogue(self.ssdlc_root, quality, retained, [], self.state['artifacts'])
+                if result.controls != snapshot['controls']:
+                    raise ValueError()
+                result.block = snapshot['block']
+                result.decisions = snapshot['decisions']
+                return result
+            except (KeyError, ValueError, cr.ProtocolError):
+                raise GateTerminalError('integrity_blocked', '', 'candidate_snapshot_mismatch')
+        records, rejected, decisions = [], [], []
+        for check in sorted(checks, key=lambda c: c['check_id']):
+            command = {k: check[k] for k in ('check_id', 'argv', 'cwd', 'timeout_sec')}
+            expected = dict(source=source, controller=self._controller_revision(),
+                            quality_contract_sha256=self.state['artifacts']['00-recon/quality-contract.json']['sha256'],
+                            check=command, environment=self._verification_environment(check['argv']), privilege_mode=privilege)
+            paths = sorted((self.ssdlc_root / 'candidate-evidence/records').glob(check['check_id'] + '-*'))
+            if len(paths) > cr.MAX_RECORD_FILES_PER_CHECK:
+                raise GateTerminalError('integrity_blocked', check['check_id'], 'record_store_overflow')
+            accepted, considered = [], []
+            for path in paths:
+                ref = str(path.relative_to(self.ssdlc_root))
+                record, rejection = cr.verify_candidate_record(self.ssdlc_root, ref, expected, self.state['artifacts'])
+                if rejection:
+                    rejection = dict(record_id=path.stem[-32:], code=rejection['code'], fields=rejection['fields'])
+                    rejected.append(rejection)
+                    considered.append(cr.canon(rejection).decode()[:300])
+                else:
+                    accepted.append(record)
+            if len({r['result']['status'] for r in accepted}) > 1:
+                raise GateTerminalError('integrity_blocked', '', 'conflicting_records')
+            reuse = bool(accepted and expected['environment']['reuse_eligible'])
+            if reuse:
+                record = min(accepted, key=lambda r: (r['provenance']['produced_at'], r['record_id']))
+            else:
+                self._candidate_fault('evidence.before_check')
+                try:
+                    out, err, rc = EngineRunner.run_sandboxed_cmd(check['argv'], confined(wt, check['cwd']), check['timeout_sec'])
+                except subprocess.TimeoutExpired:
+                    out, err, rc = '', 'Check timed out', 124
+                self._candidate_fault('evidence.after_check_before_log')
+                self._controller_revision()
+                if source != dict(commit=git(wt, 'rev-parse', 'HEAD'), tree=git(wt, 'rev-parse', 'HEAD^{tree}')) or git(wt, 'status', '--porcelain'):
+                    raise GateTerminalError('integrity_blocked', check['check_id'], 'source_mutated_during_check')
+                nonce = uuid.uuid4().hex
+                ref = f"candidate-evidence/records/{check['check_id']}-{nonce}.json"
+                log_ref = f'candidate-evidence/logs/{nonce}.log'
+                raw = (out + '\n' + err).encode()
+                log = raw[-cr.LOG_STORE_MAX_BYTES:]
+                empty = test_suite_is_empty(out, err)
+                body = dict(expected, schema_version='1.0', kind='candidate_check_record', run_nonce=nonce,
+                            result=dict(exit_code=rc, timed_out=rc == 124, empty_suite=empty,
+                                        status='passed' if rc == 0 and not empty else 'failed'),
+                            log=dict(ref=log_ref, sha256=hashlib.sha256(log).hexdigest(), stored_bytes=len(log),
+                                     total_bytes=len(raw), truncated=len(raw) != len(log)),
+                            provenance=dict(producer='orchestrator._collect_candidate_evidence', produced_at=utc_now(),
+                                            artifact_path=ref, gate=gate, attempt=attempt))
+                record = cr.register_candidate_record(self.ssdlc_root, body, log, self._register_new, self._candidate_fault)
+            records.append(record)
+            decision = dict(schema_version='1.0', kind='candidate_evidence_decision', gate=gate, attempt=attempt,
+                            check_id=check['check_id'], decision='reused' if reuse else 'executed',
+                            record_id=record['record_id'], binding_sha256=hashlib.sha256(canon(expected)).hexdigest(),
+                            considered=considered, considered_total=len(paths))
+            if not expected['environment']['reuse_eligible']:
+                decision['declined'] = 'environment_identity_unavailable'
+            ref = 'candidate-evidence/decisions/' + hashlib.sha256(canon(decision)).hexdigest()[:32] + '.json'
+            write_or_verify(self.ssdlc_root / ref, canon(decision), root=self.ssdlc_root)
+            self._register_new(ref, self.ssdlc_root / ref)
+            decisions.append(decision)
+        result = cr.candidate_catalogue(self.ssdlc_root, quality, records, rejected, self.state['artifacts'])
+        result.decisions = decisions
+        snapshot = dict(block=result.block, block_sha256=cr._digest(result.block.encode()), controls=result.controls,
+                        decisions=decisions, record_refs={r['check']['check_id']: r['provenance']['artifact_path'] for r in records})
+        write_or_verify(snapshot_path, canon(snapshot), root=self.ssdlc_root)
+        self._register_new(snapshot_ref, snapshot_path)
+        return result
 
     def _ensure_controller_contract(self) -> dict:
         """Persist the host baseline before planning/development, never inside a task."""

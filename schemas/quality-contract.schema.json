@@ -120,6 +120,9 @@
           },
           "required": {
             "const": true
+          },
+          "candidate_proof": {
+            "type": "boolean"
           }
         },
         "required": [

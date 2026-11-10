@@ -692,3 +692,203 @@ def discover_manifest_scopes(wt):
         if scanner:
             scopes[scanner].setdefault(path.parent.as_posix(), set()).add(path.name)
     return scopes
+
+# Candidate evidence is data only; these controls can only restrict a gate.
+MAX_CANDIDATE_CHECKS = 32
+MAX_RECORD_FILES_PER_CHECK = 16
+REJECTED_SHOWN_MAX = 20
+CATALOGUE_METADATA_MAX_CHARS = 48000
+LOG_STORE_MAX_BYTES = 1024 * 1024
+LOG_EXCERPT_MAX_CHARS = 4000
+LOG_EXCERPTS_MAX_CHARS = 24000
+CANDIDATE_EVIDENCE_NOTE = ('Candidate check results below are host-collected, hash-verified data about this exact candidate; '
+                           'evidence produced by later phases is not required for this review.')
+
+
+def convergence_enabled(quality):
+    return any(c.get('required') and c.get('candidate_proof') is True for c in quality.get('checks', []))
+
+
+@dataclass
+class CandidateEvidence:
+    entries: list = field(default_factory=list)
+    block: str = ''
+    controls: dict = field(default_factory=dict)
+    records: list = field(default_factory=list)
+    decisions: list = field(default_factory=list)
+    unmet: list = field(default_factory=list)
+    quality: dict = field(default_factory=dict)
+
+
+def _candidate_read(root, ref, prefix):
+    import stat
+    if not isinstance(ref, str) or Path(ref).is_absolute() or '..' in Path(ref).parts:
+        raise ProtocolError(prefix + '_path_unsafe', '')
+    try:
+        path = _artifact_path(Path(root) / ref, root)
+    except (TaskError, OSError, ValueError):
+        raise ProtocolError(prefix + '_path_unsafe', '')
+    if not path.is_file():
+        raise ProtocolError(prefix + '_missing', '')
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or not info.st_mode & 0o444:
+                raise OSError('Unreadable artifact')
+            limit = LOG_STORE_MAX_BYTES if prefix == 'log' else 131072
+            data = stream.read(limit + 1)
+            if len(data) > limit:
+                raise OSError('Artifact too large')
+            return data
+    except OSError:
+        raise ProtocolError(prefix + '_unreadable', '')
+
+
+def candidate_record_id(record):
+    return _digest(canon({k: v for k, v in record.items() if k != 'record_id'}))[:32]
+
+
+def _candidate_identity(record, ref):
+    nonce = record['run_nonce']
+    return (record['record_id'] == candidate_record_id(record)
+            and ref == f"candidate-evidence/records/{record['check']['check_id']}-{nonce}.json"
+            and record['provenance']['artifact_path'] == ref)
+
+
+def verify_candidate_record(root, ref, expected, artifacts):
+    from ssdlc_tasks import validate_document
+    try:
+        data = _candidate_read(root, ref, 'record')
+        if ref not in artifacts:
+            raise ProtocolError('record_unregistered', '')
+        if _digest(data) != artifacts[ref]['sha256']:
+            raise ProtocolError('record_hash_mismatch', '')
+        try:
+            record = json.loads(data, object_pairs_hook=_pairs)
+            validate_document('candidate-evidence', record)
+        except Exception:
+            raise ProtocolError('record_malformed', '')
+        result = record['result']
+        if (result['status'] == 'passed') != (result['exit_code'] == 0 and not result['empty_suite']):
+            raise ProtocolError('record_malformed', '')
+        if not _candidate_identity(record, ref):
+            raise ProtocolError('record_id_mismatch', '')
+        dimensions = [('source.commit', 'stale_source_commit'), ('source.tree', 'stale_source_tree'),
+                      ('controller', 'controller_mismatch'), ('quality_contract_sha256', 'contract_mismatch'),
+                      ('check', 'command_mismatch'), ('environment', 'environment_mismatch'),
+                      ('privilege_mode', 'privilege_mismatch')]
+        def value(obj, key):
+            for part in key.split('.'):
+                obj = obj[part]
+            return obj
+        differences = [(key, code) for key, code in dimensions if value(record, key) != value(expected, key)]
+        if differences:
+            return None, dict(code=differences[0][1], field=differences[0][0],
+                              fields=[key for key, _ in differences])
+        log = _candidate_read(root, record['log']['ref'], 'log')
+        meta = artifacts.get(record['log']['ref'])
+        if not meta or _digest(log) != meta['sha256'] or _digest(log) != record['log']['sha256']:
+            raise ProtocolError('log_hash_mismatch', '')
+        return record, None
+    except ProtocolError as exc:
+        return None, dict(code=exc.code, field=ref[:200], fields=[ref[:200]])
+
+
+def register_candidate_record(root, body, log, register, fault=lambda point: None):
+    body = dict(body)
+    body['record_id'] = candidate_record_id(body)
+    log_ref, ref = body['log']['ref'], body['provenance']['artifact_path']
+    write_or_verify(Path(root) / log_ref, log, root=root)
+    fault('evidence.after_log_before_record')
+    write_or_verify(Path(root) / ref, canon(body), root=root)
+    fault('evidence.after_record_before_register')
+    register(log_ref, Path(root) / log_ref)
+    register(ref, Path(root) / ref)
+    fault('evidence.after_register_before_decision')
+    return body
+
+
+def reconcile_candidate_store(root, artifacts, register):
+    """Verify the retained inventory before adopting any crash leftovers."""
+    from ssdlc_tasks import validate_document
+    root = Path(root)
+    for ref, meta in list(artifacts.items()):
+        if ref.startswith('candidate-evidence/'):
+            try:
+                data = _candidate_read(root, ref, 'log' if ref.endswith('.log') else 'record')
+                if _digest(data) != meta['sha256']:
+                    raise ValueError()
+            except (ProtocolError, ValueError, KeyError):
+                raise TaskError('Retained evidence artifact missing or changed')
+    pending = []
+    for directory in ('records', 'logs'):
+        base = root / 'candidate-evidence' / directory
+        if not base.exists():
+            continue
+        for path in sorted(base.iterdir()):
+            if path.name.startswith('.gate-') or path.name == 'store.lock':
+                continue
+            ref = str(path.relative_to(root))
+            if ref in artifacts:
+                continue
+            data = _candidate_read(root, ref, 'record' if directory == 'records' else 'log')
+            if directory == 'records':
+                try:
+                    obj = json.loads(data, object_pairs_hook=_pairs)
+                    validate_document('candidate-evidence', obj)
+                    if not _candidate_identity(obj, ref):
+                        raise ValueError()
+                    log = _candidate_read(root, obj['log']['ref'], 'log')
+                    if _digest(log) != obj['log']['sha256']:
+                        raise ValueError()
+                except Exception as exc:
+                    raise TaskError('Unregistered candidate record identity mismatch') from exc
+                pending.append((ref, path))
+                pending.append((obj['log']['ref'], root / obj['log']['ref']))
+            # Orphan logs are deliberately inert, never proof.
+    for ref, path in pending:
+        register(ref, path)
+
+
+def candidate_catalogue(root, quality, records, rejected, artifacts):
+    if len([c for c in quality['checks'] if c.get('required') and c.get('candidate_proof') is True]) > MAX_CANDIDATE_CHECKS:
+        raise GateTerminalError('integrity_blocked', '', 'too_many_candidate_checks')
+    proof, entries, omitted = [], [], []
+    remaining = LOG_EXCERPTS_MAX_CHARS
+    for record in sorted(records, key=lambda r: r['check']['check_id']):
+        check = record['check']['check_id']
+        ref, log_ref = record['provenance']['artifact_path'], record['log']['ref']
+        excerpt = _candidate_read(root, log_ref, 'log').decode(errors='replace')[-LOG_EXCERPT_MAX_CHARS:]
+        if len(excerpt) > remaining:
+            excerpt = ''
+            omitted.append(check)
+        remaining -= len(excerpt)
+        proof.append(dict(check_id=check, record_ref=ref, record_sha256=artifacts[ref]['sha256'],
+                          status=record['result']['status'], exit_code=record['result']['exit_code'],
+                          privilege_mode=record['privilege_mode'], environment_sha256=_digest(canon(record['environment'])),
+                          log_ref=log_ref, log_sha256=record['log']['sha256'], log_excerpt=excerpt))
+        entries.extend(dict(ref=f'ev/{kind}/{check}', source=str(Path(root) / path),
+                            registered_hash=artifacts[path]['sha256'])
+                       for kind, path in [('candidate', ref), ('candidate-log', log_ref)])
+    required = {c['check_id'] for c in quality['checks'] if c.get('required') and c.get('candidate_proof') is True}
+    unmet = sorted(required - {r['check_id'] for r in proof})
+    baseline = []
+    for item in quality.get('baseline', []):
+        verified = False
+        try:
+            verified = _digest(_candidate_read(root, item['log_ref'], 'log')) == item['sha256']
+        except ProtocolError:
+            pass
+        baseline.append(dict(check_id=item['check_id'], exit_code=item['exit_code'], log_digest_verified=verified))
+    block = dict(historical_baseline=baseline, candidate_proof=proof, unmet=unmet,
+                 rejected=rejected[:REJECTED_SHOWN_MAX], rejected_total=len(rejected),
+                 rejected_omitted=max(0, len(rejected)-REJECTED_SHOWN_MAX),
+                 rejected_index_sha256=_digest(canon(rejected)), limits=dict(excerpt_omitted=omitted))
+    metadata = dict(block, candidate_proof=[{k: v for k, v in p.items() if k != 'log_excerpt'} for p in proof])
+    if len(canon(metadata).decode()) > CATALOGUE_METADATA_MAX_CHARS:
+        raise GateTerminalError('integrity_blocked', '', 'catalogue_overflow')
+    controls = dict(candidate_checks='unmet' if unmet else
+                    'failed' if any(p['status'] != 'passed' for p in proof) else 'passed')
+    return CandidateEvidence(entries, untrusted_data('candidate evidence catalogue', block), controls,
+                             records, [], unmet, {k: v for k, v in quality.items() if k != 'baseline'})
