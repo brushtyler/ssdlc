@@ -4039,6 +4039,28 @@ def main(argv=None) -> int:
         help="Link run to an existing remote Issue number",
     )
 
+    # Additive detached lifecycle commands; legacy foreground dispatch stays below.
+    p_run.add_argument('--detach', action='store_true', help='Hand off to the local supervisor')
+    p_run.add_argument('--json', action='store_true', help='Structured supervisor result')
+    p_run.add_argument('--recovery-allowance', default='3')
+    p_start = sub.add_parser('start', help='Start a detached, locally supervised run')
+    p_start.add_argument('--ticket', '-t', required=True)
+    p_start.add_argument('--goal', '-g', required=True)
+    p_start.add_argument('--tier', default='auto', choices=['auto', 'S', 'M', 'L'])
+    p_start.add_argument('--repo', '-r', default='.')
+    p_start.add_argument('--test-cmd')
+    p_start.add_argument('--from-phase', default='00-recon', choices=['00-recon', '03-dev'])
+    p_start.add_argument('--recovery-allowance', default='3')
+    p_start.add_argument('--json', action='store_true')
+    for command in ('status', 'cancel'):
+        p_lifecycle = sub.add_parser(command, help=command + ' a supervised run')
+        p_lifecycle.add_argument('--ticket', required=True)
+        p_lifecycle.add_argument('--repo', '-r', default='.')
+        p_lifecycle.add_argument('--run-id')
+        p_lifecycle.add_argument('--json', action='store_true')
+        if command == 'cancel':
+            p_lifecycle.add_argument('--grace', type=float, default=5)
+
     p_plan = sub.add_parser("plan", help="Resume task planning using approved requirements and design only")
     p_plan.add_argument("--ticket", required=True)
     p_plan.add_argument("--repo", "-r", default=".")
@@ -4080,6 +4102,9 @@ def main(argv=None) -> int:
     p_preview.add_argument('--attempt', required=True, type=int)
 
     args = parser.parse_args(argv)
+    if args.subcommand in {'start', 'status', 'cancel'} or (args.subcommand == 'run' and args.detach):
+        import ssdlc_supervisor
+        return ssdlc_supervisor.cli(args, parser)
     repo_path = Path(getattr(args, "repo", ".")).resolve()
 
     if args.subcommand == 'bounce-preview':
