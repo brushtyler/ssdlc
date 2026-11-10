@@ -856,5 +856,53 @@ class TestLifecycleObservationBoundaries(CoreCase):
         self.assertEqual(out['cancellation_state'], 'done')
         self.assertFalse(proc.entries)
 
+class TestReviewDiagnosisRegressions(CoreCase):
+    def test_whole_run_deadline_requires_explicit_authorization(self):
+        env = {'SSDLC_DEV_TIMEOUT': '1', 'SSDLC_MAX_DEV_RETRIES': '1', 'SSDLC_MAX_DESIGN_ROUNDS': '1'}
+        self.assertIsNone(sup.configured_hard_deadline(env, 1000))
+        env['SSDLC_SUPERVISOR_HARD_TIMEOUT'] = '120'
+        self.assertEqual(sup.configured_hard_deadline(env, 1000), 1120.)
+        for value in ['0', '-1', 'invalid']:
+            env['SSDLC_SUPERVISOR_HARD_TIMEOUT'] = value
+            with self.assertRaises(ValueError):
+                sup.configured_hard_deadline(env, 1000)
+
+    def test_ambient_environment_is_pinned_as_required_by_adr(self):
+        env = {'PATH': '/fixture', 'TERM': 'xterm', 'OLDPWD': '/first'}
+        self.assertEqual(sup.config_digest(env), sup.config_digest(dict(env, PWD='/noise', SHLVL='4', _='noise')))
+        for key in ['TERM', 'OLDPWD', 'SSH_AUTH_SOCK']:
+            self.assertNotEqual(sup.config_digest(env), sup.config_digest(dict(env, **{key: 'changed'})))
+
+    def test_repeated_start_reports_live_owned_run_before_new_run_compatibility(self):
+        store, proc = self.fake_run()
+        before = store.read()
+        with patch.object(sup, 'Proc', return_value=proc), patch.object(sup, 'compatibility', side_effect=AssertionError('new run compatibility called')), patch.object(sup, 'spawn', side_effect=AssertionError('duplicate launch')):
+            out = sup.start(self.args)
+        self.assertEqual((out['status'], out['status_reason']), ('already_running', 'already_running'))
+        self.assertEqual(store.read(), before)
+        self.assertFalse((store.root / store.ticket / 'audit.jsonl').exists())
+
+    def check_monitor_cancel_race(self, expired):
+        store, proc = self.fake_run()
+        if expired:
+            store.update(lambda d: d['deadlines'].update(hard_deadline=999.))
+        saved = []
+        def inject(point):
+            if point == 'classify.before_persist':
+                sup.cancel(self.repo, 'T-1', run_id=store.run_id, grace=0, clock=self.clock, proc=proc)
+                saved.append(store.read())
+        store.fault.hit = inject
+        out = sup.monitor_tick(store, {'SSDLC_EXECUTION_MODE': 'native'}, proc=proc)
+        self.assertEqual(out['status'], 'cancelled')
+        self.assertEqual(out['cancellation_state'], 'done')
+        self.assertEqual(store.read(), saved[0])
+        self.assertFalse(proc.entries)
+
+    def test_cli_monitor_cannot_overwrite_concurrent_cancel(self):
+        self.check_monitor_cancel_race(False)
+
+    def test_stale_deadline_observation_cannot_overwrite_concurrent_cancel(self):
+        self.check_monitor_cancel_race(True)
+
 if __name__ == '__main__':
     unittest.main()

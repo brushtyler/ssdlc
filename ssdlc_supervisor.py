@@ -915,6 +915,16 @@ def start(args, clock=None, fault=None):
     payload = json.dumps(dict(args=a, env=build_project_env(a['repo'], os.environ))).encode()
     if len(payload) > 1048576:
         raise ValueError('inputs_too_large')
+    # A repeated start observes an owned live run before reconsidering the
+    # compatibility of a *new* run. Its journal may have advanced since launch.
+    if not a.get('_resumes'):
+        try:
+            existing = store.current()
+        except FileNotFoundError:
+            existing = None
+        if existing is not None and view(existing)['status'] in {'running', 'starting'}:
+            if any(identity_state(existing, role) == OWNED for role in ('worker', 'controller')):
+                return public(existing, 'already_running', 'already_running')
     if not compatibility(a, build_project_env(a['repo'], os.environ))['ok']:
         return refusal(store)
     store.fault.hit('lock.before_acquire')
@@ -1104,13 +1114,9 @@ def worker(store, args):
         store.handoff('blocked', 'fingerprint_mismatch', args.generation)
         return 11
     # The worker receives only markers at exec; frozen inputs stay in memory.
-    limits = configured_limits(payload['env'])
     def deadlines(v):
         if v['deadlines']['hard_deadline'] is None:
-            seconds = int(payload['env'].get('SSDLC_SUPERVISOR_HARD_TIMEOUT',
-                str(limits['SSDLC_DEV_TIMEOUT'] * limits['SSDLC_MAX_DEV_RETRIES'] +
-                    limits['SSDLC_DEV_TIMEOUT'] * limits['SSDLC_MAX_DESIGN_ROUNDS'])))
-            v['deadlines']['hard_deadline'] = float(store.clock.time() + seconds)
+            v['deadlines']['hard_deadline'] = configured_hard_deadline(payload['env'], store.clock.time())
     store.update(deadlines, (args.generation, 0))
     if not preflight_loop(store, payload['env'], args.generation):
         return 10
@@ -1755,6 +1761,18 @@ def terminal_outcome(events):
                            failures[-1] if failures else None, len(dispatches))
 
 
+def configured_hard_deadline(env, now):
+    # Per-call dev timeouts do not bound a complete multi-task pipeline. Only
+    # an explicitly configured run timeout authorizes deadline cancellation.
+    value = env.get('SSDLC_SUPERVISOR_HARD_TIMEOUT')
+    if value is None:
+        return None
+    seconds = int(value)
+    if seconds <= 0:
+        raise ValueError('invalid_hard_timeout')
+    return float(now + seconds)
+
+
 def configured_limits(env):
     return {key: int(env.get(key, default)) for key, default in (
         ('SSDLC_MAX_DEV_RETRIES', '3'), ('SSDLC_MAX_DESIGN_ROUNDS', '5'), ('SSDLC_DEV_TIMEOUT', '2400'))}
@@ -2073,6 +2091,10 @@ def monitor_tick(store, env, proc=None, docker=None, generation=None):
     # run_ended event is considered on the next tick, never half of this one.
     observed = observed_status(store, d, proc, env, events_snapshot=(events, malformed))
     def save(v):
+        # CLI observers have no generation fence. Do not overwrite a newer
+        # cancellation, terminal result or replacement worker with this snapshot.
+        if v.get('cancel') or v['status'] in TERMINAL or v['worker_generation'] != d['worker_generation']:
+            raise FencedOut()
         v['heartbeat'] = hb
         v['processes']['descendants'] = descendants
         v['containers'] = containers
@@ -2092,7 +2114,13 @@ def monitor_tick(store, env, proc=None, docker=None, generation=None):
     if observed['status'] == 'completed':
         store.fault.hit('complete.observed_before_state')
     store.fault.hit('classify.before_persist')
-    result = store.update(save, (generation, 0) if generation else None, event='heartbeat')
+    try:
+        result = store.update(save, (generation, 0) if generation else None, event='heartbeat')
+    except FencedOut:
+        if generation is not None:
+            raise
+        current = store.read()
+        return status_fields(current, view(current, proc), store.clock.time())
     if expired:
         # A hard deadline authorizes only the existing, ownership-checked cleanup.
         # Persist failure first so cancellation cannot replace the limits outcome.

@@ -895,7 +895,13 @@ Upstream approvals, sealed artifact hashes and baseline compatibility still appl
 Unsupported resume adds one audit event and creates no run or canonical state.
 Changed goal, tier, test command, environment or controller fingerprints block
 resume; `--reauthorize-fingerprints` records an explicit audited authorization.
-That flag never overrides transition compatibility or approvals.
+That flag never overrides transition compatibility or approvals. The approved
+configuration digest covers the whole effective environment, excluding only
+reserved supervisor markers, `PWD`, `SHLVL` and `_`. A different shell's `TERM`,
+`OLDPWD` or `SSH_AUTH_SOCK` can therefore block adoption. Restart from the same
+effective environment; there is no reauthorization while adopting a live
+controller. A changed environment requires explicit reconciliation and, once the
+old controller is gone, a supported resume with audited reauthorization.
 
 The goal and ticket prose are inert argv data. `--test-cmd` has different authority:
 it is an operator-authorized executable verification command, executed by the
@@ -920,7 +926,10 @@ later open or raised invocation. Diagnostics U1–U7 report missing, ambiguous o
 unbound evidence. Limits exhaustion and code_defect exhaustion are distinct:
 a budget/deadline/resource cap is a limit, while failed task checks exhaust code
 repair attempts. Legacy development is never classified as code_defect. Quiet
-output alone does not mean a stalled controller. An adopted controller requires
+output alone does not mean a stalled controller. No whole-run hard deadline is
+inferred from per-call development timeouts. To authorize one, explicitly set
+`SSDLC_SUPERVISOR_HARD_TIMEOUT` to a positive number of seconds; otherwise the
+run remains bounded by its existing per-call limits, retry allowances and budget. An adopted controller requires
 intent-bound `run_ended(exit_code=0)` plus the entrypoint's canonical completion
 state; disappearance alone never proves completion. No exit evidence means
 `exit_evidence_unavailable` and operator reconciliation.
