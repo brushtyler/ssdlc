@@ -688,11 +688,19 @@ class TestRealProcesses(CoreCase):
             os.close(fd)
 
     def test_real_cancel_restart_after_term(self):
-        self.controller('import signal,time\nsignal.signal(signal.SIGTERM,signal.SIG_IGN)\ntime.sleep(30)\n')
+        ready = self.repo / 'term-handler-ready'
+        self.controller('import signal,time\nfrom pathlib import Path\nsignal.signal(signal.SIGTERM,signal.SIG_IGN)\nPath(' + repr(str(ready)) + ').write_text("ready")\ntime.sleep(30)\n')
         self.addCleanup(self.cleanup_run)
         sup.start(self.args)
+        self.wait_for(ready.exists)
+        fault = CrashAt('cancel.after_term_before_kill')
+        deadline = time.monotonic() + 3
         with self.assertRaises(sup.InjectedCrash):
-            sup.cancel(self.repo, 'T-1', grace=0, fault=CrashAt('cancel.after_term_before_kill'))
+            while True:
+                result = sup.cancel(self.repo, 'T-1', grace=0, fault=fault)
+                self.assertIn(result['status'], {'blocked', 'cancelling'}, result)
+                self.assertLess(time.monotonic(), deadline, result)
+                time.sleep(.01)
         self.assertEqual(sup.status(self.repo, 'T-1')['status'], 'cancelling')
         self.assertEqual(self.cancel_until_done()['status'], 'cancelled')
 
@@ -1065,6 +1073,34 @@ class TestAdoptedObservationContinuation(CoreCase):
         with patch.object(sup, 'transfer', return_value=payload), patch.object(sup, 'monitor_tick', side_effect=[dict(status='reconcile'), dict(status='completed')]) as observe, patch.object(sup, 'spawn', side_effect=AssertionError('observation must not dispatch')):
             self.assertEqual(sup.worker(store, types.SimpleNamespace(payload_fd=r, generation=1)), 0)
         self.assertEqual(observe.call_count, 2)
+
+class TestObservationDiagnosisResolution(CoreCase):
+    def test_live_ownership_recovery_clears_only_transient_reconciliation(self):
+        store, proc = self.fake_run()
+        env = proc.entries[2002][3]
+        proc.entries[2002][3] = PermissionError()
+        self.assertEqual(sup.monitor_tick(store, {'SSDLC_EXECUTION_MODE': 'native'}, proc=proc)['status'], 'reconcile')
+        proc.entries[2002][3] = env
+        with patch.object(sup, 'spawn', side_effect=AssertionError('observation must not dispatch')):
+            out = sup.monitor_tick(store, {'SSDLC_EXECUTION_MODE': 'native'}, proc=proc)
+        self.assertEqual((out['status'], out['status_reason']), ('running', 'observing'))
+        self.assertEqual(store.read()['recovery']['used'], 0)
+        self.assertFalse(proc.signals)
+        # A different reconciliation reason cannot be cleared by mere liveness.
+        store.update(lambda d: d.update(status='reconcile', status_reason='completion_mismatch'))
+        for _ in range(2):
+            unresolved = sup.monitor_tick(store, {'SSDLC_EXECUTION_MODE': 'native'}, proc=proc)
+            self.assertEqual((unresolved['status'], unresolved['status_reason']), ('reconcile', 'completion_mismatch'))
+
+    def test_nonzero_run_ended_without_failure_keeps_u4_diagnostic(self):
+        ended = dict(type='run_ended', seq=1, exit_code=1)
+        out = sup.classify(dict(events=[ended], exit_code=1))
+        self.assertEqual(out['class'], 'uncertain_outcome')
+        self.assertIn('U4', [x['code'] for x in out['diagnostics']])
+        zero = sup.classify(dict(events=[dict(ended, exit_code=0)], exit_code=0))
+        self.assertNotIn('U4', [x['code'] for x in zero['diagnostics']])
+        known = sup.classify(dict(events=[ended], exit_code=1, state=dict(failure=dict(category='TASK_EXECUTION'))))
+        self.assertNotIn('U4', [x['code'] for x in known['diagnostics']])
 
 if __name__ == '__main__':
     unittest.main()

@@ -1822,7 +1822,7 @@ def classification_predicates(evidence):
     failure = state.get('failure')
     canonical_failure = isinstance(failure, dict) and failure.get('category') in CATEGORIES
     ended = [x for x in e.get('events', []) if x['type'] == 'run_ended']
-    if e.get('exit_code') not in (None, 0) and not final and not canonical_failure and not ended:
+    if e.get('exit_code') not in (None, 0) and not final and not canonical_failure:
         guards.append('U4')
     if e.get('malformed') or final.get('category') not in CATEGORIES | {None}:
         guards.append('U5')
@@ -2122,7 +2122,13 @@ def monitor_tick(store, env, proc=None, docker=None, generation=None):
             v.update(status=observed['status'], status_reason=observed['status_reason'], completion_kind=observed['completion_kind'])
             v['classification'] = observed['classification']
             v['exit_evidence'] = exit_evidence(d, events)
-        elif observed['status'] == 'reconcile' and v['status'] not in TERMINAL:
+        elif (v['status'] == 'reconcile' and v['status_reason'] == 'reconcile' and
+              v.get('classification') is None and
+              all(identity_state(v, role, proc) == OWNED for role in ('worker', 'controller'))):
+            # Fresh proof of the same two process births resolves a transient
+            # observation gap. No dispatch, retry, signal or approval follows.
+            v.update(status='running', status_reason='observing')
+        elif observed['status'] == 'reconcile' and v['status'] not in TERMINAL and v['status'] != 'reconcile':
             v.update(status='reconcile', status_reason='reconcile')
         if v.get('classification'):
             cls = v['classification']['class']
