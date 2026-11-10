@@ -1630,15 +1630,23 @@ class SSDLCOrchestrator:
         validate_document("quality-contract", contract)
         baseline_dir = self.dir_recon / "baseline"
         baseline_dir.mkdir(exist_ok=True)
+        print(f"[baseline] Running {len(contract['checks'])} initial check(s) before 00-recon; "
+              "output is captured until each check completes.", flush=True)
         for check in contract["checks"]:
             self.check_budget_circuit_breaker()
             cwd = confined(self.repo_root, check["cwd"])
+            print(f"[baseline] {check['check_id']}: running (timeout {check['timeout_sec']}s)...", flush=True)
+            started = time.monotonic()
             out, err, rc = EngineRunner.run_sandboxed_cmd(check["argv"], cwd, check["timeout_sec"])
             log = baseline_dir / f"{check['check_id']}.log"
             log.write_text(out + "\n" + err)
             contract["baseline"].append({"check_id": check["check_id"], "exit_code": rc,
                                          "log_ref": str(log.relative_to(self.ssdlc_root)), "sha256": sha256_file(log)})
-            if rc or test_suite_is_empty(out, err):
+            empty_suite = test_suite_is_empty(out, err)
+            status = 'FAILED' if rc or empty_suite else 'PASSED'
+            print(f"[baseline] {check['check_id']}: {status} in {time.monotonic() - started:.1f}s "
+                  f"(exit {rc}{', empty test suite' if empty_suite else ''}); log: {log}", flush=True)
+            if rc or empty_suite:
                 raise PlanError(f"Baseline check {check['check_id']} failed or ran no tests; inspect {log}")
         atomic_json(target, contract)
         self.record_artifact("00-recon/quality-contract.json", target)
