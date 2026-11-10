@@ -721,5 +721,77 @@ class TestCancellationExitRace(CoreCase):
         self.check_admission('changed-session')
 
 
+class TestTerminalCleanupAndDeadline(CoreCase):
+    def check_terminal(self, status, reason):
+        store, proc = self.fake_run()
+        store.update(lambda d: d.update(status=status, status_reason=reason))
+        before = store.read()
+        out = sup.cancel(self.repo, 'T-1', grace=0, clock=self.clock, proc=proc)
+        self.assertEqual((out['status'], out['status_reason']), (status, reason))
+        self.assertEqual(out['cancellation_state'], 'done')
+        after = store.read()
+        self.assertEqual(after['cancel']['state'], 'done')
+        self.assertEqual(after['classification'], before['classification'])
+        self.assertEqual(after['completion_kind'], before['completion_kind'])
+        if status == 'completed':
+            self.assertEqual(after.get('in_flight'), before.get('in_flight'))
+        signals = list(proc.signals)
+        self.assertEqual(sup.cancel(self.repo, 'T-1', grace=0, clock=self.clock, proc=proc)['status'], status)
+        self.assertEqual(proc.signals, signals)
+
+    def test_completed_outcome_survives_cleanup(self):
+        self.check_terminal('completed', 'completed')
+
+    def test_failed_outcome_survives_cleanup(self):
+        self.check_terminal('failed', 'hard_deadline')
+
+    def test_blocked_outcome_survives_cleanup(self):
+        self.check_terminal('blocked', 'reconcile')
+
+    def test_operator_wait_outcome_survives_cleanup(self):
+        self.check_terminal('operator_wait', 'auth_missing')
+
+    def test_deadline_stops_owned_resources_and_preserves_limits_outcome(self):
+        store, proc = self.fake_run()
+        d = store.read()
+        store.update(lambda v: v['deadlines'].update(hard_deadline=999.))
+        owned = dict(id='d'*64, state='running', labels={'ssdlc.run_id': d['run_id'], 'ssdlc.project': d['project']['key']})
+        foreign = dict(id='e'*64, state='running', labels={'ssdlc.run_id': 'f'*32, 'ssdlc.project': d['project']['key']})
+        docker = FakeDocker()
+        docker.containers = [owned, foreign]
+        out = sup.monitor_tick(store, {'SSDLC_EXECUTION_MODE': 'native'}, proc=proc, docker=docker)
+        self.assertEqual((out['status'], out['status_reason']), ('failed', 'hard_deadline'))
+        self.assertEqual(out['classification']['class'], 'limits')
+        self.assertEqual(store.read()['cancel']['state'], 'done')
+        self.assertEqual(set(pid for pid, sig in proc.signals), {1001, 2002})
+        self.assertFalse(proc.entries)
+        self.assertEqual(docker.stopped, ['d'*64])
+        self.assertEqual(foreign['state'], 'running')
+        self.assertEqual(store.read()['recovery']['used'], 0)
+
+    def test_pending_cancel_is_completed_by_monitor_but_status_is_read_only(self):
+        store, proc = self.fake_run()
+        with self.assertRaises(sup.InjectedCrash):
+            sup.cancel(self.repo, 'T-1', grace=0, clock=self.clock, proc=proc,
+                       fault=CrashAt('cancel.after_intent_before_signal'))
+        self.assertEqual(sup.status(self.repo, 'T-1', proc=proc)['status'], 'cancelling')
+        self.assertFalse(proc.signals)
+        out = sup.monitor_tick(store, {'SSDLC_EXECUTION_MODE': 'native'}, proc=proc)
+        self.assertEqual(out['status'], 'cancelled')
+        self.assertEqual(store.read()['cancel']['state'], 'done')
+
+    def test_native_cleanup_does_not_require_docker(self):
+        store, proc = self.fake_run()
+        self.assertFalse(store.read()['authorized']['containers_possible'])
+        with patch.object(sup, 'DockerCancellation', side_effect=AssertionError('unused Docker queried')):
+            self.assertEqual(sup.cancel(self.repo, 'T-1', grace=0, clock=self.clock, proc=proc)['status'], 'cancelled')
+
+    def test_malformed_preserved_terminal_is_rejected_before_write(self):
+        store, proc = self.fake_run()
+        with self.assertRaises(sup.SupervisorIntegrityError):
+            store.update(lambda d: d.update(cancel=dict(epoch=1, requested_at=1000., state='requested',
+                preserved_terminal=dict(status='running', reason='launched'))))
+        self.assertIsNone(store.read()['cancel'])
+
 if __name__ == '__main__':
     unittest.main()

@@ -411,13 +411,15 @@ def validate_record(d):
         raise SupervisorIntegrityError('metadata_corrupt')
     if set(d) - (set(RUN_SHAPE) | required | {'in_flight'}):
         raise SupervisorIntegrityError('metadata_corrupt')
-    for key, allowed in [('authorized', set(RUN_SHAPE['authorized']) | {'test_cmd_sha256', 'argv_id', 'compatibility_approved', 'review_repairs', 'rounds'}),
+    for key, allowed in [('authorized', set(RUN_SHAPE['authorized']) | {'test_cmd_sha256', 'argv_id', 'compatibility_approved', 'review_repairs', 'rounds', 'containers_possible'}),
                          ('fingerprints', set(RUN_SHAPE['fingerprints'])),
                          ('processes', {'worker', 'controller', 'descendants'}),
                          ('handoff', {'outcome', 'at'})]:
         if set(d[key]) - allowed:
             raise SupervisorIntegrityError('metadata_corrupt')
     if d['authorized'].get('argv_id') not in {'orchestrator.run', 'orchestrator.plan', 'orchestrator.design'}:
+        raise SupervisorIntegrityError('metadata_corrupt')
+    if 'containers_possible' in d['authorized'] and type(d['authorized']['containers_possible']) is not bool:
         raise SupervisorIntegrityError('metadata_corrupt')
     if d['resumes'] is not None and (not isinstance(d['resumes'], str) or not RUN_ID.fullmatch(d['resumes'])):
         raise SupervisorIntegrityError('metadata_corrupt')
@@ -457,6 +459,10 @@ def validate_record(d):
     if d.get('cancel'):
         c = d['cancel']
         if c['state'] not in {'requested', 'signalling', 'blocked', 'done'} or c['epoch'] < 1:
+            raise SupervisorIntegrityError('metadata_corrupt')
+        prior = c.get('preserved_terminal')
+        if prior is not None and (not isinstance(prior, dict) or set(prior) != {'status', 'reason'} or
+                prior['status'] not in TERMINAL - {'cancelled'} or prior['reason'] not in REASONS):
             raise SupervisorIntegrityError('metadata_corrupt')
         if c.get('executor') is not None and not _shape(c['executor'], IDENT_SHAPE):
             raise SupervisorIntegrityError('metadata_corrupt')
@@ -680,22 +686,24 @@ def refusal(store, reason='unsupported_transition'):
 
 
 def new_record(a, store):
+    project_env = build_project_env(a['repo'], os.environ)
     controller = Path(a.get('controller', Path(__file__).with_name('orchestrator.py'))).resolve()
     authorized = dict(entrypoint=a['entrypoint'], from_phase=a['from_phase'], goal_sha256=goal_digest(a),
                       goal_len=len(a['goal'].encode()) if a.get('goal') is not None else None, tier=a['tier'],
                       test_cmd_sha256=digest(a['test_cmd']) if a.get('test_cmd') is not None else None,
                       test_cmd_authority='operator_flag', reauthorization=a.get('_reauthorization', []), argv_id='orchestrator.' + a['entrypoint'],
-                      review_repairs=a.get('review_repairs'), rounds=a.get('rounds'), compatibility_approved=True)
+                      review_repairs=a.get('review_repairs'), rounds=a.get('rounds'), compatibility_approved=True,
+                      containers_possible=project_env.get('SSDLC_EXECUTION_MODE', 'docker') != 'native')
     return dict(schema_version=1, revision=0, worker_generation=1, run_id=store.run_id, nonce=uuid.uuid4().hex,
         resumes=a.get('_resumes'), project=dict(key=digest(a['repo'])[:16], name='project'), ticket=a['ticket'],
         created_at=float(store.clock.time()), authorized=authorized,
-        fingerprints=dict(config_sha256=config_digest(build_project_env(a['repo'], os.environ)),
+        fingerprints=dict(config_sha256=config_digest(project_env),
                           controller=dict(path_sha256=digest(str(controller)), sha256=digest(controller.read_bytes()), snapshot_sha256=controller_snapshot_digest()),
                           supervisor_py_sha256=digest(Path(__file__).read_bytes()), inputs_sha256=digest(json.dumps(authorized, sort_keys=True))),
         base_commit_at_launch=git_read(a['repo'], 'rev-parse', 'HEAD'), launch_revoked=False, launches=[],
         processes=dict(worker=None, controller=None, descendants=[]), containers=[], status='starting', status_reason='bootstrap',
         completion_kind=None, handoff=dict(outcome=None, at=None), exit_evidence=dict(source='none', code=None, intent_id=None),
-        deadlines=dict(hard_deadline=None, preflight_deadline=None, quiet_threshold_sec=300, frozen_limits=configured_limits(build_project_env(a['repo'], os.environ)), handoff_timeout_sec=a['handoff_timeout_sec'], payload_io_timeout_sec=a['payload_io_timeout_sec']),
+        deadlines=dict(hard_deadline=None, preflight_deadline=None, quiet_threshold_sec=300, frozen_limits=configured_limits(project_env), handoff_timeout_sec=a['handoff_timeout_sec'], payload_io_timeout_sec=a['payload_io_timeout_sec']),
         recovery=dict(allowance_total=a['recovery_allowance'], used=0, next_retry_at=None, backoff_sec=0, history=[]),
         counters=dict(heartbeats=0, retries=0, classifications={}), heartbeat=None, preflight=None, classification=None,
         journal_baseline=dict(failed_attempts={}, attempts={}, taken_at_launch=False), cancel=None,
@@ -722,7 +730,7 @@ def identity_state(d, role, proc=None):
 def view(d, proc=None):
     out = copy.deepcopy(d)
     states = [identity_state(d, role, proc) for role in ('worker', 'controller')]
-    if d.get('cancel') and d['cancel']['state'] != 'done':
+    if d.get('cancel') and d['cancel']['state'] in {'requested', 'signalling'}:
         out['status'], out['status_reason'] = 'cancelling', 'cancel_pending'
     elif d['status'] not in TERMINAL and (UNKNOWN in states or NOT_OWNED in states or states != [OWNED, OWNED]):
         out['status'], out['status_reason'] = 'reconcile', 'reconcile'
@@ -732,6 +740,7 @@ def view(d, proc=None):
 def public(d, status=None, reason=None):
     state = status or d.get('status', 'blocked')
     return dict(run_id=d.get('run_id'), status=state, status_reason=reason or d.get('status_reason', 'reconcile'),
+                cancellation_state=(d.get('cancel') or {}).get('state'),
                 handoff=d.get('handoff', dict(outcome='blocked', at=None)),
                 next_action='inspect_and_reconcile' if state in {'blocked', 'reconcile', 'failed'} else
                             'repeat_cancel' if state == 'cancelling' else 'status')
@@ -1221,7 +1230,7 @@ def cancel(repo, ticket, run_id=None, grace=5, clock=None, proc=None, fault=None
     store = RunStore(repo, ticket, run_id, clock, fault)
     proc = proc or Proc()
     d = store.read() if run_id else store.current()
-    if d['status'] == 'cancelled':
+    if d['status'] == 'cancelled' or (d.get('cancel') and d['cancel']['state'] == 'done'):
         return public(d)
     # A durable executor lease bridges the independent lock sections. It is
     # reclaimed only after the prior process birth identity is proven gone.
@@ -1241,7 +1250,9 @@ def cancel(repo, ticket, run_id=None, grace=5, clock=None, proc=None, fault=None
                 return public(d, 'blocked', 'identity_unknown')
         def request(v):
             if not v.get('cancel'):
-                v['cancel'] = dict(epoch=1, requested_at=float(store.clock.time()), state='requested', term_at=None, kill_at=None)
+                prior = dict(status=v['status'], reason=v['status_reason']) if v['status'] in TERMINAL else None
+                v['cancel'] = dict(epoch=1, requested_at=float(store.clock.time()), state='requested',
+                                   term_at=None, kill_at=None, preserved_terminal=prior)
             v['cancel'].update(executor=executor, executor_token=token)
             v.update(status='cancelling', status_reason='cancel_requested', launch_revoked=True)
         d = store.update(request, event='cancel_requested', locked=True)
@@ -1313,9 +1324,10 @@ def _execute_cancel(store, d, grace, proc, token, docker=None):
     if error:
         return blocked(error)
     store.fault.hit('cancel.after_kill_before_record')
-    docker = docker or DockerCancellation()
+    if docker is None and d['authorized'].get('containers_possible', True):
+        docker = DockerCancellation()
     try:
-        for container in docker.list(d['run_id'], d['project']['key']):
+        for container in docker.list(d['run_id'], d['project']['key']) if docker is not None else []:
             labels = container.get('labels', {})
             if (labels.get('ssdlc.run_id') == d['run_id'] and
                     labels.get('ssdlc.project') == d['project']['key'] and
@@ -1326,7 +1338,13 @@ def _execute_cancel(store, d, grace, proc, token, docker=None):
     except (OSError, ValueError, subprocess.SubprocessError):
         return blocked('docker_unavailable')
     def finish(v):
-        v.update(status='cancelled', status_reason='cancelled', in_flight='uncertain')
+        prior = v['cancel'].get('preserved_terminal')
+        if prior is None:
+            v.update(status='cancelled', status_reason='cancelled', in_flight='uncertain')
+        else:
+            v.update(status=prior['status'], status_reason=prior['reason'])
+            if prior['status'] != 'completed':
+                v['in_flight'] = 'uncertain'
         v['cancel'].update(state='done', kill_at=float(store.clock.time()))
         if v['handoff']['outcome'] is None:
             v['handoff'] = dict(outcome='blocked', at=float(store.clock.time()))
@@ -1882,7 +1900,7 @@ def observed_status(store, d, proc=None, env=None, clock=None, *, events_snapsho
     env = dict(env) if env is not None else build_project_env(store.root.parent.parent, os.environ)
     # Cancellation owns the lifecycle even after TERM makes the controller
     # disappear. Missing exit evidence must not mask a resumable cancellation.
-    if d.get('cancel'):
+    if d.get('cancel') and (d['cancel']['state'] != 'done' or d['status'] != 'completed'):
         return status_fields(d, view(d, proc), store.clock.time())
     if d['status_reason'] == 'hard_deadline':
         return status_fields(d, public(d), store.clock.time())
@@ -1920,7 +1938,9 @@ def status_fields(d, result, now):
         preflight=d.get('preflight'), classification=d.get('classification'), counters=d.get('counters', {}),
         completion_kind=d.get('completion_kind'), diagnostics=hb.get('diagnostics', []))
     classification = d.get('classification')
-    if classification:
+    if result['status'] == 'cancelling':
+        result['next_action'] = 'repeat_cancel'
+    elif classification:
         result['next_action'] = RECOVERY_MATRIX[classification['class']]['action']
     elif result['status'] == 'operator_wait':
         result['next_action'] = RECOVERY_MATRIX['authentication']['action'] if result['status_reason'].startswith('auth_') else 'Inspect preflight checks before explicitly starting again.'
@@ -1968,13 +1988,19 @@ class DockerCancellation(DockerObservation):
 
 
 def monitor_tick(store, env, proc=None, docker=None, generation=None):
-    """Observe only; quiet runs never trigger cancellation or retry."""
+    """Observe progress; only a hard deadline or existing cancel intent runs cleanup."""
     d = store.read()
     proc = proc or Proc()
     now = store.clock.time()
     if generation is not None and generation != d['worker_generation']:
         raise FencedOut()
-    if d.get('cancel') or d['status'] in {'completed', 'cancelled'}:
+    if d.get('cancel'):
+        if d['cancel']['state'] in {'requested', 'signalling'}:
+            cancel(store.root.parent.parent, store.ticket, run_id=store.run_id, grace=5,
+                   clock=store.clock, proc=proc, docker=docker)
+            d = store.read()
+        return status_fields(d, view(d, proc), store.clock.time())
+    if d['status'] in {'completed', 'cancelled'}:
         return status_fields(d, public(d), now)
     repo = store.root.parent.parent
     events, malformed = controller_events(store, d)
@@ -2054,6 +2080,12 @@ def monitor_tick(store, env, proc=None, docker=None, generation=None):
         store.fault.hit('complete.observed_before_state')
     store.fault.hit('classify.before_persist')
     result = store.update(save, (generation, 0) if generation else None, event='heartbeat')
+    if expired:
+        # A hard deadline authorizes only the existing, ownership-checked cleanup.
+        # Persist failure first so cancellation cannot replace the limits outcome.
+        cancel(repo, store.ticket, run_id=store.run_id, grace=5, clock=store.clock, proc=proc, docker=docker)
+        result = store.read()
+        return status_fields(result, view(result, proc), store.clock.time())
     return status_fields(result, public(result), now)
 
 

@@ -940,7 +940,11 @@ Cancel revokes launch authority, verifies each process birth and session, and
 signals only admitted pidfds. Containers must have both exact `ssdlc.run_id` and
 `ssdlc.project` labels verified by inspect before stopping by full ID. Other
 projects, ticket-only matches and recycled PID/pgid identities are excluded.
-Repeated cancel reconciles remaining containers after a crash. Removing a label
+Repeated cancel reconciles remaining containers after a crash. A hard deadline invokes
+this same scoped cleanup and retains the limits outcome. Cleanup of an already terminal
+run preserves its completed/failed/blocked/operator-wait outcome. Public
+`cancellation_state=done` records cleanup completion separately; exit codes still
+represent the retained run outcome. Native runs do not require an unused Docker runtime. Removing a label
 is not cancel. No GitHub adapter ships in this milestone.
 
 Remaining work: #16 broader operational recovery and remote integration; #1 the
