@@ -511,7 +511,9 @@ class TestRecoveryAndFaults(Case):
             store = self.store()
             store.fault = CrashAt(point)
             with self.assertRaises(s.InjectedCrash):
-                store.update(lambda d: None, event='heartbeat')
+                # Stable heartbeat snapshots are not audit events; exercise
+                # exactly-once replay on an actual lifecycle transition.
+                store.update(lambda d: d.update(status='blocked', status_reason='reconcile'), event='heartbeat')
             fresh = s.RunStore(self.repo, 'T', store.run_id, self.clock)
             fresh.update(lambda d: None)
             self.assertEqual(len(fresh.events()), 1)

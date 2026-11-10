@@ -1102,5 +1102,49 @@ class TestObservationDiagnosisResolution(CoreCase):
         known = sup.classify(dict(events=[ended], exit_code=1, state=dict(failure=dict(category='TASK_EXECUTION'))))
         self.assertNotIn('U4', [x['code'] for x in known['diagnostics']])
 
+class TestBoundedAdoptedObservation(CoreCase):
+    def test_dead_controller_without_exit_evidence_stops_observer_but_stays_uncertain(self):
+        import types
+        store, proc = self.fake_run()
+        del proc.entries[2002]
+        env = sup.build_project_env(self.repo, os.environ)
+        r, w = os.pipe()
+        self.addCleanup(lambda: os.close(w))
+        payload = json.dumps(dict(monitor_only=True, env=env)).encode()
+        with patch.object(sup, 'transfer', return_value=payload), patch.object(sup, 'Proc', return_value=proc), patch.object(sup, 'spawn', side_effect=AssertionError('uncertain exit must not dispatch')):
+            self.assertEqual(sup.worker(store, types.SimpleNamespace(payload_fd=r, generation=1)), 0)
+        d = store.read()
+        self.assertEqual(d['counters']['heartbeats'], 3)
+        self.assertEqual((d['status'], d['status_reason']), ('reconcile', 'exit_evidence_unavailable'))
+        self.assertEqual(d['exit_evidence']['source'], 'none')
+        self.assertEqual(d['recovery']['used'], 0)
+        self.assertFalse(proc.signals)
+
+    def test_stable_heartbeats_do_not_append_nontransition_events(self):
+        store, proc = self.fake_run()
+        before = len(store.events())
+        for _ in range(20):
+            self.assertEqual(sup.monitor_tick(store, {'SSDLC_EXECUTION_MODE': 'native'}, proc=proc)['status'], 'running')
+        self.assertEqual(store.read()['counters']['heartbeats'], 20)
+        self.assertEqual(len(store.events()), before)
+        proc.entries[2002][3] = PermissionError()
+        self.assertEqual(sup.monitor_tick(store, {'SSDLC_EXECUTION_MODE': 'native'}, proc=proc)['status'], 'reconcile')
+        events = store.events()
+        self.assertEqual(len(events), before+1)
+        self.assertNotEqual(events[-1]['from'], events[-1]['to'])
+
+    def test_handoff_timeout_is_available_on_all_detached_entrypoints(self):
+        for command in ['run', 'start', 'resume']:
+            result = subprocess.run([sys.executable, str(ROOT/'orchestrator.py'), command, '--help'], capture_output=True, text=True, check=True)
+            self.assertIn('--handoff-timeout-sec', result.stdout)
+
+    def test_frozen_c_locale_survives_python_child_startup(self):
+        env = sup.build_project_env(self.repo, dict(HOME=str(self.home), PATH=os.defpath, LANG='C', LC_CTYPE='C'))
+        self.assertEqual(env['PYTHONCOERCECLOCALE'], '0')
+        result = subprocess.run([sys.executable, '-c', 'import os,json; print(json.dumps(dict(os.environ)))'], env=env, capture_output=True, text=True, check=True)
+        child = json.loads(result.stdout)
+        self.assertEqual(child['LC_CTYPE'], 'C')
+        self.assertEqual(sup.config_digest(child), sup.config_digest(env))
+
 if __name__ == '__main__':
     unittest.main()

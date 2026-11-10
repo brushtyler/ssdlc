@@ -606,7 +606,7 @@ class RunStore:
             before = d['status']
             fn(d)
             d['revision'] += 1
-            if event:
+            if event and (event != 'heartbeat' or before != d['status']):
                 # No free-form fields are accepted from callers/probes.
                 if not re.fullmatch(r'[a-z_]+', event):
                     raise ValueError('invalid_event')
@@ -1112,12 +1112,22 @@ def worker(store, args):
     if payload.get('monitor_only'):
         if config_digest(payload['env']) != d['fingerprints']['config_sha256']:
             raise FencedOut()
+        missing_exit_ticks = 0
         while True:
             result = monitor_tick(store, payload['env'], generation=args.generation)
             # Reconciliation forbids launches, not read-only observation. During
             # exit, /proc ownership can be briefly unknown before run_ended binds.
             if result['status'] in TERMINAL:
                 return 0
+            if (result['status'] == 'reconcile' and result.get('status_reason') == 'exit_evidence_unavailable' and
+                    identity_state(store.read(), 'controller') == GONE):
+                missing_exit_ticks += 1
+                if missing_exit_ticks >= 3:
+                    # Allow a late event snapshot to settle, then leave the
+                    # persisted uncertain outcome for explicit reconciliation.
+                    return 0
+            else:
+                missing_exit_ticks = 0
             store.clock.sleep(1)
     a = validate_args(payload['args'])
     argv = build_argv('orchestrator.' + a['entrypoint'], a)
@@ -1435,6 +1445,9 @@ def build_project_env(repo, host_env):
     runtime = Path(repo).resolve() / '.ssdlc/.runtime'
     env.update(CODEX_HOME=str(runtime / 'codex_home'), CLAUDE_CONFIG_DIR=str(runtime / 'claude_home'),
                XDG_CACHE_HOME=str(runtime / 'cache'))
+    # Freeze the requested locale rather than letting child Python startup
+    # silently rewrite LC_CTYPE after the configuration fingerprint is taken.
+    env.setdefault('PYTHONCOERCECLOCALE', '0')
     env.setdefault('SSDLC_PROJECT_ID', Path(repo).resolve().name)
     return env
 

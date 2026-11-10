@@ -940,7 +940,17 @@ state; disappearance alone never proves completion. No exit evidence means
 `exit_evidence_unavailable` and operator reconciliation. An adopted worker
 continues read-only observation while reconciliation is needed, so a transient
 exit-time identity change can later resolve to bound completion. It never
-relaunches the controller or a model invocation from that state.
+relaunches the controller or a model invocation from that state. If the controller
+is verified gone and exit evidence stays missing for three observation ticks,
+the observer exits while retaining the persisted uncertain result. Stable
+heartbeats update metadata without appending non-transition audit events.
+
+Recovery allowance is an upper bound, not a promise to consume every retry. The
+caller handoff deadline still wins: increase `--handoff-timeout-sec` explicitly
+when a larger allowance or slower probes need more time. No timeout is raised
+automatically. Frozen child environments default `PYTHONCOERCECLOCALE=0` so
+Python cannot silently rewrite an explicitly requested C locale after hashing;
+an explicit override still participates in the strict configuration digest.
 
 Supervisor metadata, locks, audit, observation events and controller-events.jsonl
 live only under `.ssdlc/.supervisor/`. The orchestrator alone owns canonical

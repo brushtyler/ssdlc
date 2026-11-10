@@ -4298,6 +4298,8 @@ def _foreground_main(argv=None) -> int:
     p_resume.add_argument('--rounds', type=int, choices=range(1, 9))
     p_resume.add_argument('--reauthorize-fingerprints', action='store_true')
     p_resume.add_argument('--recovery-allowance', default='3')
+    for p_handoff in (p_run, p_start, p_resume):
+        p_handoff.add_argument('--handoff-timeout-sec', default='30', help='Maximum detached handoff wait, 1-3600 seconds')
     p_resume.add_argument('--json', action='store_true')
     for command in ('status', 'cancel', 'monitor'):
         p_lifecycle = sub.add_parser(command, help=command + ' a supervised run')
