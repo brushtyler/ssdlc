@@ -514,6 +514,20 @@ Ogni incremento include i relativi test; la suite non è rinviata alla fine. Per
 
 Stato aggiornato al 9 novembre 2026. Il percorso per task resta **opt-in**: i risultati del bootstrap e dei micro-ticket non equivalgono all'accettazione finale degli Step 1–6.
 
+### Step 3b.3a — Preview only
+
+Step 3b.2 / PR #13 merged with **397 tests after review fixes**. This increment
+only prepares targeted bounce: it verifies recorded gate evidence and archives a
+deterministic preview with `execution_authorized=false`. It grants no approval
+or execution authority. The following remain pending: repair execution,
+cumulative recovery, revalidation integration, repeated global gates and
+advanced-target delivery. Provider accounting is tracked in GH issue #14 and is
+not implemented here.
+
+Hashes are unkeyed integrity checks, not authentication. Verification provides
+point-in-time integrity checks; no continuous containment is claimed. A
+coordinated external rewrite of the integrity chain is outside this protection.
+
 ### Disponibile
 
 - Schemi eseguibili di contratto, piano, manifest, evento advisory e proiezione advisory; validazione di DAG, riferimenti, percorsi, standard applicabili e prove di baseline.
@@ -541,7 +555,7 @@ La versione esecutrice di ogni run è fissata e separata dal checkout sviluppato
 
 ### Prossimi incrementi
 
-1. **Step 3b.2 — Report dei gate**: integrare il contratto dei finding in review, QA e AppSec, conservando output grezzi e report immutabili legati a commit/input. Report malformati o attribuzioni insufficienti non autorizzano correzioni automatiche.
+1. **Step 3b.2 — Report dei gate (merged, PR #13)**: contratto dei finding integrato in review, QA e AppSec, con output grezzi e report immutabili legati a commit/input. La preview Step 3b.3a prepara soltanto il bounce mirato; non esegue riparazioni.
 2. **Step 3b.3 — Bounce mirato**: collegare finding, analisi d'impatto, invalidazione, riparazione e rivalidazione topologica; conservare tentativi, contributi e limiti e ripetere i gate globali dopo le modifiche. Implementare un recupero esplicito e tracciato dei candidati interrotti, senza adottare modifiche esterne implicitamente.
 3. **Chiusura Step 3**: completare analisi critica obbligatoria, matrice delle evidenze e consegna su destinazione avanzata con riconciliazione e nuove verifiche sul candidato integrato. Oggi l'approvazione richiede ancora una destinazione pulita e invariata.
 4. **Step 4**: dispatcher per rischio/capacità, matrice indipendente di review per task e interazioni, classificazione dei fallimenti e limiti comuni persistenti per l'intero ticket.
@@ -549,3 +563,79 @@ La versione esecutrice di ogni run è fissata e separata dal checkout sviluppato
 6. **Step 6**: scenari end-to-end Tier S/M/L, recuperi e concorrenza, confronto dei routing, metriche e attivazione dopo l'accettazione complessiva.
 
 Restano anche i vincoli conservativi da risolvere negli incrementi pertinenti: estensione controllata dei manifest, ripianificazione versionata, migrazione esplicita dei ticket precedenti e task `review_only`. Un feedback di review interrompe ancora la pipeline per task; non viene ignorato e non attiva oggi una riparazione mirata automatica. Ogni incremento mantiene specifica e criteri di accettazione circoscritti, con codice e test nello stesso task.
+
+## 13. Supervisione persistente e workflow GitHub
+
+Decisione concordata il 10 novembre 2026: anticipare gli incrementi che riducono avvii, controlli di stato e recuperi manuali, poi proseguire il piano funzionale. Questa sezione descrive il comportamento da implementare; aggiungere una label oggi non avvia ancora una run. Una run già avviata conserva controller, input e limiti fissati; la nuova priorità non la interrompe o modifica implicitamente.
+
+### 13.1 Obiettivo e attori
+
+L'obiettivo operativo è una autorizzazione iniziale e una review finale per milestone. I task restano piccoli e verificabili internamente; la consegna aggrega il risultato in una PR per milestone, senza imporre una PR per task. L'intervento intermedio del responsabile è riservato a decisioni di prodotto/perimetro, autenticazione non recuperabile, modifica dei limiti autorizzati o problemi fuori dalle policy di recupero.
+
+| Attore | Responsabilità |
+| --- | --- |
+| Responsabile del progetto | Autorizza obiettivo e limiti, risolve ambiguità e approva la consegna secondo la policy del repository. |
+| GitHub | Ospita richieste, discussioni, PR, review e proiezioni dello stato. |
+| Adapter GitHub | Valida eventi e autorizzazioni, riconcilia gli oggetti remoti e pubblica aggiornamenti idempotenti. |
+| Servizio supervisore | Gestisce coda, processi, ultimo progresso, recuperi e richieste d'intervento; persiste indipendentemente dalla chat. |
+| SSDLC | Possiede pipeline, scheduler, journal, checkpoint, contatori, budget e prove; espone transizioni e riprese verificate. |
+| Agenti AI | Eseguono PO, design, sviluppo e review; non modificano i controlli fidati del supervisore. |
+| Verificatori e CI | Eseguono i controlli richiesti sul candidato e producono prove legate al commit. |
+
+Il supervisore è un servizio con regole deterministiche, separato dagli agenti AI e dall'approvatore umano. Mantiene un solo stato canonico strutturato con SSDLC: commenti, label e check GH sono proiezioni, non un secondo database dello scheduler. Gli eventi tecnici vengono gestiti dal servizio; al responsabile arrivano le richieste che richiedono davvero una decisione umana.
+
+### 13.2 Autorizzazione tramite label e intake
+
+- L'aggiunta della label proposta `ssdlc:run` a una Issue autorizza l'intake soltanto se l'attore è ammesso dalla policy del repository. Aprire una Issue da solo non avvia lavoro.
+- Il supervisore registra identità dell'evento, attore, repository/Issue, revisione e digest della specifica, run e limiti autorizzati. Il testo della Issue è input non fidato; non è una shell né una modifica alle policy del runner.
+- Consegne duplicate, riavvio del servizio e rimozione/riaggiunta durante una run attiva non creano esecuzioni concorrenti dello stesso lavoro. Un nuovo tentativo o una nuova revisione dopo chiusura richiede una nuova azione autorizzata e resta distinto dalle riprese.
+- Togliere la label non cancella la run. Resume, cancel e revisione della specifica sono azioni esplicite e tracciate; una modifica remota del testo non sostituisce silenziosamente gli input approvati.
+- Prima dei controlli costosi eseguire il preflight delle credenziali, dei provider, delle risorse e dei limiti disponibili, dichiarando i dati non verificabili. Una autenticazione da completare nel browser viene richiesta subito, senza fingere un recupero automatico.
+- Ogni nuova run parte dall'ultimo `main` pertinente e fissa un controller separato dal checkout sviluppato. Gli aggiornamenti durante una ripresa restano revisioni esplicite con provenienza e contatori conservati.
+
+### 13.3 Esecuzione, osservabilità e recupero
+
+Il supervisore riceve eventi strutturati e controlla anche processo, heartbeat e ultimo progresso. La sola assenza di output non prova che la run sia bloccata: test lunghi e invocazioni attive hanno stato, timeout e diagnostica distinguibili. Lock/ownership e riconciliazione impediscono doppio avvio dopo crash o perdita del collegamento. Un cancel deve raggiungere controller e soli processi/container di quella run, conservando evidenze e risultati incerti.
+
+Gli errori di codice rientrano nel ciclo di riparazione con candidato e diagnostica precedenti. I recuperi temporanei di ambiente/provider sono limitati e contabilizzati separatamente, senza azzerare tentativi o degradare gate/capacità. Un risultato di invocazione incerto richiede riconciliazione, non una ripetizione cieca. Le fasi senza una ripresa verificabile restano bloccate con causa e azione richiesta; il supervisore non costruisce scorciatoie tramite script ad hoc o approvazioni inventate.
+
+Le verifiche precedenti si riusano soltanto con input, commit, contratto, comandi, prove e ambiente rilevante ancora compatibili. Le modifiche invalidano le attestazioni interessate. La disponibilità di una baseline non sostituisce i gate sul candidato finale.
+
+Su GH mantenere un commento di avanzamento aggiornato in luogo, con fase/task attivi e completati, ultimo progresso, causa del blocco, prossima azione automatica e link alle prove. Creare nuovi avvisi per richieste d'intervento o consegna, evitando notifiche per ogni evento tecnico. Il fallimento di pubblicazione GH non perde lo stato locale e non duplica il lavoro.
+
+### 13.4 PR e review deterministiche
+
+Il supervisore crea e aggiorna la stessa draft PR della milestone. I checkpoint intermedi non autorizzano la consegna; la promozione a ready richiede il candidato integrato verificato. Check, finding, review e prove sono legati allo SHA esaminato.
+
+| Segnale GH | Transizione proposta |
+| --- | --- |
+| Review formale `Changes requested` di un reviewer autorizzato | Accoda un ciclo di analisi/correzione identificato dalla review, senza duplicarlo. |
+| Review `Comment`, commento ordinario o commento inline isolato | Registra feedback; non autorizza automaticamente un ciclo di modifica. |
+| Review `Approved` | Registra l'approvazione sul commit pertinente; gli altri gate restano obbligatori. |
+| Review revocata | Ricalcola le approvazioni applicabili. |
+| Nuovi commit | Rivaluta le attestazioni e riesegue le verifiche necessarie; il contenuto nuovo non eredita il PASS precedente. |
+| Merge verificato | Conclude la milestone e può avviare la successiva soltanto se già autorizzata, dal nuovo `main`. |
+
+Il trigger è deterministico; il contenuto richiesto passa invece per PO/reviewer e finding strutturati, con controlli host su attribuzione, perimetro e prove. Correzioni, richieste di chiarimento e nuove specifiche restano distinte. Eventi duplicati, ritardati, fuori ordine e generati dall'integrazione stessa non devono produrre loop o doppi bounce. Le richieste su commit precedenti si riconciliano con il candidato attuale, senza ignorarle o applicarle ciecamente.
+
+L'approvazione e il merge restano umani secondo la policy attuale. Auto-merge, acquisto di crediti, aumento di budget e prosecuzione su nuove milestone non autorizzate non sono impliciti in questo accordo.
+
+### 13.5 Dipendenze e nuova priorità
+
+Non è tecnicamente necessario completare gli Step 1–6 prima di iniziare. Supervisione di base e proiezioni GH possono essere implementate e verificate sul percorso sequenziale attuale, con riprese limitate alle transizioni già supportate. Le capacità non disponibili restano dichiarate e bloccanti quando necessarie.
+
+1. **Supervisore persistente e recupero operativo**: prima priorità nella [#16](https://github.com/brushtyler/ssdlc/issues/16), sotto l'epic [#1](https://github.com/brushtyler/ssdlc/issues/1). Introdurre processo persistente, preflight, classificazione degli arresti, riprese supportate, ownership, contatori e diagnostica. Usare engine simulati per validare crash/ripresa; non attendere subgoal o advisory.
+2. **Intake e visibilità GH**: attuare la prima parte della [#4](https://github.com/brushtyler/ssdlc/issues/4), coordinata con #1: label autorizzata, mapping Issue/run/PR, commento unico, check sul commit e consegna idempotente. Nessuna duplicazione dello scheduler in workflow YAML.
+3. **Consumi e quote**: anticipare la [#14](https://github.com/brushtyler/ssdlc/issues/14) per distinguere spesa misurata, valore API stimato e quote. La raccolta completa dei provider può essere incrementale; il budget non viene disattivato per aggirare dati mancanti o falsi confronti. Restano limiti indipendenti su tentativi, invocazioni e durata.
+4. **Ciclo automatico di correzione**: completare il bounce Step 3b.3, quindi collegare le review GH alla riparazione, invalidazione, rivalidazione e ripetizione dei gate. Questo prerequisito riguarda l'attivazione del ciclo correttivo, non l'intera integrazione GH.
+5. **Ripresa del piano funzionale**: completare consegna verificata, routing/capacità e limiti condivisi, subgoal/advisory e validazione finale, mantenendo l'accettazione degli Step 3–6.
+
+La [#9](https://github.com/brushtyler/ssdlc/issues/9) sul parallelismo resta successiva al bounce e al contratto di integrazione: ottimizza la durata, ma non elimina le attese manuali tra arresto e ripresa. La [#3](https://github.com/brushtyler/ssdlc/issues/3) sull'autenticità resta un filone separato; le garanzie correnti degli hash non vengono ampliate implicitamente.
+
+### 13.6 Accettazione operativa
+
+- Una milestone autorizzata progredisce dalla Issue alla PR aggiornata senza richiedere messaggi in chat per avviare, controllare, diagnosticare un arresto recuperabile, riprendere o pubblicare.
+- Un crash del supervisore, evento duplicato o timeout GH non duplica run, tentativi, PR o commenti; il risultato remoto incerto si riconcilia prima di riprovare.
+- Un guasto recuperabile riparte dal checkpoint verificato con contatori ed evidenze conservati; un login mancante o una decisione necessaria produce un'unica richiesta d'intervento con causa e azione comprensibili.
+- Una richiesta formale di modifiche viene analizzata, corretta e riverificata sullo stesso candidato/PR soltanto quando il bounce richiesto è disponibile e nei limiti autorizzati.
+- Gli indicatori da misurare sono numero di interventi umani, tempo fermo in attesa, tempo di recupero, ripetizioni evitabili, durata totale e consumi. Ridurre il numero di gate o occultare errori non è un miglioramento del workflow.
