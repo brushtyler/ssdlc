@@ -1,0 +1,372 @@
+{
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "kind": {
+      "const": "candidate_check_record"
+    },
+    "record_id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{32}$"
+    },
+    "run_nonce": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{32}$"
+    },
+    "check": {
+      "type": "object",
+      "properties": {
+        "check_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+        },
+        "argv": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "minItems": 1,
+          "maxItems": 64
+        },
+        "cwd": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "timeout_sec": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "check_id",
+        "argv",
+        "cwd",
+        "timeout_sec"
+      ],
+      "additionalProperties": false
+    },
+    "source": {
+      "type": "object",
+      "properties": {
+        "commit": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "tree": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        }
+      },
+      "required": [
+        "commit",
+        "tree"
+      ],
+      "additionalProperties": false
+    },
+    "controller": {
+      "type": "object",
+      "properties": {
+        "head": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "files_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "head",
+        "files_sha256"
+      ],
+      "additionalProperties": false
+    },
+    "quality_contract_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "environment": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "enum": [
+            "local",
+            "role_container"
+          ]
+        },
+        "platform": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "reuse_eligible": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "image_name": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "image_id": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "pids": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "memory": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "cpus": {
+              "type": "string",
+              "maxLength": 1024
+            }
+          },
+          "required": [
+            "pids",
+            "memory",
+            "cpus"
+          ],
+          "additionalProperties": false
+        },
+        "no_new_privileges": {
+          "type": "boolean"
+        },
+        "verification_env": {
+          "type": "object",
+          "properties": {
+            "PYTEST_ADDOPTS_base": {
+              "type": "string",
+              "maxLength": 1024
+            }
+          },
+          "required": [
+            "PYTEST_ADDOPTS_base"
+          ],
+          "additionalProperties": false
+        },
+        "python": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "executable_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          },
+          "required": [
+            "version",
+            "executable_sha256"
+          ],
+          "additionalProperties": false
+        },
+        "tool": {
+          "type": "object",
+          "properties": {
+            "argv0": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "resolved_realpath": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          },
+          "required": [
+            "argv0",
+            "resolved_realpath",
+            "sha256"
+          ],
+          "additionalProperties": false
+        },
+        "env": {
+          "type": "object",
+          "properties": {
+            "PATH": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "PYTHONPATH": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "PYTHONHASHSEED": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "VIRTUAL_ENV": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "NODE_OPTIONS": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "NODE_PATH": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "LANG": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "LC_ALL": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "CI": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "PYTEST_ADDOPTS_base": {
+              "type": "string",
+              "maxLength": 1024
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "mode",
+        "platform",
+        "reuse_eligible"
+      ],
+      "additionalProperties": false
+    },
+    "privilege_mode": {
+      "enum": [
+        "root",
+        "non-root"
+      ]
+    },
+    "result": {
+      "type": "object",
+      "properties": {
+        "exit_code": {
+          "type": "integer"
+        },
+        "timed_out": {
+          "type": "boolean"
+        },
+        "empty_suite": {
+          "type": "boolean"
+        },
+        "status": {
+          "enum": [
+            "passed",
+            "failed"
+          ]
+        }
+      },
+      "required": [
+        "exit_code",
+        "timed_out",
+        "empty_suite",
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "log": {
+      "type": "object",
+      "properties": {
+        "ref": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "stored_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1048576
+        },
+        "total_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ref",
+        "sha256",
+        "stored_bytes",
+        "total_bytes",
+        "truncated"
+      ],
+      "additionalProperties": false
+    },
+    "provenance": {
+      "type": "object",
+      "properties": {
+        "producer": {
+          "const": "orchestrator._collect_candidate_evidence"
+        },
+        "produced_at": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "artifact_path": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "gate": {
+          "enum": [
+            "review",
+            "qa",
+            "appsec"
+          ]
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "producer",
+        "produced_at",
+        "artifact_path",
+        "gate",
+        "attempt"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schema_version",
+    "kind",
+    "record_id",
+    "run_nonce",
+    "check",
+    "source",
+    "controller",
+    "quality_contract_sha256",
+    "environment",
+    "privilege_mode",
+    "result",
+    "log",
+    "provenance"
+  ],
+  "additionalProperties": false
+}

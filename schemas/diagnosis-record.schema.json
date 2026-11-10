@@ -1,0 +1,428 @@
+{
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": "1.0"
+        },
+        "kind": {
+          "const": "allowance"
+        },
+        "allowance": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "allowance"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": "1.0"
+        },
+        "kind": {
+          "const": "request"
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{32}$"
+        },
+        "gate": {
+          "enum": [
+            "review",
+            "qa",
+            "appsec"
+          ]
+        },
+        "finding_id": {
+          "type": "string"
+        },
+        "finding_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "reviewed_commit": {
+          "type": "string"
+        },
+        "tree": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "request_id",
+        "gate",
+        "finding_id",
+        "finding_sha256",
+        "reviewed_commit",
+        "tree"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": "1.0"
+        },
+        "kind": {
+          "const": "association"
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{32}$"
+        },
+        "assoc_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{32}$"
+        },
+        "source_evaluation_identity": {
+          "type": "string"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "candidate_records": {
+          "type": "array"
+        },
+        "task_attribution": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "observed_provider": {
+          "type": "object",
+          "properties": {
+            "engine": {
+              "type": "string"
+            },
+            "model": {
+              "type": "string"
+            },
+            "reasoning_effort": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "engine",
+            "model",
+            "reasoning_effort"
+          ],
+          "additionalProperties": false
+        },
+        "provider_differs": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "request_id",
+        "assoc_id",
+        "source_evaluation_identity",
+        "attempt",
+        "candidate_records",
+        "task_attribution",
+        "observed_provider",
+        "provider_differs"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": "1.0"
+        },
+        "kind": {
+          "const": "reservation"
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{32}$"
+        },
+        "slot": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "request_id",
+        "slot"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": "1.0"
+        },
+        "kind": {
+          "const": "consumption"
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{32}$"
+        },
+        "slot": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "dispatch": {
+          "type": "object",
+          "properties": {
+            "engine": {
+              "type": "string"
+            },
+            "model": {
+              "type": "string"
+            },
+            "reasoning_effort": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "engine",
+            "model",
+            "reasoning_effort"
+          ],
+          "additionalProperties": false
+        },
+        "prompt_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "association": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{32}$"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "request_id",
+        "slot",
+        "dispatch",
+        "prompt_sha256",
+        "association"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": "1.0"
+        },
+        "kind": {
+          "const": "result"
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{32}$"
+        },
+        "finding_id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 8000
+        },
+        "text_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "total_chars": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "producer": {
+          "type": "object",
+          "properties": {
+            "engine": {
+              "type": "string"
+            },
+            "model": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "engine",
+            "model"
+          ],
+          "additionalProperties": false
+        },
+        "cost_usd": {
+          "type": "number"
+        },
+        "tokens_in": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tokens_out": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "source": {
+          "type": "object",
+          "properties": {
+            "commit": {
+              "type": "string"
+            },
+            "tree": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "commit",
+            "tree"
+          ],
+          "additionalProperties": false
+        },
+        "candidate_records": {
+          "type": "array"
+        },
+        "trust": {
+          "const": "untrusted_data"
+        },
+        "duration_sec": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "request_id",
+        "finding_id",
+        "text",
+        "text_sha256",
+        "truncated",
+        "total_chars",
+        "producer",
+        "cost_usd",
+        "tokens_in",
+        "tokens_out",
+        "source",
+        "candidate_records",
+        "trust"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": "1.0"
+        },
+        "kind": {
+          "const": "uncertain"
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{32}$"
+        },
+        "slot": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "reason": {
+          "enum": [
+            "dispatch_started_without_result",
+            "dispatch_raised"
+          ]
+        },
+        "exc_type": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "request_id",
+        "slot",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": "1.0"
+        },
+        "kind": {
+          "const": "exhaustion"
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{32}$"
+        },
+        "allowance": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reserved": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "slot": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "request_id": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{32}$"
+              }
+            },
+            "required": [
+              "slot",
+              "request_id"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "consumed_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "uncertain_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "schema_version",
+        "kind",
+        "request_id",
+        "allowance",
+        "reserved",
+        "consumed_refs",
+        "uncertain_refs"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}
