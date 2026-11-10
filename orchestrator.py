@@ -2049,6 +2049,38 @@ class SSDLCOrchestrator:
     def _candidate_fault(self, point):
         """Inert persistence-boundary hook for offline crash tests."""
 
+    def _diagnosis_fault(self, point):
+        """Inert persistence-boundary hook for diagnosis recovery tests."""
+
+    def _diagnose_gate(self, requests, results, candidate, wt, phase):
+        if not candidate_reports.convergence_enabled(candidate.quality):
+            return
+        tree = git(wt, 'rev-parse', 'HEAD^{tree}')
+        for request, result in zip(requests, results):
+            if result.assessment is None:
+                continue
+            findings = {f.id: f for f in result.assessment.findings}
+            for finding_id in sorted(result.assessment.diagnosis_required):
+                finding = findings[finding_id].to_dict()
+                provider = dict(engine=request.engine, model=request.model, reasoning_effort=request.reasoning_effort)
+                identity = request_identity(request)['identity']
+                def invoke(system, user):
+                    return EngineRunner.invoke_role(request.engine, request.model,
+                        system + '\n' + UNTRUSTED_DATA_INSTRUCTION,
+                        user,
+                        wt, self.project_id, self.ticket_id, f'{phase}-diag', sandbox='read-only',
+                        reasoning_effort=request.reasoning_effort)
+                def ledger(details):
+                    self.record_ledger(CostAndTelemetryEntry(f'{phase}-diag', 'Diagnosis', request.engine,
+                        request.model, details['transition'], 0, reasoning_effort=request.reasoning_effort,
+                        details=details))
+                candidate_reports.run_diagnosis(self.ssdlc_root, gate=request.gate, finding=finding,
+                    reviewed_commit=request.reviewed_commit, tree=tree, evaluation_identity=identity,
+                    attempt=request.attempt, candidate_records=[r['record_id'] for r in candidate.records],
+                    provider=provider, invoke=invoke, register=self._register_new, artifacts=self.state['artifacts'],
+                    check_budget=self.check_budget_circuit_breaker, record_gate=self.record_gate,
+                    ledger=ledger, fault=self._diagnosis_fault, candidate_block=candidate.block)
+
     def _register_new(self, ref, path):
         with self._registry_lock:
             meta = self.state.get('artifacts', {}).get(ref)
@@ -3291,6 +3323,7 @@ class SSDLCOrchestrator:
                     diff_char_budget=limit, system_prompt=system, user_prompt=user, review_models=review_models))
         self.record_artifact(str((run / 'inputs.json').relative_to(self.ssdlc_root)), run / 'inputs.json')
         results, terminals = [], []
+        diagnosis_pairs = []
 
         def verify():
             self._verify_candidate_evidence(candidate, wt)
@@ -3328,6 +3361,7 @@ class SSDLCOrchestrator:
             try:
                 result = evaluator.evaluate(request)
                 results.append(result)
+                diagnosis_pairs.append((request, result))
                 raw = result.response_text
                 if result.outcome_class not in ('approved', 'rejected_substantive'):
                     terminals.append(GateTerminalError(result.outcome_class, evaluator.identity, result.diagnostics))
@@ -3347,6 +3381,8 @@ class SSDLCOrchestrator:
             self.record_artifact(str(path.relative_to(self.ssdlc_root)), path)
         self.record_gate(f'CODE_REVIEW_A{attempt}', approved,
                          '; '.join(r.summary + '; ' + ', '.join(r.artifact_refs) for r in results))
+        for diag_request, diag_result in diagnosis_pairs:
+            self._diagnose_gate([diag_request], [diag_result], candidate, wt, '04-review')
         if terminals:
             raise terminals[0]
         return approved, report
@@ -3709,6 +3745,7 @@ class SSDLCOrchestrator:
             self._gate_terminal = (phase, 'integrity_blocked')
             return False, 'Phase roster differs; approval withheld'
         terminal = None
+        result = None
         try:
             result = evaluator.evaluate(request)
             approved, raw = result.approved, result.response_text
@@ -3724,6 +3761,8 @@ class SSDLCOrchestrator:
         except GateTerminalError:
             self._gate_terminal = (phase, 'integrity_blocked')
             return False, 'Phase completion differs; approval withheld'
+        if result is not None:
+            self._diagnose_gate([request], [result], candidate, wt, phase)
         for path in (run / 'response.md', base / ('qa-traceability-matrix.md' if gate == 'qa' else 'redteam-audit.md')):
             path.write_text(raw)
             self.record_artifact(str(path.relative_to(self.ssdlc_root)), path)

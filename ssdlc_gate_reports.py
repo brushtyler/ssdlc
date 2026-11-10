@@ -1,5 +1,7 @@
 """Host-side gate protocol. Hashes detect checkpoint changes, not authenticity."""
 import hashlib
+import fcntl
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -810,17 +812,27 @@ def register_candidate_record(root, body, log, register, fault=lambda point: Non
 
 
 def reconcile_candidate_store(root, artifacts, register):
+    if (Path(root) / "diagnosis").exists():
+        with store_lock(Path(root) / "diagnosis/store.lock"):
+            return _reconcile_candidate_store(root, artifacts, register)
+    return _reconcile_candidate_store(root, artifacts, register)
+
+
+def _reconcile_candidate_store(root, artifacts, register):
     """Verify the retained inventory before adopting any crash leftovers."""
     from ssdlc_tasks import validate_document
     root = Path(root)
     for ref, meta in list(artifacts.items()):
-        if ref.startswith('candidate-evidence/'):
+        if ref.startswith(('candidate-evidence/', 'diagnosis/')) and ref != 'diagnosis/store.lock':
             try:
                 data = _candidate_read(root, ref, 'log' if ref.endswith('.log') else 'record')
                 if _digest(data) != meta['sha256']:
                     raise ValueError()
             except (ProtocolError, ValueError, KeyError):
+                if ref.startswith('diagnosis/'):
+                    _diagnosis_inconsistent()
                 raise TaskError('Retained evidence artifact missing or changed')
+    diagnosis_pending = _diagnosis_inventory(root, artifacts)
     pending = []
     for directory in ('records', 'logs', 'decisions', 'catalogue'):
         base = root / 'candidate-evidence' / directory
@@ -861,7 +873,7 @@ def reconcile_candidate_store(root, artifacts, register):
                     raise TaskError('Unregistered candidate artifact identity mismatch') from exc
                 pending.append((ref, path))
             # Orphan logs are deliberately inert, never proof.
-    for ref, path in pending:
+    for ref, path in pending + diagnosis_pending:
         register(ref, path)
 
 
@@ -906,3 +918,231 @@ def candidate_catalogue(root, quality, records, rejected, artifacts):
                     'failed' if any(p['status'] != 'passed' for p in proof) else 'passed')
     return CandidateEvidence(entries, untrusted_data('candidate evidence catalogue', block), controls,
                              records, [], unmet, {k: v for k, v in quality.items() if k != 'baseline'})
+
+
+DEFAULT_DIAGNOSIS_ALLOWANCE = 2
+DIAGNOSIS_TEXT_MAX_CHARS = 8000
+DIAGNOSIS_SYSTEM = 'Diagnose the finding. Return advisory analysis only; do not modify files or grant approval.'
+DIAGNOSIS_POINTS = (
+    'diagnosis.after_lock_before_request',
+    'diagnosis.after_request_before_reservation',
+    'diagnosis.after_reservation_before_consumption',
+    'diagnosis.after_consumption_before_dispatch',
+    'diagnosis.after_dispatch_before_result',
+    'diagnosis.after_result_before_register',
+    'diagnosis.after_register_before_ledger',
+)
+
+
+@contextmanager
+def store_lock(path):
+    """Separate open descriptions serialize both threads and processes."""
+    path = Path(path)
+    path = _artifact_path(path, path.parent)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _diagnosis_inconsistent():
+    raise GateTerminalError('integrity_blocked', '', 'diagnosis_state_inconsistent')
+
+
+def diagnosis_request_id(body):
+    return _digest(canon({k: body[k] for k in
+                         ('gate', 'finding_id', 'finding_sha256', 'reviewed_commit', 'tree')}))[:32]
+
+
+def _diagnosis_inventory(root, artifacts):
+    """Validate the whole file-derived state before adopting crash leftovers."""
+    from ssdlc_tasks import validate_document
+    root = Path(root)
+    objects, pending = {}, []
+    try:
+        for path in sorted((root / 'diagnosis').rglob('*')):
+            if path.name.startswith('.gate-') or path.name == 'store.lock':
+                continue
+            if path.is_symlink():
+                raise ValueError()
+            if path.is_dir():
+                continue
+            ref = path.relative_to(root).as_posix()
+            data = _candidate_read(root, ref, 'record')
+            obj = json.loads(data, object_pairs_hook=_pairs)
+            validate_document('diagnosis-record', obj)
+            if data != canon(obj) or (ref in artifacts and _digest(data) != artifacts[ref]['sha256']):
+                raise ValueError()
+            objects[ref] = obj
+            if ref not in artifacts:
+                pending.append((ref, path))
+        allowance = objects.get('diagnosis/allowance.json', {}).get('allowance')
+        if objects and allowance is None:
+            raise ValueError()
+        slots, requests = {}, {}
+        for ref, obj in objects.items():
+            kind = obj['kind']
+            rid = obj.get('request_id')
+            base = f'diagnosis/requests/{rid}'
+            if kind == 'allowance':
+                expected = 'diagnosis/allowance.json'
+            elif kind == 'request':
+                expected = base + '/request.json'
+                if rid != diagnosis_request_id(obj):
+                    raise ValueError()
+                requests[rid] = obj
+            elif kind == 'association':
+                expected = base + '/associations/' + obj['assoc_id'] + '.json'
+                if obj['assoc_id'] != _digest(canon(dict(request_id=rid, source_evaluation_identity=obj['source_evaluation_identity'])))[:32]:
+                    raise ValueError()
+            elif kind == 'reservation':
+                expected = f"diagnosis/reservations/slot-{obj['slot']}.json"
+                if rid in slots or allowance is None or not 1 <= obj['slot'] <= allowance:
+                    raise ValueError()
+                slots[rid] = obj['slot']
+            elif kind == 'exhaustion':
+                expected = f"diagnosis/exhaustion-{rid}-{_digest(canon(obj))[:16]}.json"
+            else:
+                expected = base + '/' + kind + '.json'
+            if ref != expected:
+                raise ValueError()
+        for ref in artifacts:
+            if ref.startswith('diagnosis/') and ref != 'diagnosis/store.lock' and ref not in objects:
+                raise ValueError()
+        for ref, obj in objects.items():
+            kind, rid = obj['kind'], obj.get('request_id')
+            if rid is not None and rid not in requests:
+                raise ValueError()
+            base = f'diagnosis/requests/{rid}'
+            consumption = objects.get(base + '/consumption.json')
+            result = objects.get(base + '/result.json')
+            uncertain = objects.get(base + '/uncertain.json')
+            if kind in ('consumption', 'uncertain') and obj['slot'] != slots.get(rid):
+                raise ValueError()
+            if kind in ('result', 'uncertain') and not consumption:
+                raise ValueError()
+            if result and uncertain:
+                raise ValueError()
+            if kind == 'consumption' and base + '/associations/' + obj['association'] + '.json' not in objects:
+                raise ValueError()
+            if kind == 'result':
+                req = requests[rid]
+                if (obj['text_sha256'] != _digest(obj['text'].encode()) or
+                    obj['truncated'] != (obj['total_chars'] > len(obj['text'])) or
+                    obj['total_chars'] < len(obj['text']) or
+                    obj['finding_id'] != req['finding_id'] or
+                    obj['source'] != dict(commit=req['reviewed_commit'], tree=req['tree']) or
+                    obj['producer'] != {k: consumption['dispatch'][k] for k in ('engine', 'model')}):
+                    raise ValueError()
+    except (Exception,) as exc:
+        if isinstance(exc, GateTerminalError):
+            raise
+        _diagnosis_inconsistent()
+    return pending
+
+
+def load_diagnosis(root, request_id, artifacts):
+    _diagnosis_inventory(root, artifacts)
+    ref = f'diagnosis/requests/{request_id}/result.json'
+    if ref not in artifacts:
+        _diagnosis_inconsistent()
+    return json.loads(_candidate_read(root, ref, 'record'))
+
+
+def run_diagnosis(root, *, gate, finding, reviewed_commit, tree, evaluation_identity,
+                  attempt, candidate_records, provider, invoke, register, artifacts,
+                  check_budget=lambda: None, record_gate=lambda *args: None,
+                  ledger=lambda details: None, fault=lambda point: None, candidate_block=''):
+    """A consumed request is never inferred again, including the pre-call crash window."""
+    root = Path(root)
+    body = dict(gate=gate, finding_id=finding['id'], finding_sha256=_digest(canon(finding)),
+                reviewed_commit=reviewed_commit, tree=tree)
+    rid = diagnosis_request_id(body)
+    base = f'diagnosis/requests/{rid}'
+    assoc = _digest(canon(dict(request_id=rid, source_evaluation_identity=evaluation_identity)))[:32]
+    def write(ref, obj, exclusive=False):
+        obj = dict(obj, schema_version='1.0')
+        try:
+            (write_exclusive if exclusive else write_or_verify)(root / ref, canon(obj), root=root)
+        except FileExistsError as exc:
+            raise GateTerminalError('integrity_blocked', rid, 'diagnosis_slot_conflict') from exc
+    def read(ref):
+        path = root / ref
+        return json.loads(_candidate_read(root, ref, 'record')) if path.exists() else None
+    def adopt():
+        for ref, path in _diagnosis_inventory(root, artifacts):
+            register(ref, path)
+    def uncertain(reason, exc_type=None):
+        obj = dict(kind='uncertain', request_id=rid, slot=consumption['slot'], reason=reason)
+        if exc_type:
+            obj['exc_type'] = exc_type
+        if not read(base + '/uncertain.json'):
+            write(base + '/uncertain.json', obj)
+        adopt()
+        ledger(dict(diagnosis_request_id=rid, transition='uncertain', slot=consumption['slot']))
+        raise GateTerminalError('diagnosis_uncertain', rid,
+            f"Inspect {base}/uncertain.json and {base}/consumption.json. Result was not fabricated or re-inferred. "
+            'Operator must inspect and reject or change source; no provider or budget change.')
+    with store_lock(root / 'diagnosis/store.lock'):
+        fault(DIAGNOSIS_POINTS[0])
+        adopt()
+        if not read('diagnosis/allowance.json'):
+            write('diagnosis/allowance.json', dict(kind='allowance', allowance=DEFAULT_DIAGNOSIS_ALLOWANCE))
+        write(base + '/request.json', dict(kind='request', request_id=rid, **body))
+        consumption = read(base + '/consumption.json')
+        write(base + f'/associations/{assoc}.json', dict(kind='association', request_id=rid,
+            assoc_id=assoc, source_evaluation_identity=evaluation_identity, attempt=attempt,
+            candidate_records=candidate_records, task_attribution=list(finding.get('task_attribution', [])),
+            observed_provider=provider, provider_differs=bool(consumption and consumption['dispatch'] != provider)))
+        fault(DIAGNOSIS_POINTS[1])
+        adopt()
+        result = read(base + '/result.json')
+        if result:
+            return load_diagnosis(root, rid, artifacts)
+        if consumption:
+            uncertain('dispatch_started_without_result')
+        reservations = [read(p.relative_to(root).as_posix()) for p in sorted((root / 'diagnosis/reservations').glob('slot-*.json'))]
+        slot = next((r['slot'] for r in reservations if r['request_id'] == rid), None)
+        allowance = read('diagnosis/allowance.json')['allowance']
+        if slot is None:
+            if len(reservations) >= allowance:
+                consumed = sorted(p.relative_to(root).as_posix() for p in (root / 'diagnosis/requests').glob('*/consumption.json'))
+                uncertain_refs = sorted(p.relative_to(root).as_posix() for p in (root / 'diagnosis/requests').glob('*/uncertain.json'))
+                snapshot = dict(schema_version='1.0', kind='exhaustion', request_id=rid, allowance=allowance,
+                                reserved=[dict(slot=r['slot'], request_id=r['request_id']) for r in reservations],
+                                consumed_refs=consumed, uncertain_refs=uncertain_refs)
+                write(f'diagnosis/exhaustion-{rid}-{_digest(canon(snapshot))[:16]}.json', snapshot)
+                adopt()
+                msg = (f'Allowance {allowance}; reserved {len(reservations)}, consumed {len(consumed)}, uncertain {len(uncertain_refs)}. '
+                       f'Consumed records: {consumed}. Operator must review these records and use reject or open a new ticket. Counters are never reset.')
+                record_gate('DIAGNOSIS_ALLOWANCE_EXHAUSTED', False, msg)
+                ledger(dict(diagnosis_request_id=rid, transition='exhausted', slot=None))
+                raise GateTerminalError('diagnosis_exhausted', rid, msg)
+            slot = next(n for n in range(1, allowance + 1) if n not in [r['slot'] for r in reservations])
+            write(f'diagnosis/reservations/slot-{slot}.json', dict(kind='reservation', request_id=rid, slot=slot), True)
+        fault(DIAGNOSIS_POINTS[2])
+        user = untrusted_data('finding', finding) + '\n' + untrusted_data('candidate evidence catalogue', candidate_block)
+        consumption = dict(kind='consumption', request_id=rid, slot=slot, dispatch=provider,
+                           prompt_sha256=_digest(user.encode()), association=assoc)
+        write(base + '/consumption.json', consumption, True)
+        fault(DIAGNOSIS_POINTS[3])
+        try:
+            check_budget()
+            text, cost, tin, tout, trace = invoke(DIAGNOSIS_SYSTEM, user)
+        except Exception as exc:
+            uncertain('dispatch_raised', type(exc).__name__)
+        fault(DIAGNOSIS_POINTS[4])
+        bounded = text[:DIAGNOSIS_TEXT_MAX_CHARS]
+        write(base + '/result.json', dict(kind='result', request_id=rid, finding_id=finding['id'],
+            text=bounded, text_sha256=_digest(bounded.encode()), truncated=len(text) > len(bounded), total_chars=len(text),
+            producer={k: provider[k] for k in ('engine', 'model')}, cost_usd=cost, tokens_in=tin, tokens_out=tout,
+            source=dict(commit=reviewed_commit, tree=tree), candidate_records=candidate_records, trust='untrusted_data'), True)
+        fault(DIAGNOSIS_POINTS[5])
+        adopt()
+        fault(DIAGNOSIS_POINTS[6])
+        for transition in ('requested', 'reserved', 'consumed', 'result'):
+            ledger(dict(diagnosis_request_id=rid, transition=transition, slot=slot))
+        return load_diagnosis(root, rid, artifacts)
