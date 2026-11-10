@@ -173,7 +173,7 @@ def mkdirs(root, rel='.'):
     root = Path(root)
     # .ssdlc itself is an existing project directory and is not chmodded.
     if not root.parent.exists():
-        root.parent.mkdir(mode=0o700)
+        root.parent.mkdir(mode=0o700, exist_ok=True)
     target = _safe_path(root, rel)
     for p in [root] + [root.joinpath(*Path(rel).parts[:i]) for i in range(1, len(Path(rel).parts) + 1)]:
         _safe_path(root, p.relative_to(root))

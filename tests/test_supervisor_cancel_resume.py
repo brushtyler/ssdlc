@@ -217,35 +217,35 @@ class TestSecretsAndBoundaryT3(CoreCase):
     terminal = TestResumeAndArgv.terminal
     # Reuse fixture helpers without rediscovering the parent test methods below.
     def test_sentinels_refused_accepted_cancel_and_controller_events(self):
-        secret = 'SENTINEL_SECRET_T3_78a4'
-        self.args.update(goal=secret + ' ; rm -rf inert', test_cmd='printf ' + secret)
+        sentinel = 'SENTINEL_SECRET_T3_78a4'
+        self.args.update(goal=sentinel + ' ; rm -rf inert', test_cmd='printf ' + sentinel)
         self.baseline()
         self.controller('import time\ntime.sleep(30)\n')
-        with patch.dict(os.environ, {'T3_PRIVATE': secret}):
+        with patch.dict(os.environ, {'T3_PRIVATE': sentinel}):
             store = self.terminal()
             canonical = tree(self.repo / '.ssdlc/T-1'), tree(self.repo / '.ssdlc/.runtime')
             output, errors = io.StringIO(), io.StringIO()
             with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
-                denied = s.resume(dict(self.args, entrypoint='plan', payload=secret), self.clock)
+                denied = s.resume(dict(self.args, entrypoint='plan', payload=sentinel), self.clock)
                 self.assertEqual(s.exit_code(denied), 14)
-                accepted = s.resume(dict(self.args, entrypoint='run', from_phase='03-dev', payload=secret))
+                accepted = s.resume(dict(self.args, entrypoint='run', from_phase='03-dev', payload=sentinel))
                 self.assertEqual(accepted['handoff']['outcome'], 'launched')
                 current = s.RunStore(self.repo, 'T-1'); current.current()
                 with patch.dict(os.environ, hook_environment(current)):
-                    o._supervision_event('failure', category=secret, exc_type='RuntimeError')
-                    o._supervision_event('dispatch_started', dispatch_id='d'*32, engine='codex', task_id=secret + '/bad', attempt=1)
-                    o._supervision_event('failure', category='TASK_EXECUTION', exc_type='RuntimeError', output=secret)
+                    o._supervision_event('failure', category=sentinel, exc_type='RuntimeError')
+                    o._supervision_event('dispatch_started', dispatch_id='d'*32, engine='codex', task_id=sentinel + '/bad', attempt=1)
+                    o._supervision_event('failure', category='TASK_EXECUTION', exc_type='RuntimeError', output=sentinel)
                     o._supervision_event('failure', category='TASK_EXECUTION', exc_type='RuntimeError')
                     o._supervision_event('run_ended', exit_code=0)
                 docker = FakeDocker()
                 d = current.read()
-                docker.containers = [dict(id='d'*64, name=secret, state='running', labels={'ssdlc.run_id': d['run_id'], 'ssdlc.project': d['project']['key'], 'private': secret})]
+                docker.containers = [dict(id='d'*64, name=sentinel, state='running', labels={'ssdlc.run_id': d['run_id'], 'ssdlc.project': d['project']['key'], 'private': sentinel})]
                 s.cancel(self.repo, 'T-1', grace=0, docker=docker)
             self.assertEqual(canonical, (tree(self.repo / '.ssdlc/T-1'), tree(self.repo / '.ssdlc/.runtime')))
             for path in store.root.rglob('*'):
                 if path.is_file():
-                    self.assertNotIn(secret.encode(), path.read_bytes(), str(path))
-            self.assertNotIn(secret, output.getvalue() + errors.getvalue())
+                    self.assertNotIn(sentinel.encode(), path.read_bytes(), str(path))
+            self.assertNotIn(sentinel, output.getvalue() + errors.getvalue())
             events = s.controller_events(current, current.read())[0]
             self.assertEqual([e['type'] for e in events], ['failure', 'run_ended'])
 
@@ -298,7 +298,12 @@ class TestCrashRecoveryT3(CoreCase):
         deadline = time.monotonic() + 3
         while s.identity_state(store.read(), 'worker') == s.OWNED and time.monotonic() < deadline:
             time.sleep(.01)
-        adopted = s.restart_worker(store)
+        # This real-helper test controls only its two child processes. A shared
+        # host can contain unrelated same-uid non-dumpable processes; the production
+        # all-process scan intentionally refuses adoption in that environment.
+        proc = s.Proc()
+        proc.pids = lambda: [leader['pid'], d['processes']['controller']['pid']]
+        adopted = s.restart_worker(store, proc=proc)
         self.assertEqual(adopted['status'], 'running', (adopted, s.identity_state(store.read(), 'controller'), s.identity_state(store.read(), 'worker')))
         self.assertEqual(store.read()['worker_generation'], 2)
         (self.repo / 'release').write_text('go')

@@ -566,34 +566,34 @@ class TestNoSecretsAndCanonicalBoundary(CoreCase):
             for p in [root] + list(root.rglob('*'))}
 
     def test_sentinel_all_channels_and_canonical_runtime_unchanged(self):
-        secret = 'SENTINEL_SECRET_27c91'
+        sentinel = 'SENTINEL_SECRET_27c91'
         ticket = self.repo / '.ssdlc/T-1'
         runtime = self.repo / '.ssdlc/.runtime'
         for root in [ticket, runtime]:
             (root / 'nested').mkdir(parents=True)
             (root / 'nested/evidence').write_text('canonical fixture')
         before = [self.snapshot(p) for p in [ticket, runtime]]
-        self.controller('import sys, time\nprint(' + repr(secret) + ', flush=True)\n'
-                        'print(' + repr(secret) + ', file=sys.stderr, flush=True)\ntime.sleep(30)\n')
-        self.args.update(goal=secret, test_cmd='echo ' + secret)
+        self.controller('import sys, time\nprint(' + repr(sentinel) + ', flush=True)\n'
+                        'print(' + repr(sentinel) + ', file=sys.stderr, flush=True)\ntime.sleep(30)\n')
+        self.args.update(goal=sentinel, test_cmd='echo ' + sentinel)
         self.addCleanup(self.cleanup_run)
-        with patch.dict(os.environ, {'PROVIDER_TOKEN': secret}), contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+        with patch.dict(os.environ, {'PROVIDER_TOKEN': sentinel}), contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
             result = sup.start(self.args)
             self.assertEqual(result['handoff']['outcome'], 'launched')
             store = sup.RunStore(self.repo, 'T-1')
             d = store.current()
-            self.assertEqual(d['authorized']['test_cmd_sha256'], sup.digest('echo ' + secret))
+            self.assertEqual(d['authorized']['test_cmd_sha256'], sup.digest('echo ' + sentinel))
             self.assertEqual(sup.status(self.repo, 'T-1')['status'], 'running')
             sup.reconcile(store)
             with self.assertRaises(ValueError):
-                store.append(store.path('events.jsonl'), dict(type='failure', provider_text=secret))
+                store.append(store.path('events.jsonl'), dict(type='failure', provider_text=sentinel))
             result = sup.cancel(self.repo, 'T-1', grace=0)
             self.assertEqual(result['status'], 'cancelled')
-        self.assertNotIn(secret, out.getvalue() + err.getvalue() + json.dumps(result))
+        self.assertNotIn(sentinel, out.getvalue() + err.getvalue() + json.dumps(result))
         for p in store.root.rglob('*'):
             self.assertEqual(p.stat().st_mode & 0o777, 0o700 if p.is_dir() else 0o600)
             if p.is_file():
-                self.assertNotIn(secret.encode(), p.read_bytes(), str(p))
+                self.assertNotIn(sentinel.encode(), p.read_bytes(), str(p))
         self.assertEqual(before, [self.snapshot(p) for p in [ticket, runtime]])
         # No output files exist; the process stdio target is the kernel null device.
         self.assertFalse(list(store.root.rglob('*.out')))
@@ -949,6 +949,28 @@ class TestCompletionModeAndForegroundRegressions(CoreCase):
             o.SSDLCOrchestrator._run_pipeline(fake, 'goal', from_phase='03-dev')
         # Supervised compatibility remains read-only and still refuses missing state.
         self.assertFalse(o.resume_compatibility(self.repo, 'T-1', 'run', '03-dev', {'SSDLC_ENABLE_TASK_BREAKDOWN': 'true'})['ok'])
+
+class TestSharedHostBoundaries(CoreCase):
+    def test_concurrent_creation_of_project_metadata_parent_is_idempotent(self):
+        parent = self.repo / '.ssdlc'
+        parent.mkdir(mode=0o700)
+        real_exists = Path.exists
+        with patch.object(Path, 'exists', lambda p: False if p == parent else real_exists(p)):
+            store = sup.RunStore(self.repo, 'T-1', clock=self.clock)
+            store.prepare()
+        self.assertTrue((parent / '.supervisor/T-1').is_dir())
+
+    def test_unreadable_same_uid_process_still_blocks_adoption(self):
+        store, proc = self.fake_run()
+        del proc.entries[1001]
+        proc.add(3003)
+        proc.entries[3003][3] = PermissionError()
+        before = store.read()
+        with patch.object(sup, 'spawn', side_effect=AssertionError('ambiguous adoption')):
+            out = sup.restart_worker(store, proc=proc)
+        self.assertEqual((out['status'], out['status_reason']), ('blocked', 'reconcile'))
+        self.assertEqual(store.read(), before)
+        self.assertFalse(proc.signals)
 
 if __name__ == '__main__':
     unittest.main()
