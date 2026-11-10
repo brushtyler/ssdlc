@@ -43,6 +43,7 @@ from ssdlc_gate_reports import (GateEvaluator, EvaluationRequest, GateTerminalEr
 import ssdlc_bounce as bounce
 from ssdlc_bounce import request_identity
 from ssdlc_catalogues import CatalogueError, requirement_catalogue
+from ssdlc_requirements import prepare_requirements
 from ssdlc_controller import assert_controller, controller_snapshot
 
 from ssdlc_tasks import (
@@ -2374,6 +2375,130 @@ class SSDLCOrchestrator:
     # ------------------------------------------------------------------
     # PHASE 1: Product Owner (PO)
     # ------------------------------------------------------------------
+    def _validate_po_requirements(self) -> Path:
+        """Validate before PO approval; archive a lossless format revision."""
+        try:
+            return self._apply_po_validation()
+        except (PlanError, CatalogueError, OSError, ValueError, KeyError, TypeError) as exc:
+            self.record_gate('PO_SPEC_GATE', False, 'PO validation failed; canonical specification is not approved')
+            if isinstance(exc, PlanError):
+                raise
+            raise PlanError('PO validation failed: invalid or unavailable recorded evidence') from exc
+
+    def _apply_po_validation(self) -> Path:
+        req_file = self.dir_po / 'requirements.md'
+        ref = '01-po/requirements.md'
+        if any(path.is_symlink() for path in (self.ssdlc_root, self.dir_po, req_file)):
+            raise PlanError('PO validation rejects symlinked control artifacts')
+        meta = self.state.get('artifacts', {}).get(ref)
+        current = req_file.read_bytes()
+        current_hash = hashlib.sha256(current).hexdigest()
+        intent_ref = self.state.get('po_validation_ref')
+
+        def retained(name):
+            path = confined(self.ssdlc_root, name, protect=False)
+            entry = self.state['artifacts'].get(name)
+            if not entry or entry['path'] != name or not path.is_file() or file_hash(path) != entry['sha256']:
+                raise PlanError('PO validation evidence is missing or changed')
+            return path
+
+        def publish(path, data):
+            write_or_verify(path, data, root=self.ssdlc_root)
+            name = str(path.relative_to(self.ssdlc_root))
+            if name in self.state['artifacts']:
+                retained(name)
+            else:
+                self.record_artifact(name, path)
+
+        intent = None
+        if intent_ref:
+            previous = json.loads(retained(intent_ref).read_text())
+            raw = retained(previous['original_ref']).read_bytes()
+            canonical = retained(previous['normalized_ref']).read_bytes()
+            normalized, mapping, catalogue = prepare_requirements(raw.decode('utf-8'))
+            if (previous.get('schema_version') != '1.0'
+                    or catalogue['required_ids'] != previous['required_ids']
+                    or file_hash(retained(previous['original_ref'])) != previous['original_sha256']
+                    or hashlib.sha256(canonical).hexdigest() != previous['normalized_sha256']
+                    or normalized.encode('utf-8') != canonical or mapping != previous['id_mapping']):
+                raise PlanError('PO validation intent is inconsistent')
+            if current_hash in (previous['original_sha256'], previous['normalized_sha256']):
+                intent = previous
+        if not meta or (current_hash != meta['sha256'] and not (
+                intent and current_hash == intent['normalized_sha256']
+                and meta['sha256'] == intent['original_sha256'])):
+            raise PlanError('PO requirements changed outside a recorded format revision')
+        if intent is None:
+            directory = self.dir_po / 'validation' / current_hash
+            publish(directory / 'original.md', current)
+            try:
+                normalized, mapping, catalogue = prepare_requirements(current.decode('utf-8'))
+            except CatalogueError as exc:
+                publish(directory / 'diagnostics.json', canon(list(exc.diagnostics)))
+                summary = '; '.join(f"{d['code']} {str(d.get('ref', d.get('kind', '')))[:80]} "
+                                    f"line {d.get('source_line', d.get('source_lines', '?'))}"
+                                    for d in exc.diagnostics[:8])
+                raise PlanError('PO requirement validation failed: ' + summary, exc.diagnostics) from exc
+            canonical = normalized.encode('utf-8')
+            publish(directory / 'normalized.md', canonical)
+            intent = dict(schema_version='1.0', original_ref=str((directory / 'original.md').relative_to(self.ssdlc_root)),
+                normalized_ref=str((directory / 'normalized.md').relative_to(self.ssdlc_root)),
+                original_sha256=current_hash, normalized_sha256=hashlib.sha256(canonical).hexdigest(),
+                id_mapping=mapping, required_ids=catalogue['required_ids'])
+            intent_ref = str((directory / 'intent.json').relative_to(self.ssdlc_root))
+            publish(directory / 'intent.json', canon(intent))
+            self.state['po_validation_ref'] = intent_ref
+            self._save_state()
+        # The registered intent and immutable originals precede the canonical
+        # write, so restart can reconcile this exact interrupted replacement.
+        if current != canonical:
+            descriptor, name = tempfile.mkstemp(prefix='.po-', dir=self.dir_po)
+            temporary = Path(name)
+            try:
+                with os.fdopen(descriptor, 'wb') as stream:
+                    stream.write(canonical)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                temporary.replace(req_file)
+            finally:
+                temporary.unlink(missing_ok=True)
+        if self.state['artifacts'][ref]['sha256'] != intent['normalized_sha256']:
+            self.record_artifact(ref, req_file)
+        details = f"Validated requirement definitions; {intent_ref}; {intent['normalized_sha256']}"
+        previous_gates = [g for g in self.state.get('gate_history', []) if g['gate'] == 'PO_SPEC_GATE']
+        if not previous_gates or not previous_gates[-1]['passed'] or previous_gates[-1]['details'] != details:
+            self.record_gate('PO_SPEC_GATE', True, details)
+        print(f"[01-po] Validated {len(intent['required_ids'])} requirement definitions; "
+              f"{len(intent['id_mapping'])} explicit ID format mapping(s); evidence: {intent_ref}", flush=True)
+        return req_file
+
+    def resume_po_validation(self) -> Path:
+        """Repair/validate recorded PO syntax only; never call a provider."""
+        with ticket_lock(self.ssdlc_root / 'ticket.lock'):
+            self.state = self._load_or_init_state()
+            if (not self._task_mode() or self.state.get('current_phase') not in ('01-po', '02-design')
+                    or self.worktree_dir.exists() or (self.dir_design / 'plan.json').exists()
+                    or (self.dir_design / 'design-session/session.json').exists()
+                    or (self.dir_dev / 'tasks/task-journal.jsonl').exists()
+                    or any(e.get('phase', '').startswith(('02-design', '03-dev'))
+                           for e in self.state.get('ledger', []))):
+                raise PlanError('PO validation resume requires a task ticket before design/planning/development')
+            if (git(self.repo_root, 'rev-parse', 'HEAD') != self.state['base_commit']
+                    or git(self.repo_root, 'status', '--porcelain')):
+                raise PlanError('PO validation resume requires the unchanged clean target baseline')
+            try:
+                result = self._validate_po_requirements()
+            except (PlanError, CatalogueError) as exc:
+                self.state.update(status='FAILED', failure=dict(phase='01-po', type=type(exc).__name__,
+                                  category='PO_VALIDATION', message=str(exc)))
+                self._save_state()
+                raise
+            if self.state.get('status') != 'PO_READY' or self.state.get('failure'):
+                self.state.pop('failure', None)
+                self.state.update(status='PO_READY', current_phase='01-po', current_step='po-validation')
+                self._save_state()
+            return result
+
     @_supervised_phase('01-po')
     def run_phase_po(self, goal: str) -> Path:
         risk_tier = self.state.get("risk_tier", "M")
@@ -2409,6 +2534,11 @@ class SSDLCOrchestrator:
             f"{ui_nfr_prompt}"
             "Be concrete, testable, and unambiguous."
         )
+        if self._task_mode():
+            sys_prompt += ("\nRequirement IDs must match (AC|SEC)-[A-Za-z0-9]+(-[A-Za-z0-9]+)*. "
+                           "Use AC-1-1 or AC-1a for explicit child definitions, never AC-1.1. "
+                           "Declare each ID exactly once. Prose mentions are not definitions. "
+                           "Keep ordinary subcases as prose if they are not separate named obligations.")
         user_prompt = f"CODEBASE RECON & BLAST RADIUS:\n{recon_text}\n\nUSER GOAL:\n{goal}"
 
         t0 = time.time()
@@ -2434,7 +2564,7 @@ class SSDLCOrchestrator:
                 "Product Owner",
                 engine,
                 model,
-                "PASS",
+                "GENERATED" if self._task_mode() else "PASS",
                 dur,
                 cost,
                 tin,
@@ -2444,12 +2574,16 @@ class SSDLCOrchestrator:
             )
         )
 
-        has_ac = bool(re.search(r"AC-\d+", out))
-        has_sec = bool(re.search(r"SEC-\d+", out))
-        if not (has_ac and has_sec):
-            self.record_gate("PO_SPEC_GATE", False, "Missing numbered AC-x or SEC-x items")
-            raise RuntimeError("PO Gate Failed: requirements.md must define AC-1..N and SEC-1..N.")
-        self.record_gate("PO_SPEC_GATE", True, "Verified numbered ACs and Security Abuse Cases.")
+        if self._task_mode():
+            self._validate_po_requirements()
+            out = req_file.read_text(encoding='utf-8')
+        else:
+            has_ac = bool(re.search(r"AC-\d+", out))
+            has_sec = bool(re.search(r"SEC-\d+", out))
+            if not (has_ac and has_sec):
+                self.record_gate("PO_SPEC_GATE", False, "Missing numbered AC-x or SEC-x items")
+                raise RuntimeError("PO Gate Failed: requirements.md must define AC-1..N and SEC-1..N.")
+            self.record_gate("PO_SPEC_GATE", True, "Verified numbered ACs and Security Abuse Cases.")
         print(f"    [OK] Wrote {req_file.relative_to(self.repo_root)}")
 
         if self.remote_sync.enabled:
@@ -2495,6 +2629,8 @@ class SSDLCOrchestrator:
         self.state.update(current_phase='02-design', current_step='pair-design')
         self._save_state()
         recon_text = (self.dir_recon / 'context-and-blast-radius.md').read_text()
+        if self.state.get('po_validation_ref'):
+            self._validate_po_requirements()
         req_text = (self.dir_po / 'requirements.md').read_text()
         risk = self.state.get('risk_tier', 'M')
         profile = self.state.get('dev_profile', 'ALGORITHMIC')
@@ -4326,6 +4462,10 @@ def _foreground_main(argv=None) -> int:
     p_plan.add_argument("--review-repairs", type=int, choices=range(5), default=None, help="Explicitly extend the persisted semantic repair allowance (0-4)")
     p_plan.add_argument('--recover-review', action='store_true', help='Explicitly revalidate an archived rejected review after a validator fix, preserving attempt counts')
 
+    p_po = sub.add_parser('po', help='Validate existing task-mode PO requirements without invoking a model')
+    p_po.add_argument('--ticket', required=True)
+    p_po.add_argument('--repo', '-r', default='.')
+
     p_design = sub.add_parser('design', help='Resume pair design from its persisted ADR and review history')
     p_design.add_argument('--ticket', required=True)
     p_design.add_argument('--repo', '-r', default='.')
@@ -4365,6 +4505,15 @@ def _foreground_main(argv=None) -> int:
         import ssdlc_supervisor
         return ssdlc_supervisor.cli(args, parser)
     repo_path = Path(getattr(args, "repo", ".")).resolve()
+
+    if args.subcommand == 'po':
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', args.ticket):
+            parser.error('po validation requires a literal ticket ID')
+        if not (repo_path / '.ssdlc' / args.ticket / 'state.json').is_file():
+            parser.error('po validation requires an existing ticket')
+        orch = SSDLCOrchestrator(repo_path, args.ticket, sync_remote=False)
+        print(orch.resume_po_validation())
+        return 0
 
     if args.subcommand == 'bounce-preview':
         if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', args.ticket) or args.attempt < 1:
