@@ -185,6 +185,33 @@ class TestDispatchHooks(Case):
             self.assertEqual(os.waitstatus_to_exitcode(status), 0)
         self.assertEqual([e['seq'] for e in self.events()], list(range(1, 33)))
 
+    def test_main_exit_none_and_bool_preserve_python_exit_semantics(self):
+        for value, expected in [(None, 0), (0, 0), (False, 0), (True, 1), (2, 2), ('PRIVATE_EXIT_MESSAGE', 1)]:
+            with self.subTest(value=value):
+                self.event_file(self.store_).unlink(missing_ok=True)
+                error = SystemExit(value)
+                with patch.object(o, '_supervised_preflight', return_value=True), patch.object(o, '_foreground_main', side_effect=error):
+                    with self.assertRaises(SystemExit) as raised:
+                        o.main(['run'])
+                self.assertIs(raised.exception, error)
+                events = self.events()
+                self.assertEqual([e['type'] for e in events], ['run_ended'] if expected == 0 else ['failure', 'run_ended'])
+                self.assertEqual(events[-1]['exit_code'], expected)
+                self.assertIs(type(events[-1]['exit_code']), int)
+                self.assertNotIn('PRIVATE_EXIT_MESSAGE', self.event_file(self.store_).read_text())
+
+    def test_main_exit_return_values_keep_original_return_and_typed_evidence(self):
+        for value, expected in [(None, 0), (0, 0), (False, 0), (True, 1), (2, 2), ('PRIVATE_RETURN_MESSAGE', 1)]:
+            with self.subTest(value=value):
+                self.event_file(self.store_).unlink(missing_ok=True)
+                with patch.object(o, '_supervised_preflight', return_value=True), patch.object(o, '_foreground_main', return_value=value):
+                    self.assertIs(o.main(['run']), value)
+                events = self.events()
+                self.assertEqual([e['type'] for e in events], ['run_ended'])
+                self.assertEqual(events[-1]['exit_code'], expected)
+                self.assertIs(type(events[-1]['exit_code']), int)
+                self.assertNotIn('PRIVATE_RETURN_MESSAGE', self.event_file(self.store_).read_text())
+
     def test_integrity_preflight_before_constructor_and_ended(self):
         with patch.object(o.SSDLCOrchestrator, '__init__', side_effect=AssertionError):
             self.assertEqual(o.main(['run', '--ticket', 'T', '--goal', 'g']), 21)

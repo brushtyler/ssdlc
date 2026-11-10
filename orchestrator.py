@@ -4434,6 +4434,12 @@ def _foreground_main(argv=None) -> int:
     return 0
 
 
+def _supervised_exit_code(value) -> int:
+    # sys.exit(None) succeeds; bool is an int for Python's exit semantics, but
+    # lifecycle evidence requires an actual int. Non-numeric messages mean 1.
+    return 0 if value is None else int(value) if isinstance(value, int) else 1
+
+
 def main(argv=None) -> int:
     words = sys.argv[1:] if argv is None else argv
     supervised = bool(os.environ.get('SSDLC_SUPERVISED_RUN_ID')) and bool(words) and words[0] in {'run', 'plan', 'design'}
@@ -4444,12 +4450,14 @@ def main(argv=None) -> int:
         if not _supervised_preflight():
             code = 21
             return code
-        code = _foreground_main(argv)
-        return code
+        result = _foreground_main(argv)
+        code = _supervised_exit_code(result)
+        return result
     except BaseException as exc:
         exc_type = type(exc).__name__
-        code = exc.code if isinstance(exc, SystemExit) and type(exc.code) is int else 1
-        _supervision_event('failure', category=getattr(exc, 'category', 'PLAN_ERROR' if isinstance(exc, PlanError) else 'TASK_EXECUTION'), exc_type=exc_type)
+        code = _supervised_exit_code(exc.code) if isinstance(exc, SystemExit) else 1
+        if code != 0:
+            _supervision_event('failure', category=getattr(exc, 'category', 'PLAN_ERROR' if isinstance(exc, PlanError) else 'TASK_EXECUTION'), exc_type=exc_type)
         raise
     finally:
         _supervision_event('run_ended', exit_code=code, exc_type=exc_type)
