@@ -778,3 +778,45 @@ previous round evidence is retained. Semantic task-plan rejections likewise prin
 the reviewer feedback and archived report path. These logs add no model calls and
 do not change retry limits or approval criteria. Controllers already running from
 a pinned checkout retain their original logging behavior.
+
+### Task gate reports
+
+Task-mode Review, QA and AppSec require a human report, one JSON object between
+`-----BEGIN SSDLC GATE REPORT <id16>-----` and
+`-----END SSDLC GATE REPORT <id16>-----` (each marker on its own line), and one
+exact final verdict: `REVIEW_STATUS: APPROVED|CHANGES_REQUESTED`,
+`QA_STATUS: PASSED|FAILED`, or `APPSEC_STATUS: SECURE|VULNERABLE`.
+Here `|` denotes alternatives. The nonce is the first 16 characters of the
+host's evaluation identity. Approval also requires valid findings, unchanged
+inputs and passing mandatory controls. Failed or unknown required scans block
+AppSec; missing tools and npm dependency scopes without lockfiles are unknown.
+No dependency installation occurs. pip-audit retains its inherited command scope.
+
+Identity binds gate, reviewer engine/model and ordinal, attempt, verified commit
+and the hashes of diff, plan, obligations, evidence, both prompts and report schema,
+plus mandatory controls, trusted context and reasoning effort; it excludes paths
+and timestamps. Every task gate receives the approved plan, quality contract and
+expected `source_gate`. One protocol correction is allowed, preserving substantive
+findings and any valid verdict. A single intact frame with a stale nonce is read
+only to preserve its findings during correction; it cannot authorize approval.
+Ambiguous or incomplete delimiters stop correction explicitly. Substantive
+rejection is final for that evaluation.
+Reservations persist before calls: an interrupted call with unknown results stops
+on recovery, and retained responses are verified before reconciliation or reuse.
+Changed inputs cannot reuse a cached approval or reset the allowance, including
+changed controls with identical scanner logs. Slots archived under an older input
+binding also fail closed; they are not silently upgraded or rerun. Terminal protocol,
+integrity and engine outcomes stop before developer feedback; substantive rejection retains the existing
+repair flow. Legacy tickets retain their existing behavior.
+
+Artifacts live under `<phase>/evaluations/<slot16>/`: input and prompts, captured
+`evidence/`, invocation reservations, raw responses, diagnostics, normalized
+`report.json`, `assessment.json`, telemetry and a final hashed `outcome.json`.
+AppSec also archives `scanner-status.json` and full scanner logs. Canonical Markdown
+reports are readable projections. Registered hashes are checked on recovery.
+
+SHA-256 hashes are unkeyed and provide no authentication. Checks detect changes
+only at checkpoints: there is no continuous containment against external writers,
+and coordinated changes to content and hashes can defeat them. Strict parsing does
+not establish model honesty or eliminate prompt injection. Scheduler artifacts
+outside the gate evidence inventory and ignored Git files are outside these checks.

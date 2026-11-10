@@ -7,6 +7,19 @@ from ssdlc_tasks import TaskError, atomic_json, git
 from test_task_bootstrap import RepositoryTests
 
 
+def framed(gate, orch, findings=(), verdict=None, **changes):
+    phase = {'review': orch.dir_review, 'qa': orch.dir_qa, 'appsec': orch.dir_appsec}[gate]
+    inputs = list((phase / 'evaluations').glob('*/input.json'))
+    nonce = json.loads(max(inputs, key=lambda p: p.stat().st_mtime_ns).read_text())['identity'][:16]
+    obj = dict(schema_version='1.0', source_gate={'review': 'code_review', 'qa': 'qa', 'appsec': 'appsec'}[gate],
+               reviewed_commit=orch.state['task_verified_head'], findings=list(findings))
+    obj.update(changes)
+    marker = {'review': 'REVIEW_STATUS', 'qa': 'QA_STATUS', 'appsec': 'APPSEC_STATUS'}[gate]
+    verdict = verdict or {'review': 'APPROVED', 'qa': 'PASSED', 'appsec': 'SECURE'}[gate]
+    return (f'-----BEGIN SSDLC GATE REPORT {nonce}-----\n' + json.dumps(obj) +
+            f'\n-----END SSDLC GATE REPORT {nonce}-----\nHuman report\n{marker}: {verdict}')
+
+
 class FullCheckpointReviewTests(RepositoryTests):
     def seed(self):
         runtime = self.repo/'.ssdlc/.runtime'
@@ -25,6 +38,12 @@ class FullCheckpointReviewTests(RepositoryTests):
         path.write_text(diff)
         orch.record_artifact('03-dev/implementation.diff', path)
         atomic_json(orch.dir_recon/'quality-contract.json', self.quality)
+        orch.record_artifact('00-recon/quality-contract.json', orch.dir_recon/'quality-contract.json')
+        (orch.dir_po/'requirements.md').write_text('AC-1: Correct behavior\nSEC-1: Secure behavior\n')
+        orch.record_artifact('01-po/requirements.md', orch.dir_po/'requirements.md')
+        atomic_json(orch.dir_design/'plan.json', self.plan)
+        orch.record_artifact('02-design/plan.json', orch.dir_design/'plan.json')
+        orch._save_state()
         return orch, diff
 
     def test_complete_large_diff_is_reviewed_in_verified_worktree_and_archived(self):
@@ -35,7 +54,7 @@ class FullCheckpointReviewTests(RepositoryTests):
             self.assertIn(diff, user)
             self.assertIn('FINAL_DIFF_SENTINEL', user)
             self.assertEqual(kwargs['sandbox'], 'read-only')
-            return 'Review complete.\nREVIEW_STATUS: APPROVED', 0, 0, 0, 'test'
+            return framed('review', orch), 0, 0, 0, 'test'
         with patch('orchestrator.SquadDispatcher.resolve_review_models', return_value=(['mock:reviewer'], 'low')), patch('orchestrator.EngineRunner.invoke_role', side_effect=invoke):
             passed, _ = orch.run_phase_review()
         self.assertTrue(passed)
@@ -84,7 +103,7 @@ class FullCheckpointReviewTests(RepositoryTests):
             self.assertEqual(cwd, orch.worktree_dir)
             self.assertIn(diff, user)
             self.assertIn('FINAL_DIFF_SENTINEL', user)
-            return 'All requirements verified.\nQA_STATUS: PASSED', 0, 0, 0, 'test'
+            return framed('qa', orch), 0, 0, 0, 'test'
         with patch.object(orch, '_run_deterministic_scanners', return_value=(True, 'Test suite passed')), patch('orchestrator.EngineRunner.invoke_role', side_effect=invoke):
             passed, _ = orch.run_phase_qa()
         self.assertTrue(passed)
@@ -96,12 +115,12 @@ class FullCheckpointReviewTests(RepositoryTests):
         cases = ['Example: QA_STATUS: PASSED\nQA_STATUS: FAILED', 'QA_STATUS: PASSED\nExtra text',
                  '```\nQA_STATUS: PASSED\n```', 'QA_STATUS: PASSED (all good)', 'No verdict']
         with patch.object(orch, '_run_deterministic_scanners', return_value=(True, 'Tests passed')):
-            for response in cases:
-                with self.subTest(response=response), patch('orchestrator.EngineRunner.invoke_role', return_value=(response, 0, 0, 0, 'test')):
-                    passed, _ = orch.run_phase_qa()
-                    self.assertFalse(passed)
-        with patch.object(orch, '_run_deterministic_scanners', return_value=(False, 'Tests failed')), patch('orchestrator.EngineRunner.invoke_role', return_value=('QA_STATUS: PASSED', 0, 0, 0, 'test')):
-            self.assertFalse(orch.run_phase_qa()[0])
+            for i, response in enumerate(cases, 1):
+                with self.subTest(response=response), patch('orchestrator.EngineRunner.invoke_role', side_effect=lambda *a, **k: (framed('qa', orch).rsplit('QA_STATUS:', 1)[0] + response, 0, 0, 0, 'test')):
+                    with self.assertRaises(TaskError):
+                        orch.run_phase_qa(attempt=i)
+        with patch.object(orch, '_run_deterministic_scanners', return_value=(False, 'Tests failed')), patch('orchestrator.EngineRunner.invoke_role', side_effect=lambda *a, **k: (framed('qa', orch), 0, 0, 0, 'test')):
+            self.assertFalse(orch.run_phase_qa(attempt=6)[0])
 
     def test_qa_cannot_approve_a_checkpoint_changed_during_analysis(self):
         orch, _ = self.seed()
