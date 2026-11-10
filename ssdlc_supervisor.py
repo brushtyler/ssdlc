@@ -1114,7 +1114,9 @@ def worker(store, args):
             raise FencedOut()
         while True:
             result = monitor_tick(store, payload['env'], generation=args.generation)
-            if result['status'] in TERMINAL or result['status'] == 'reconcile':
+            # Reconciliation forbids launches, not read-only observation. During
+            # exit, /proc ownership can be briefly unknown before run_ended binds.
+            if result['status'] in TERMINAL:
                 return 0
             store.clock.sleep(1)
     a = validate_args(payload['args'])

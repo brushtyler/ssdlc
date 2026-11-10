@@ -623,6 +623,20 @@ class TestNoSecretsAndCanonicalBoundary(CoreCase):
 
 
 class TestRealProcesses(CoreCase):
+    def cancel_until_done(self, check=None):
+        # The contract permits an explicit repeat after transient uncertainty.
+        # Keep asserting unrelated-process safety on every attempt.
+        deadline = time.monotonic() + 3
+        while True:
+            result = sup.cancel(self.repo, 'T-1', grace=0)
+            if check is not None:
+                check()
+            if result['status'] == 'cancelled':
+                return result
+            self.assertIn(result['status'], {'blocked', 'cancelling'}, result)
+            self.assertLess(time.monotonic(), deadline, result)
+            time.sleep(.01)
+
     def test_detach_survives_caller_exit_and_exactly_one_concurrent_launch(self):
         received = self.repo / 'launches'
         self.controller('import os, time\nfd=os.open(' + repr(str(received)) + ', os.O_CREAT|os.O_WRONLY|os.O_APPEND, 0o600)\nos.write(fd,b"launch\\n")\nos.close(fd)\ntime.sleep(30)\n')
@@ -639,11 +653,12 @@ class TestRealProcesses(CoreCase):
         self.wait_for(received.exists)
         self.assertEqual(received.read_text(), 'launch\n')
         self.assertEqual(sup.status(self.repo, 'T-1')['status'], 'running')
-        cancelled = sup.cancel(self.repo, 'T-1', grace=0)
+        cancelled = self.cancel_until_done()
         self.assertEqual(cancelled['status'], 'cancelled', cancelled)
 
     def test_scoped_cancel_unrelated_session_untouched(self):
-        self.controller()
+        ready = self.repo / 'controller-ready'
+        self.controller('from pathlib import Path\nimport time\nPath(' + repr(str(ready)) + ').write_text("ready")\ntime.sleep(30)\n')
         sibling = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True)
         def reap_sibling():
             if sibling.poll() is None:
@@ -652,7 +667,8 @@ class TestRealProcesses(CoreCase):
         self.addCleanup(reap_sibling)
         self.addCleanup(self.cleanup_run)
         self.assertEqual(sup.start(self.args)['status'], 'running')
-        self.assertEqual(sup.cancel(self.repo, 'T-1', grace=0)['status'], 'cancelled')
+        self.wait_for(ready.exists)
+        self.assertEqual(self.cancel_until_done(check=lambda: self.assertIsNone(sibling.poll()))['status'], 'cancelled')
         self.assertIsNone(sibling.poll())
         sibling.terminate()
         sibling.wait(timeout=5)
@@ -678,7 +694,7 @@ class TestRealProcesses(CoreCase):
         with self.assertRaises(sup.InjectedCrash):
             sup.cancel(self.repo, 'T-1', grace=0, fault=CrashAt('cancel.after_term_before_kill'))
         self.assertEqual(sup.status(self.repo, 'T-1')['status'], 'cancelling')
-        self.assertEqual(sup.cancel(self.repo, 'T-1', grace=0)['status'], 'cancelled')
+        self.assertEqual(self.cancel_until_done()['status'], 'cancelled')
 
 
 class TestCancellationExitRace(CoreCase):
@@ -1037,6 +1053,18 @@ class TestRestartLifecycleRegressions(CoreCase):
         execute.assert_called_once()
         self.assertEqual(execute.call_args.args[2][sup.MARK+'GEN'], '1')
         self.assertEqual(store.read()['worker_generation'], 2)
+
+class TestAdoptedObservationContinuation(CoreCase):
+    def test_reconciliation_keeps_observing_without_dispatch_until_bound_completion(self):
+        import types
+        store = self.store()
+        env = sup.build_project_env(self.repo, os.environ)
+        r, w = os.pipe()
+        self.addCleanup(lambda: os.close(w))
+        payload = json.dumps(dict(monitor_only=True, env=env)).encode()
+        with patch.object(sup, 'transfer', return_value=payload), patch.object(sup, 'monitor_tick', side_effect=[dict(status='reconcile'), dict(status='completed')]) as observe, patch.object(sup, 'spawn', side_effect=AssertionError('observation must not dispatch')):
+            self.assertEqual(sup.worker(store, types.SimpleNamespace(payload_fd=r, generation=1)), 0)
+        self.assertEqual(observe.call_count, 2)
 
 if __name__ == '__main__':
     unittest.main()

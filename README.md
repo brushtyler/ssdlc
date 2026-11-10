@@ -937,7 +937,10 @@ inferred from per-call development timeouts. To authorize one, explicitly set
 run remains bounded by its existing per-call limits, retry allowances and budget. An adopted controller requires
 intent-bound `run_ended(exit_code=0)` plus the entrypoint's canonical completion
 state; disappearance alone never proves completion. No exit evidence means
-`exit_evidence_unavailable` and operator reconciliation.
+`exit_evidence_unavailable` and operator reconciliation. An adopted worker
+continues read-only observation while reconciliation is needed, so a transient
+exit-time identity change can later resolve to bound completion. It never
+relaunches the controller or a model invocation from that state.
 
 Supervisor metadata, locks, audit, observation events and controller-events.jsonl
 live only under `.ssdlc/.supervisor/`. The orchestrator alone owns canonical
