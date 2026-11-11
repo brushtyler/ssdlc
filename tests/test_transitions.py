@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -83,3 +84,19 @@ class TransitionTests(unittest.TestCase):
         (self.source / 'journal.jsonl').symlink_to(self.root / 'outside')
         with self.assertRaisesRegex(TransitionError, 'Symlink'):
             self.publish()
+
+    def test_scope_children_compare_exact_parent_and_cannot_roll_back(self):
+        self.publish()
+        store = TransitionStore(self.root / 'transitions')
+        parent = json.loads((store.root / 'active.json').read_text())
+        first, first_auth = None, None
+        for identity in ('d' * 32, 'e' * 32):
+            proposal = dict(self.proposal, transition_id=identity,
+                            authorization_contract='scope-amendment-v1', parent_selector=parent)
+            auth = dict(self.authorization, transition_id=identity, proposal_sha256=digest(proposal))
+            store.publish(self.source, proposal, auth, self.old, self.new, self.artifacts)
+            if first is None: first, first_auth = proposal, auth
+            parent = json.loads((store.root / 'active.json').read_text())
+        with self.assertRaisesRegex(TransitionError, 'Another generation'):
+            store.publish(self.source, first, first_auth, self.old, self.new, self.artifacts)
+        self.assertEqual(json.loads((store.root / 'active.json').read_text()), parent)

@@ -188,7 +188,10 @@ class TransitionStore:
                     'manifest_sha256': file_hash(_regular(generation, 'manifest.json'))}
         pointer = self.root / 'active.json'
         if pointer.exists() and self._read(self.root, 'active.json') != selected:
-            raise TransitionError('Another generation is already selected')
+            if (proposal.get('authorization_contract') != 'scope-amendment-v1'
+                    or proposal.get('parent_selector') != self._read(self.root, 'active.json')):
+                raise TransitionError('Another generation is already selected')
+            self.load()  # Validate the exact parent, not merely its pointer bytes.
         self.fault('before_activation')
         atomic_json(pointer, selected)
         self.fault('after_activation')

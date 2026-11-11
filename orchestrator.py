@@ -2591,6 +2591,7 @@ class SSDLCOrchestrator:
             verify, guard, verification_budget, dispatch_budget=dispatch_budget,
             historical_task_floors=(limits._load(repair=False)[0]['binding'].get('task_floors', {}) if limits else {}),
             historical_capture_authority=history_authority,
+            scope_reconciliations=(limits._load(repair=False)[0]['binding'].get('scope_reconciliations', {}) if limits else {}),
             max_attempts=(getattr(_dispatch_local, "limits")._load(repair=False)[0]["policy"]["development_attempts"]
                           if getattr(_dispatch_local, "limits", None) is not None else int(os.environ.get("SSDLC_MAX_DEV_RETRIES", "3"))),
             isolate_candidates=True,
@@ -4482,7 +4483,7 @@ class SSDLCOrchestrator:
         artifact_rows = []
         for name, meta in sorted(self.state["artifacts"].items()):
             artifact_rows.append(
-                f"| [`{name}`](./{meta['path']}) | `{meta['sha256'][:16]}...` | {meta['size_bytes']} B | {meta['recorded_at']} |"
+                f"| [`{name}`](./{meta['path']}) | `{meta['sha256'][:16]}...` | {meta.get('size_bytes', 'not recorded')} B | {meta.get('recorded_at', 'not recorded')} |"
             )
 
         gate_rows = []
@@ -5213,6 +5214,9 @@ def _supervised_exit_code(value) -> int:
 
 def main(argv=None) -> int:
     words = sys.argv[1:] if argv is None else argv
+    if words and words[0].startswith('continuation-scope-'):
+        from ssdlc_scope_amendments import main as scope_main
+        return scope_main(words)
     if words and words[0].startswith('continuation-limits-'):
         from ssdlc_reconciliation import main as reconciliation_main
         return reconciliation_main(words)

@@ -554,7 +554,8 @@ class TaskScheduler:
                  guard: Callable = lambda: None, budget: Callable = lambda: None,
                  max_attempts: int = 3, isolate_candidates: bool = False,
                  runtime_identity: dict | None = None, recover_timeouts: bool = False,
-                 historical_capture_authority=None, dispatch_budget=None, historical_task_floors=None):
+                 historical_capture_authority=None, dispatch_budget=None, historical_task_floors=None,
+                 scope_reconciliations=None):
         self.wt = worktree
         self.directory = directory
         self.plan = plan
@@ -569,6 +570,7 @@ class TaskScheduler:
         self.recover_timeouts = recover_timeouts
         self.historical_task_floors = copy.deepcopy(historical_task_floors or {})
         self.historical_capture_authority = historical_capture_authority
+        self.scope_reconciliations = copy.deepcopy(scope_reconciliations or {})
         self.dispatch_budget = dispatch_budget or budget
         self.runtime_identity = copy.deepcopy(runtime_identity or {})
         from ssdlc_grader import protected_paths
@@ -585,6 +587,10 @@ class TaskScheduler:
         self.journal.append(event, self.state)
 
     def _assert_candidate_runtime(self, state):
+        recorded = {tid: row['scope_reconciliation'] for tid, row in state['tasks'].items()
+                    if 'scope_reconciliation' in row}
+        if recorded != self.scope_reconciliations:
+            raise DevelopmentBlocked('INTEGRITY', 'Scope reconciliation has no transition authority')
         for tid, floor in self.historical_task_floors.items():
             record = state['tasks'][tid]
             if record['attempts'] < floor['attempts']:
@@ -1174,6 +1180,8 @@ class TaskScheduler:
             return None
         latest = failures[-1]
         context = copy.deepcopy(latest)
+        if self._scope_reconciled(record):
+            context['scope_amendment'] = copy.deepcopy(record['scope_reconciliation'])
         context['history'] = [{k: item[k] for k in ('attempt', 'category', 'checks', 'diff_ref', 'diff_sha256')}
                               for item in failures]
         remaining = 24000
@@ -1193,11 +1201,21 @@ class TaskScheduler:
                                   'Do not weaken checks or expand scope to pass verification.')
         return context
 
+    def _scope_reconciled(self, record):
+        authority = record.get('scope_reconciliation')
+        if not authority or self.scope_reconciliations.get(authority.get('task_id')) != authority:
+            return False
+        failures = record.get('failed_attempts', [])
+        return bool(failures and failures[-1]['category'] == 'SCOPE_REQUIRED'
+                    and digest(failures[-1]) == authority['failure_sha256']
+                    and digest(self.plan) == authority['plan_sha256'])
+
     def _restore_candidate(self, task: dict, record: dict, *, protocol_recovery=False) -> None:
         if not record.get('failed_attempts'):
             return
         candidate = record['failed_attempts'][-1]
-        if candidate['category'] != 'CHECK_FAILURE' and not (protocol_recovery and candidate['category'] == 'DEVELOPER_PROTOCOL'):
+        if (candidate['category'] != 'CHECK_FAILURE' and not self._scope_reconciled(record)
+                and not (protocol_recovery and candidate['category'] == 'DEVELOPER_PROTOCOL')):
             raise DevelopmentBlocked(candidate['category'], 'Previous attempt needs explicit reconciliation')
         self._assert_clean()
         path = confined(self.directory, candidate['diff_ref'], protect=False)
@@ -1700,7 +1718,8 @@ class TaskScheduler:
             if record.get('reconciliation_required'):
                 raise DevelopmentBlocked(record['reconciliation_required'][-1], 'Historical attempt needs explicit reconciliation')
             recovering = task['task_id'] == recover_protocol_task
-            if record.get('failed_attempts') and record['failed_attempts'][-1]['category'] != 'CHECK_FAILURE' and not recovering:
+            if (record.get('failed_attempts') and record['failed_attempts'][-1]['category'] != 'CHECK_FAILURE'
+                    and not recovering and not self._scope_reconciled(record)):
                 raise DevelopmentBlocked(record['failed_attempts'][-1]['category'], 'Previous attempt needs explicit reconciliation')
             if record['attempts'] >= self.max_attempts and not recovering:
                 raise TaskError(f'Task {task["task_id"]} exhausted its persistent attempt limit')
