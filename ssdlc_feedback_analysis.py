@@ -174,6 +174,11 @@ def native_preview(source, request):
         if reason and reason not in reasons:
             reasons.append(reason)
     budget = LimitsStore(source['root'])
+    # A read-only journal peek can return its complete prefix. Do not present
+    # that prefix as fresh authority when an interrupted tail remains on disk.
+    raw = _regular(source['root'], 'limits/task-journal.jsonl').read_bytes()
+    if not raw.endswith(b'\n'):
+        raise TaskError('Incomplete accounting requires reconciliation before feedback diagnosis')
     try:
         budget.check(source['counters'], profile)
     except TaskError as exc:

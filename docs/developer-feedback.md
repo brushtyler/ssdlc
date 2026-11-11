@@ -64,6 +64,8 @@ failed-check localization and availability of named feedback role allowances.
 It makes zero model calls, changes no candidate, journal, selector or limits,
 and grants no execution authority. Existing ticket/scheduler locks serialize
 inspection. Unsupported source generations are refused, not migrated.
+An interrupted native accounting tail is preserved and refused; a diagnostic
+never repairs the journal or treats its complete prefix as fresh authority.
 
 The current locator recognizes complete Python unittest failure blocks whose
 module resolves uniquely to a tracked Python file and whose summary matches

@@ -10,7 +10,7 @@ import test_scope_amendments as fixtures
 from ssdlc_feedback import main
 from ssdlc_feedback_analysis import native_preview, path_classes
 from ssdlc_reconciliation import _files
-from ssdlc_tasks import digest
+from ssdlc_tasks import TaskError, digest
 
 
 class NativeFeedbackTests(unittest.TestCase):
@@ -50,6 +50,24 @@ class NativeFeedbackTests(unittest.TestCase):
         result = path_classes(self.source, ['brand_new.py', 'app.py'])
         self.assertEqual(result['brand_new.py'], dict(kind='NEW_FILE', owners=[]))
         self.assertEqual(result['app.py']['owners'], ['T1'])
+
+    def test_diagnosis_never_invokes_repairing_journal_load(self):
+        self.initialize()
+        before = _files(self.source['root'])
+        with patch('ssdlc_tasks.TaskJournal.load', side_effect=AssertionError('diagnosis must not repair')):
+            result = native_preview(self.source, self.request)
+        self.assertEqual(result['model_dispatches'], 0)
+        self.assertEqual(_files(self.source['root']), before)
+
+    def test_partial_native_accounting_is_preserved_and_refused(self):
+        self.initialize()
+        path = self.source['root'] / 'limits/task-journal.jsonl'
+        with path.open('ab') as output:
+            output.write(b'{"partial":')
+        before = path.read_bytes()
+        with self.assertRaisesRegex(TaskError, 'Incomplete accounting'):
+            native_preview(self.source, self.request)
+        self.assertEqual(path.read_bytes(), before)
 
     def test_native_cli_diagnose_and_status_never_dispatch_or_initialize_authority(self):
         self.initialize()

@@ -38,7 +38,7 @@
     "raw provider/check logs",
     "credentials and local configuration"
   ],
-  "final_focused_tests": 31,
-  "final_focused_seconds": 6.815,
-  "final_changes": "Prevent blocker-to-advisory downgrade and approval reuse after classification/evidence changes; canonicalize equivalent sets"
+  "final_focused_tests": 33,
+  "final_focused_seconds": 9.821,
+  "final_changes": "Prevent blocker downgrade and stale decision reuse, canonicalize equivalent sets, refuse partial native accounting without any repairing journal load"
 }
