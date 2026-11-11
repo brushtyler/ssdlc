@@ -103,6 +103,8 @@ def project_accounting(facts, request, *, state, now):
             or not isinstance(reserve['reason'], str) or not reserve['reason'].strip()
             or any(not finite(reserve[k]) or reserve[k] <= 0 for k in ('metered_usd', 'cli_estimate_usd'))):
         raise TransitionError('Unknown usage needs positive conservative reserves for both dollar caps and a reason')
+    if profile.get('unknown_usage_reserve_model') == 'exclusive_cost_kind_v1':
+        decisions['unknown_limits'].append('unknown_usage_reserve_model:exclusive_cost_kind_v1')
     old = facts.get('limits') or {}
     aliases = {'development_attempts': ('development_attempts', 'max_attempts', 'SSDLC_MAX_DEV_RETRIES'),
                'design_rounds': ('design_rounds', 'SSDLC_MAX_DESIGN_ROUNDS'),
@@ -194,7 +196,10 @@ def project_accounting(facts, request, *, state, now):
             'invocations': len(decisions['unknown_usage']),
             **{kind: sum(row['reserve'][kind] for row in decisions['unknown_usage'])
                for kind in ('metered_usd', 'cli_estimate_usd')}}
-        if any(not finite(profile['historical_unknown_usage'][k]) for k in ('metered_usd', 'cli_estimate_usd')):
+        if profile.get('unknown_usage_reserve_model') == 'exclusive_cost_kind_v1':
+            profile['historical_unknown_usage']['combined_usd'] = sum(
+                max(row['reserve'].values()) for row in decisions['unknown_usage'])
+        if any(not finite(value) for value in profile['historical_unknown_usage'].values()):
             raise TransitionError('Nonfinite cumulative unknown usage reserve')
         validate_document('recovery-limits', profile)
     initial = {'policy_sha256': '', 'started_at': started, 'deadline_at': started + profile['wall_seconds'],

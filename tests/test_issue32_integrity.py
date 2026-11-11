@@ -76,6 +76,32 @@ class UnknownUsageTests(unittest.TestCase):
             with self.assertRaisesRegex(RecoveryStop, 'no conservative dollar reserve'):
                 LimitsStore(Path(tmp), lambda: 1000).check(initial, profile)
 
+    def test_exclusive_kind_reserve_is_counted_once_combined_but_fully_per_kind(self):
+        self.request['profile']['unknown_usage_reserve_model'] = 'exclusive_cost_kind_v1'
+        profile, initial, decisions, _ = self.project()
+        self.assertIn('unknown_usage_reserve_model:exclusive_cost_kind_v1', decisions['unknown_limits'])
+        self.assertAlmostEqual(profile['historical_unknown_usage']['combined_usd'], 0.024)
+        self.assertIsNone(initial['invocations']['ledger-1']['usage']['cli_estimate_usd'])
+        initial['combined_reported_usd_cap'] = 9.30  # Known 9.264434 + 24 * .001, not twice.
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LimitsStore(Path(tmp), lambda: 1000)
+            store.check(initial, profile)
+            legacy = dict(profile); legacy.pop('unknown_usage_reserve_model')
+            with self.assertRaisesRegex(RecoveryStop, 'combined reported-cost cap exhausted'):
+                store.check(initial, legacy)
+            for kind, threshold in [('metered_usd', 0.02), ('cli_estimate_usd', 9.28)]:
+                cap = dict(profile, **{kind: threshold})
+                with self.subTest(kind=kind), self.assertRaisesRegex(RecoveryStop, 'cap exhausted'):
+                    store.check(initial, cap)
+            initial['combined_reported_usd_cap'] = 9.28
+            with self.assertRaisesRegex(RecoveryStop, 'combined reported-cost cap exhausted'):
+                store.check(initial, profile)
+            # Unequal channel allocations reserve the maximum, never an arbitrary average.
+            initial['combined_reported_usd_cap'] = 9.30
+            initial['invocations']['ledger-1']['conservative_usage']['metered_usd'] = 0.02
+            with self.assertRaisesRegex(RecoveryStop, 'combined reported-cost cap exhausted'):
+                store.check(initial, profile)
+
     def test_nonpositive_nonfinite_or_unexplained_reserve_refused(self):
         for value in (0, -1, float('nan'), float('inf'), True):
             with self.subTest(value=value):

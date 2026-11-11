@@ -104,7 +104,14 @@ strictly positive finite `metered_usd` and `cli_estimate_usd` amounts **per unkn
 invocation**, plus a nonempty `reason`; otherwise preparation refuses. These are
 operator-declared conservative allowances, not observed costs or estimates of
 subscription billing. There is no default amount. Both dollar caps consume the
-allowance; the combined cap consumes their sum. Choose amounts conservatively
+allowance. Existing profiles reserve the sum for the combined cap. An explicit
+`profile.unknown_usage_reserve_model: "exclusive_cost_kind_v1"` instead states
+that each unknown invocation belongs to one cost kind: the combined cap reserves
+the maximum of the two allowances **once per invocation**, while each individual
+cap still reserves its own full allowance. The derived profile records this
+non-additive aggregate as `historical_unknown_usage.combined_usd`. The mode is
+listed in the authorization decisions and bound by the profile hash; it is never
+attached implicitly to an existing profile. Choose amounts conservatively
 for the unobserved calls, not to fit a remaining budget.
 
 Observed `usage` remains null; the allowance is separately recorded as
@@ -185,3 +192,13 @@ its authorization before resuming through SSDLC. Record before/after logical and
 live calls, attempts, duplicated work, model/check/elapsed/operator-wait time and
 required/avoidable interventions. Preserve the historical baseline and report
 fresh global-gate outcomes; completing this offline PR is not that evaluation.
+
+
+An operator may choose a documented sample mean as a proxy allocation, but it
+must remain separate from observed usage and identify its source kind, engine,
+sample size and calculation in `unknown_usage_reserve.reason`. A cross-engine
+sample mean is neither a recovered observation nor a proven upper bound. It
+cannot be represented as actual billing or silently converted into a guarantee
+of a complete monetary total. Invocation/time limits continue to apply. The
+exclusive-kind mode prevents counting the same proxy allocation twice in the
+combined cap; it does not make the underlying unknown usage known.

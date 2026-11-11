@@ -92,8 +92,18 @@
         "cli_estimate_usd": {
           "type": "number",
           "exclusiveMinimum": 0
+        },
+        "combined_usd": {
+          "type": "number",
+          "exclusiveMinimum": 0
         }
       }
+    },
+    "unknown_usage_reserve_model": {
+      "enum": [
+        "exclusive_cost_kind_v1"
+      ],
+      "description": "Opt-in: an unknown invocation belongs to one cost kind. Each kind cap reserves its full allowance; the combined cap reserves the maximum once, not their sum. Absent retains additive legacy semantics."
     }
   },
   "$defs": {
