@@ -1,5 +1,8 @@
 # Explicit scope amendments after a checkpoint
 
+Offline validation and its limits are recorded in
+[the sanitized validation summary](evidence/post-checkpoint-scope-validation.json).
+
 This implements the post-checkpoint scope-recovery case needed by #22 under A6a
 of `PLAN_AUTONOMY_WORKSTREAMS.md`. I1's `pre-checkpoint-import-v1` remains
 unchanged. An admitted I2 generation can prepare a separate, reviewed generation

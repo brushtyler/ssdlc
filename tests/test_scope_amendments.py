@@ -25,6 +25,7 @@ class ScopeAmendmentTests(unittest.TestCase):
         f.request['profile']['development_attempts'] = attempt_cap
         f.request['profile']['role_invocations']['03-dev'] = 6
         f.request['profile']['phase_invocations']['03-dev'] = 6
+        f.identity['environment'] = dict(mode='role_container', image_id='offline')
         staged = f.stage(); f.select(staged)
         self.ticket, self.repo = f.target, f.repo
         self.root = runtime_root(self.ticket)
@@ -290,6 +291,38 @@ class ScopeAmendmentTests(unittest.TestCase):
         self.assertEqual(tasks['T2']['attempts'], 3)
         self.assertEqual(tasks['T2']['status'], 'COMPLETED')
         self.assertEqual(len(LimitsStore(root)._load(repair=False)[1]['invocations']), len(self.source['counters']['invocations']) + 1)
+
+    def test_cli_prepare_and_activate_select_without_provider_dispatch(self):
+        import contextlib
+        import io
+        import orchestrator as o
+        import ssdlc_controller as controller
+        import ssdlc_preparations as preparations
+        plan, review, auth = (self.repo / name for name in ('plan.json', 'review.json', 'auth.json'))
+        atomic_json(plan, self.plan); atomic_json(review, self.review)
+        base = ['--repo', str(self.repo), '--ticket', self.ticket.name]
+        with patch.object(o.EngineRunner, 'invoke_role', side_effect=AssertionError('provider')), \
+             patch.object(o.EngineRunner, '_should_spawn_role_container', return_value=True), \
+             patch.object(o.SSDLCOrchestrator, '_verification_environment', return_value=self.identity['environment']), \
+             patch.object(controller, 'controller_snapshot', return_value=self.new_controller), \
+             patch.object(controller, 'assert_controller'), patch.object(preparations, 'docker_quiescent', return_value=True):
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(o.main(['continuation-scope-prepare', *base, '--plan', str(plan),
+                                         '--reason', self.reason, '--review', str(review)]), 0)
+            prepared = json.loads(output.getvalue())
+            preparation = Path(prepared['preparation'])
+            staged = dict(proposal=json.loads((preparation / 'proposal.json').read_text()), preparation=preparation)
+            atomic_json(auth, self.auth(staged))
+            self.assertEqual(prepared['model_dispatches'], 0)
+            self.assertFalse(prepared['execution_authorized'])
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(o.main(['continuation-scope-activate', *base, '--preparation', str(preparation),
+                                         '--authorization', str(auth)]), 0)
+            activated = json.loads(output.getvalue())
+        self.assertEqual(activated['model_dispatches'], 0)
+        self.assertTrue(activated['model_dispatch_authorized'])
+        self.assertEqual(self.calls, [1, 2])
+        self.assertEqual(TaskJournal(runtime_root(self.ticket) / '03-dev/tasks').peek()['tasks']['T2']['attempts'], 2)
 
     def test_symlinked_execution_store_and_ticket_are_refused(self):
         alias = self.ticket.parent / 'ALIAS'

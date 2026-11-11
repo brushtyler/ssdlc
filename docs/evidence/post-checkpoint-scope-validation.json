@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "scope": "Explicit post-checkpoint target additions for one stopped admitted SCOPE_REQUIRED task; broader A6a remains open",
+  "code_commit": "f87d921",
+  "code_files_sha256": {
+    "orchestrator.py": "57d994799292c65a60e32ebf966a0583917f2c12f9a3a5415d79b59ef15be170",
+    "ssdlc_reconciliation.py": "a2a83cb8f275c9d0330d7bd2f1db233e8e049ca791d7e47bb84ace52acb76883",
+    "ssdlc_tasks.py": "6a2bd791c379f22208684c53babca70effd3751070dd7f17c8504a6b756ca593",
+    "ssdlc_transitions.py": "bbd6a1ad0b7b03b7475604f210bb87874fddf340cd91f458731d9f1820927c81",
+    "ssdlc_scope_amendments.py": "155ad1295e62f4cdd05c037f124210bcc6e7d45b425a0d5a495e29eb31ddd82a"
+  },
+  "full_suite": {
+    "tests": 948,
+    "seconds": 372.411,
+    "outcome": "OK",
+    "command": "PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests",
+    "environment": "Host with authorized Docker role environment and pinned runner image",
+    "python": "3.14"
+  },
+  "final_focused_tests": {
+    "tests": 18,
+    "seconds": 35.53,
+    "outcome": "OK",
+    "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=tests python3 -m unittest test_scope_amendments",
+    "note": "Adds the complete native CLI prepare/activate regression after the full-suite code commit; production code unchanged"
+  },
+  "existing_gate_restart_regressions": {
+    "tests": 52,
+    "seconds": 17.791,
+    "outcome": "OK"
+  },
+  "protected_replay": {
+    "baseline_id": "i2-fixtures-v4",
+    "cases": 12,
+    "failed_cases": 0,
+    "report": "post-checkpoint-scope-a5.json"
+  },
+  "verified_boundaries": [
+    "Independent review and exact scope authorization",
+    "Native CLI preview/prepare/activate dispatch zero providers",
+    "Completed T01 proof remains at its historical receipt binding",
+    "Failed T02 patch and two consumed attempts preserved; native run_phase_dev consumes exactly the third",
+    "Cumulative invocation records, policy, monetary reserves and absolute deadline preserved",
+    "All four publication crash boundaries retry without extra dispatch or counter reset",
+    "A later selected generation cannot be rolled back by replaying an older amendment",
+    "Stale/tampered source, runtime and completed proof refused",
+    "Protected paths, forged scope authority, unresolved outcomes and partial journals refused",
+    "Exhausted attempts and deadline cannot be extended",
+    "Rejected unselected preparation remains owned and discardable",
+    "Unknown imported artifact size/date rendered without fabrication; original failure preserved"
+  ],
+  "live_run_validation": {
+    "issue": 22,
+    "operation": "inspect and preview only",
+    "cumulative_invocations": 28,
+    "completed_task_attempts": {
+      "T01": 2
+    },
+    "failed_task_attempts": {
+      "T02": 2
+    },
+    "model_dispatches": 0,
+    "execution_authorized": false
+  },
+  "initial_environment_diagnosis": {
+    "tests": 948,
+    "errors": 12,
+    "reason": "Sandbox inherited PATH length1066 exceeds the existing local candidate-evidence env.PATH schema maximum1024. Replayed the gate/history regressions and full suite in the authorized role environment; schema and assertions unchanged."
+  },
+  "live_provider_calls": 0,
+  "not_claimed": [
+    "Issue22 feature completion or final global readiness",
+    "Automatic replanning or task merges/splits",
+    "Budget/attempt/deadline extensions",
+    "Arbitrary environment/controller migration without the supported scope transition",
+    "Native phase-boundary stop or lost-baseline-output fixes tracked separately by issue36"
+  ]
+}
