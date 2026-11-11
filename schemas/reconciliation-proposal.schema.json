@@ -70,7 +70,8 @@
         "unknown_limits",
         "extensions",
         "attributions",
-        "opaque_counters"
+        "opaque_counters",
+        "unknown_usage"
       ],
       "properties": {
         "unknown_limits": {
@@ -84,6 +85,58 @@
         },
         "opaque_counters": {
           "type": "array"
+        },
+        "unknown_usage": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "invocation",
+              "source_row_sha256",
+              "engine",
+              "reserve",
+              "reason"
+            ],
+            "properties": {
+              "invocation": {
+                "type": "string",
+                "minLength": 1
+              },
+              "source_row_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "engine": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reserve": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "metered_usd",
+                  "cli_estimate_usd"
+                ],
+                "properties": {
+                  "metered_usd": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  },
+                  "cli_estimate_usd": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  }
+                }
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
         }
       }
     },

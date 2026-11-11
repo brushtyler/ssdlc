@@ -96,8 +96,26 @@ origin identifiers for an offline request builder.
 Positive Claude amounts are CLI estimates; positive OpenRouter amounts are
 reported metered usage. Other positive amounts need explicit `usage_kind` and
 `reason`. Absent/default-zero legacy telemetry remains `null`, not a claim of
-zero billing. This admits execution with explicitly accepted unknown history;
-it does not estimate subscription billing or implement issue #14's quota work.
+zero billing. Every such invocation (including supplemental reservations) is
+listed in `decisions.unknown_usage` and requires hash-bound
+`accept_unknown_history: true`. Acceptance alone never makes the invocation free.
+A request containing unknown usage must supply `unknown_usage_reserve` with
+strictly positive finite `metered_usd` and `cli_estimate_usd` amounts **per unknown
+invocation**, plus a nonempty `reason`; otherwise preparation refuses. These are
+operator-declared conservative allowances, not observed costs or estimates of
+subscription billing. There is no default amount. Both dollar caps consume the
+allowance; the combined cap consumes their sum. Choose amounts conservatively
+for the unobserved calls, not to fit a remaining budget.
+
+Observed `usage` remains null; the allowance is separately recorded as
+`conservative_usage` on each imported invocation. The resulting frozen profile
+contains derived `historical_unknown_usage` invocation count and aggregate
+allowances; requests cannot supply that summary themselves. Proposal decision
+and profile hashes bind the allocation, and runtime checks refuse unreserved
+unknown historical usage. Exhaustion blocks inference while verification remains
+available within its time/integrity limits. This does not implement issue #14's
+quota work. Existing prepared proposals need regeneration with the new controller;
+this is not an automatic extension or repair of an already selected I2 profile.
 All invocations count toward total, role and phase caps exactly once. A legacy
 aggregate `budget` also remains enforced as `combined_reported_usd_cap`; raising
 it requires its own listed extension, even if individual cost-kind caps fit.

@@ -279,9 +279,10 @@ class TaskPlanValidator:
             if not deps <= tasks.keys() or task['task_id'] in deps:
                 raise PlanError(f'Unknown or self dependency: {task["task_id"]}')
             for path in task['target_files']:
+                confined(self.repo, path)
+                path = Path(path).as_posix()
                 if path in grader_paths or any(path.startswith(p) for p in grader_paths if p.endswith('/')):
                     raise PlanError('Replay grader baseline requires an explicit reviewed revision, outside candidate tasks')
-                confined(self.repo, path)
                 if path == '.' or (self.repo / path).is_dir():
                     raise PlanError('target_files must name files, not directories')
             if not set(task['standard_refs']) <= standards:

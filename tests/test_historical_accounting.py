@@ -33,6 +33,7 @@ def historical_fixture():
         'transport_retries': 0, 'design_diagnoses': 1, 'metered_usd': 10, 'cli_estimate_usd': 10,
         'development_attempts': 2, 'design_rounds': 6, 'invocation_timeout_seconds': 1800},
         'opaque_floors': {}, 'supplemental_invocations': [], 'combined_reported_usd_cap': 10,
+        'unknown_usage_reserve': {'metered_usd': 0.001, 'cli_estimate_usd': 0.001, 'reason': 'Synthetic offline allowance, not measured billing'},
         'time': {'started_at': 100, 'basis': 'source_created_at'}, 'ledger_mapping': []}
     for i, row in enumerate(facts['ledger']):
         origin = list(origins)[i] if i < len(origins) else None

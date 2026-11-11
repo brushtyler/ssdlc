@@ -95,7 +95,14 @@ def project_accounting(facts, request, *, state, now):
     if profile['transport_retries'] != 0:
         raise TransitionError('Unknown legacy transport consumption requires retries disabled, not reset')
     origins, opaque = reservation_catalogue(facts, request.get('opaque_floors', {}))
-    decisions = {'unknown_limits': [], 'extensions': [], 'attributions': [], 'opaque_counters': opaque}
+    decisions = {'unknown_limits': [], 'extensions': [], 'attributions': [], 'opaque_counters': opaque, 'unknown_usage': []}
+    if 'historical_unknown_usage' in profile:
+        raise TransitionError('Historical unknown usage summary is derived, not supplied')
+    reserve = request.get('unknown_usage_reserve')
+    if reserve is not None and (not isinstance(reserve, dict) or set(reserve) != {'metered_usd', 'cli_estimate_usd', 'reason'}
+            or not isinstance(reserve['reason'], str) or not reserve['reason'].strip()
+            or any(not finite(reserve[k]) or reserve[k] <= 0 for k in ('metered_usd', 'cli_estimate_usd'))):
+        raise TransitionError('Unknown usage needs positive conservative reserves for both dollar caps and a reason')
     old = facts.get('limits') or {}
     aliases = {'development_attempts': ('development_attempts', 'max_attempts', 'SSDLC_MAX_DEV_RETRIES'),
                'design_rounds': ('design_rounds', 'SSDLC_MAX_DESIGN_ROUNDS'),
@@ -164,6 +171,13 @@ def project_accounting(facts, request, *, state, now):
         invocations[identity] = {'role': descriptor['role'], 'phase': descriptor['phase'], 'engine': row.get('engine'),
             'status': 'historical', 'historical_outcome': 'fenced_unconfirmed',
             'source_row_sha256': digest(row), 'origins': origin_refs, 'usage': _usage(row, descriptor, decisions)}
+        if all(value is None for value in invocations[identity]['usage'].values()):
+            if reserve is None:
+                raise TransitionError('Unknown historical usage requires an explicit conservative reserve')
+            allocation = {k: reserve[k] for k in ('metered_usd', 'cli_estimate_usd')}
+            invocations[identity]['conservative_usage'] = allocation
+            decisions['unknown_usage'].append({'invocation': identity, 'source_row_sha256': digest(row),
+                'engine': row.get('engine'), 'reserve': allocation, 'reason': reserve['reason']})
     for row in rows:
         source = facts['ledger'][row['index']]
         if row['sha256'] != digest(source): raise TransitionError('Historical ledger row changed')
@@ -175,6 +189,14 @@ def project_accounting(facts, request, *, state, now):
         if not row.get('reason'): raise TransitionError('Supplement needs explicit attribution')
         insert('reservation-' + digest(origin), row, {'engine': row.get('engine'), 'cost_usd': None}, [origin])
     if covered != set(origins): raise TransitionError('Consumed historical reservations remain unmapped')
+    if decisions['unknown_usage']:
+        profile['historical_unknown_usage'] = {
+            'invocations': len(decisions['unknown_usage']),
+            **{kind: sum(row['reserve'][kind] for row in decisions['unknown_usage'])
+               for kind in ('metered_usd', 'cli_estimate_usd')}}
+        if any(not finite(profile['historical_unknown_usage'][k]) for k in ('metered_usd', 'cli_estimate_usd')):
+            raise TransitionError('Nonfinite cumulative unknown usage reserve')
+        validate_document('recovery-limits', profile)
     initial = {'policy_sha256': '', 'started_at': started, 'deadline_at': started + profile['wall_seconds'],
                'invocations': invocations, 'transports': [], 'diagnoses': [],
                'historical': copy.deepcopy(facts), 'historical_transport_total': None,
@@ -190,7 +212,7 @@ def validate_decisions(authorization, proposal):
     decisions = proposal['decisions']
     if authorization.get('decisions_sha256') != digest(decisions):
         raise TransitionError('Authorization does not bind the reconciliation decisions')
-    if (decisions['unknown_limits'] or decisions['opaque_counters'] or decisions['attributions']) and authorization.get('accept_unknown_history') is not True:
+    if (decisions['unknown_limits'] or decisions['opaque_counters'] or decisions['attributions'] or decisions.get('unknown_usage')) and authorization.get('accept_unknown_history') is not True:
         raise TransitionError('Unknown/ambiguous history requires explicit operator acceptance')
     if decisions['extensions'] and authorization.get('authorize_extensions') is not True:
         raise TransitionError('Historical limit extensions require explicit authorization')

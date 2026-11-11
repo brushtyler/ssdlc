@@ -3070,7 +3070,7 @@ class SSDLCOrchestrator:
         if file_hash(path) != item['sha256']:
             raise DevelopmentBlocked('INTEGRITY', 'Registered design inspection changed')
         report = json.loads(path.read_text())
-        return (report.get('purpose') != 'diagnosis_context' and report['kind'] == 'source_inspection'
+        return (report.get('purpose') == 'progress_evidence' and report['kind'] == 'source_inspection'
                 and report['base_commit'] == self.state['base_commit'] and bool(report['files'])
                 and all(file_hash(confined(self.repo_root, f['path'])) == f['sha256'] for f in report['files']))
 
@@ -3169,7 +3169,7 @@ class SSDLCOrchestrator:
             catalogue = [dict(artifact_ref=ref, sha256=meta['sha256'], report=json.loads((self.ssdlc_root / meta['path']).read_text()))
                 for ref, meta in self.state.get('artifacts', {}).items()
                 if ref.startswith('02-design/design-session/source-inspection-')
-                and json.loads((self.ssdlc_root / meta['path']).read_text()).get('purpose') != 'diagnosis_context']
+                and json.loads((self.ssdlc_root / meta['path']).read_text()).get('purpose') == 'progress_evidence']
             return invoke('02-design-sec', sec_engine, sec_model, review_prompt,
                           {'context': dict(context, progress_evidence_catalogue=catalogue), 'adr': adr, 'review_history': history}, rnd)
         def artifact(path):

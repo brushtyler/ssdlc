@@ -170,12 +170,22 @@ class LimitsStore:
             raise RecoveryStop('OUTCOME_UNCERTAIN', 'Prior invocation has no confirmed outcome; no redispatch')
         if not for_dispatch:
             return
+        rows = list(state['invocations'].values())
+        for row in rows:
+            if row.get('status') == 'historical' and all(
+                    row.get('usage', {}).get(kind) is None for kind in ('metered_usd', 'cli_estimate_usd')):
+                reserve = row.get('conservative_usage', {})
+                if any(type(reserve.get(kind)) not in (int, float) or not math.isfinite(reserve[kind])
+                       or reserve[kind] <= 0 for kind in ('metered_usd', 'cli_estimate_usd')):
+                    raise RecoveryStop('LIMIT_REACHED', 'Unknown historical usage has no conservative dollar reserve')
+        def consumed(kind):
+            return sum((row.get('usage', {}).get(kind) or 0) + row.get('conservative_usage', {}).get(kind, 0)
+                       for row in rows)
         combined = state.get('combined_reported_usd_cap')
-        if combined is not None and sum(value for row in state['invocations'].values() for value in row.get('usage', {}).values() if value is not None) >= combined:
+        if combined is not None and sum(consumed(kind) for kind in ('metered_usd', 'cli_estimate_usd')) >= combined:
             raise RecoveryStop('LIMIT_REACHED', 'Legacy combined reported-cost cap exhausted')
         for kind, cap in [('metered_usd', 'metered_usd'), ('cli_estimate_usd', 'cli_estimate_usd')]:
-            known = [v.get('usage', {}).get(kind) for v in state['invocations'].values()]
-            total = sum(x for x in known if x is not None)
+            total = consumed(kind)
             if total >= policy[cap]:
                 raise RecoveryStop('LIMIT_REACHED', 'Frozen ' + kind + ' cap exhausted')
 
