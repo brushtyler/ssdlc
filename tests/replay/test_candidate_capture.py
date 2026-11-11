@@ -6,7 +6,7 @@ import subprocess
 import sys
 from unittest.mock import patch
 
-from test_task_bootstrap import RepositoryTests
+from replay.repository_fixtures import RepositoryTests
 from ssdlc_candidates import CandidateStore
 from ssdlc_tasks import DevelopmentBlocked, TaskError, git
 

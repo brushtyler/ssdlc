@@ -30,3 +30,11 @@ separate CI job. Only pinned test modules and fixtures are staged for imports;
 new `tests/test_*.py` files are not discovered or reachable through the original
 tests directory. All twelve corpus expectations are unchanged. Direct in-process
 benchmark execution is useful for development but is not the isolated CI gate.
+
+
+The current `i2-fixtures-v4` baseline extracts shared Git/scheduler and design
+fixture definitions unchanged into `repository_fixtures.py`. The protected
+replay imports that pinned module directly and does not import the ordinary
+execution-mode test modules. Those tests remain in full unit discovery with
+unchanged assertions; candidate tasks still cannot change replay helpers,
+scenarios, expectations or the isolated gate.

@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from test_design_session import finding, review
+from replay.repository_fixtures import finding, review
 from ssdlc_design import DesignSession
 from ssdlc_recovery import RecoveryStop, progress
 from ssdlc_tasks import PlanError

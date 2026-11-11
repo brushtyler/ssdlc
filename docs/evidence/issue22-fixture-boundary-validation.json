@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "issue": 22,
+  "purpose": "Offline prerequisite: isolate replay fixtures from task-only mode tests",
+  "base_commit": "daabee10c74ef035535da28c86456cf3f6c0e6d6",
+  "unchanged_fixtures": [
+    {
+      "source": "tests/test_task_bootstrap.py",
+      "symbol": "RepositoryTests",
+      "ast_sha256": "c2037d7ceb16a96efcfe5196cbd73c58dda41fa7edb4109a4e0b9f237d3a8a5d"
+    },
+    {
+      "source": "tests/test_design_session.py",
+      "symbol": "finding",
+      "ast_sha256": "17b8d6b1fee95555586a5d9b78e28f28f19b2e4806828e1e5668e31025da9eeb"
+    },
+    {
+      "source": "tests/test_design_session.py",
+      "symbol": "review",
+      "ast_sha256": "13f8f17ccb30c3a6d10ab5793f4c1df9b1a54fa3f10cae077b9465b8888ecdf5"
+    }
+  ],
+  "unchanged_test_inventory": [
+    {
+      "path": "tests/test_task_bootstrap.py",
+      "test_methods": 117,
+      "all_test_method_asts_unchanged": true
+    },
+    {
+      "path": "tests/test_design_session.py",
+      "test_methods": 22,
+      "all_test_method_asts_unchanged": true
+    }
+  ],
+  "provider_calls": 0,
+  "historical_run_activated": false,
+  "validation": {
+    "targeted_tests": 79,
+    "result": "passed",
+    "isolated_replay_cases": 12,
+    "isolated_replay_failures": 0,
+    "baseline_id": "i2-fixtures-v4"
+  },
+  "scope": "Fixture extraction only. No new issue #22 checkpoint, execution authorization or changed provider limit."
+}
