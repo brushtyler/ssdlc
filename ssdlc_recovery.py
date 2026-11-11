@@ -26,6 +26,43 @@ class NotDispatched(DevelopmentBlocked):
     pass
 
 
+def bounded_mode(root):
+    """Authority outside limits/: deleting a policy is never an opt-out."""
+    import json
+    root = Path(root)
+    path = root / 'execution-mode.json'
+    state_path = root / 'state.json'
+    try:
+        if path.is_symlink() or state_path.is_symlink(): raise ValueError()
+        marker = json.loads(path.read_text()) if path.exists() else None
+        state = json.loads(state_path.read_text()) if state_path.exists() else {}
+        if not isinstance(state, dict): raise ValueError()
+        recorded = state.get('bounded_execution')
+        if marker is not None and (set(marker) != {'kind', 'policy_sha256', 'status'}
+                or marker['kind'] != 'bounded-i2' or marker['status'] not in ('INTENT', 'ACTIVE')):
+            raise ValueError()
+        if recorded is not None and (not isinstance(recorded, dict) or set(recorded) != {'kind', 'policy_sha256'}
+                                     or recorded['kind'] != 'bounded-i2'):
+            raise ValueError()
+        return marker, recorded, state
+    except (OSError, ValueError, TypeError, KeyError):
+        raise DevelopmentBlocked('INTEGRITY', 'Bounded execution mode is missing or malformed') from None
+
+
+def bind_bounded_state(root, state):
+    marker, recorded, _ = bounded_mode(root)
+    if marker is None and (recorded is not None or state.get('bounded_execution') is not None):
+        raise DevelopmentBlocked('INTEGRITY', 'Persistent bounded mode disappeared; refusing state overwrite')
+    if marker is not None:
+        if marker['status'] != 'ACTIVE':
+            raise DevelopmentBlocked('INTEGRITY', 'Limits authorization is incomplete')
+        expected = {k: marker[k] for k in ('kind', 'policy_sha256')}
+        if state.get('bounded_execution', expected) != expected:
+            raise DevelopmentBlocked('INTEGRITY', 'Ticket bounded execution binding changed')
+        state['bounded_execution'] = expected
+    return state
+
+
 class LimitsStore:
     """Reservations survive loss of a response. Unknown outcomes block redispatch.
 
@@ -43,12 +80,23 @@ class LimitsStore:
             raise ValueError('Nonfinite limit')
         envelope = {'policy': policy, 'binding': binding}
         with ticket_lock(self.root / 'limits/limits.lock'):
+            marker, recorded, _ = bounded_mode(self.root)
+            expected = {'kind': 'bounded-i2', 'policy_sha256': digest(envelope)}
+            if marker is not None and {k: marker[k] for k in expected} != expected:
+                raise DevelopmentBlocked('INTEGRITY', 'Authorization cannot change the persistent bounded mode')
+            if recorded is not None and recorded != expected:
+                raise DevelopmentBlocked('INTEGRITY', 'Authorization differs from ticket bounded mode')
             state = self.journal.load()
             if state is not None:
+                # Validate old authorizations before attaching the new marker.
+                if state['policy_sha256'] != digest(envelope):
+                    raise DevelopmentBlocked('INTEGRITY', 'Frozen limits/binding changed; explicit transition required')
+                self._publish_mode(envelope)
                 self._load(envelope)
                 return
-            if self.journal.snapshot.exists():
+            if self.journal.snapshot.exists() or marker is not None and marker['status'] == 'ACTIVE' or recorded is not None:
                 raise DevelopmentBlocked('INTEGRITY', 'Limit journal disappeared; authorization cannot reset consumption')
+            atomic_json(self.root / 'execution-mode.json', dict(expected, status='INTENT'))
             if self.policy_path.exists():
                 import json
                 if json.loads(self.policy_path.read_text()) != envelope:
@@ -59,6 +107,19 @@ class LimitsStore:
             self.journal.append('LIMITS_AUTHORIZED', {'policy_sha256': digest(envelope),
                 'started_at': now, 'deadline_at': now + policy['wall_seconds'],
                 'invocations': {}, 'transports': [], 'diagnoses': []})
+            self._publish_mode(envelope)
+
+    def _publish_mode(self, envelope, state=None):
+        expected = {'kind': 'bounded-i2', 'policy_sha256': digest(envelope)}
+        marker, recorded, existing = bounded_mode(self.root)
+        if marker is not None and {k: marker[k] for k in expected} != expected or recorded is not None and recorded != expected:
+            raise DevelopmentBlocked('INTEGRITY', 'Persistent limits mode changed')
+        atomic_json(self.root / 'execution-mode.json', dict(expected, status='ACTIVE'))
+        if state is not None:
+            state['bounded_execution'] = expected
+        elif (self.root / 'state.json').exists():
+            existing['bounded_execution'] = expected
+            atomic_json(self.root / 'state.json', existing)
 
     def _load(self, expected=None, *, repair=True):
         import json
@@ -71,11 +132,17 @@ class LimitsStore:
         try:
             validate_document('recovery-limits', envelope['policy'])
             state = self.journal.load() if repair else self.journal.peek()
-        except TaskError:
+        except (TaskError, KeyError, TypeError, ValueError):
             raise DevelopmentBlocked('INTEGRITY', 'Frozen limits policy/journal integrity failed') from None
-        if (state is None or state['policy_sha256'] != digest(envelope)
+        if (not isinstance(state, dict) or state.get('policy_sha256') != digest(envelope)
                 or expected is not None and envelope != expected):
             raise DevelopmentBlocked('INTEGRITY', 'Frozen limits/binding changed; explicit transition required')
+        marker, recorded, ticket_state = bounded_mode(self.root)
+        expected_mode = {'kind': 'bounded-i2', 'policy_sha256': digest(envelope)}
+        if (marker is not None or recorded is not None) and (
+                marker != dict(expected_mode, status='ACTIVE')
+                or (self.root / 'state.json').exists() and recorded != expected_mode):
+            raise DevelopmentBlocked('INTEGRITY', 'Persistent bounded execution mode changed or disappeared')
         binding = envelope.get('binding', {})
         if binding.get('historical_sha256'):
             anchor = binding['accounting_anchor']
@@ -212,13 +279,13 @@ def require_unlocked_git(worktree):
         raise RecoveryStop('GIT_LOCK_UNOWNED', 'Git index lock ownership is unproven; preserve it and fence writers')
 
 
-def progress(previous, current):
+def progress(previous, current, resolved_once=()):
     """Track obligations, not prose hashes, finding labels or token changes."""
     def obligations(assessment):
         return {ref for f in assessment.get('findings', []) if f['status'] == 'OPEN' and f['severity'] == 'BLOCKING'
                 for key in ('requirement_refs', 'standard_refs', 'quality_check_refs') for ref in f.get(key, [])}
     before, after = obligations(previous), obligations(current)
-    resolved = before - after
+    resolved = (before - after) - set(resolved_once)
     return {'resolved_obligations': sorted(resolved), 'open_obligations': sorted(after),
             'material_progress': bool(resolved), 'interpretation': 'Independent reviewer resolutions, not correctness proof'}
 

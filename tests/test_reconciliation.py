@@ -181,6 +181,7 @@ class ReconciliationTests(ContinuationTests):
     def test_planning_entrypoints_and_phases_cannot_reset_sessions(self):
         staged = self.stage(); self.select(staged)
         limits = LimitsStore(runtime_root(self.target))
+        limits.guard_entrypoint('compile_evidence_pack')  # deterministic final evidence, including stop reports
         for name in ('run_phase_design', 'run_phase_recon', 'run_phase_po'):
             with self.assertRaisesRegex(TaskError, 'earlier'):
                 limits.guard_entrypoint(name)

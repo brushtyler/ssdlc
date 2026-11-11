@@ -132,12 +132,17 @@ class LimitsTests(unittest.TestCase):
         self.assertEqual(next(iter(state['invocations'].values()))['status'], 'returned')
 
     def test_http_inference_does_not_repeat_a_post_on_lost_response(self):
-        from orchestrator import EngineRunner
-        with patch.dict('os.environ', {'OPENROUTER_API_KEY': 'offline-sentinel'}), \
-             patch('orchestrator.urllib.request.urlopen', side_effect=urllib.error.URLError('lost response')) as request:
-            with self.assertRaisesRegex(RecoveryStop, 'no automatic replay'):
-                EngineRunner.call_openrouter('model', 'system', 'user', 'p', 't', '03-dev')
-        self.assertEqual(request.call_count, 1)
+        from orchestrator import EngineRunner, _dispatch_local
+        previous = getattr(_dispatch_local, 'limits', None); _dispatch_local.limits = self.store
+        try:
+            with patch.dict('os.environ', {'OPENROUTER_API_KEY': 'offline-sentinel', 'SSDLC_SUPERVISED_RUN_ID': 'offline'}), \
+                 patch('orchestrator._supervision_event', return_value=True), \
+                 patch('orchestrator.urllib.request.urlopen', side_effect=urllib.error.URLError('lost response')) as request:
+                with self.assertRaisesRegex(RecoveryStop, 'no automatic replay'):
+                    EngineRunner.call_openrouter('model', 'system', 'user', 'p', 't', '03-dev')
+            self.assertEqual(request.call_count, 1)
+            self.assertEqual(next(iter(self.store._load()[1]['invocations'].values()))['status'], 'uncertain')
+        finally: _dispatch_local.limits = previous
 
     def test_supervisor_deadline_uses_original_ticket_authorization(self):
         from ssdlc_supervisor import ticket_hard_deadline

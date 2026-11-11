@@ -17,7 +17,7 @@ from ssdlc_historical import project_accounting, limit_sources, validate_decisio
 
 
 ALLOWED_ENTRYPOINTS = ['run_pipeline', 'run_phase_dev', 'run_phase_review', 'run_phase_qa',
-                       'run_phase_appsec', 'run_phase_ops', 'run_phase_docs']
+                       'run_phase_appsec', 'run_phase_ops', 'run_phase_docs', 'compile_evidence_pack']
 ALLOWED_PHASES = ['03-dev', '04-review', '05-qa', '05b-appsec', '06-ops', '07-docs']
 CONTEXT = ('01-po/requirements.md', '02-design/adr.md', '02-design/threat-model.md')
 
@@ -306,6 +306,7 @@ def _prepare(ticket, repo, request, *, runtime_identity, controller_snapshot, ve
         store.journal.append('RECONCILIATION_VERIFICATION_ACCOUNTED', initial)
         outer['tasks_status'] = copy.deepcopy(scheduler.state['tasks'])
         outer.update(status='RECONCILIATION_READY', current_step='awaiting-exact-authorization')
+        store._publish_mode(envelope, outer)
         atomic_json(runtime / 'state.json', outer)
         update(ticket, identity, namespace='execution', staged_head=scheduler.state['expected_head'])
         runtime_binding = {'transition_id': identity, 'source_generation': source['projection']['transition_id'],

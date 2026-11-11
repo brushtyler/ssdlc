@@ -15,3 +15,11 @@ replay additionally validates those mounts against the daemon.
 These cases are the I0 subset of A2, not the completed autonomy benchmark or
 independent correctness oracle. Additional stop handlers and protected baseline
 metrics arrive in later increments.
+
+
+The I2 v2 corpus adds design oscillation, diagnosis citation and empty
+post-diagnosis ADR. Run `PYTHONPATH=tests python3 -m replay.benchmark --output FILE`.
+The host verifies `schemas/recovery-grader-baseline.json` before loading the
+semantic test helpers. Changes to this directory or imported grader/fake files
+require a reviewed baseline revision and matching pins; candidate tasks cannot
+perform that revision. The report omits unmeasured ready-PR/live-call metrics.

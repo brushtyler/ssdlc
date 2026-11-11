@@ -1,0 +1,175 @@
+{
+  "schema_version": 1,
+  "issue": 29,
+  "increment": "I2 new-run hardening",
+  "base_commit": "87ff3456f112782373e875556be5d04faf7a27bc",
+  "created_at": "2026-11-11T12:30:24.331870+00:00",
+  "provenance": "Direct offline bootstrap with real Git/journals, semantic engines and credential-free Docker. Not live model development, autonomous delivery or an independent correctness-oracle result.",
+  "source_files": [
+    {
+      "path": "docs/bounded-recovery.md",
+      "sha256": "dc62caa05d505e9e5c4764622b19013af5b453fad3656eb93bdd7e2924a44da6"
+    },
+    {
+      "path": "docs/candidate-capture.md",
+      "sha256": "0fe5fae83062efd7659766256d2c2a554a7fe86543a83180c15709a57b4cc5e3"
+    },
+    {
+      "path": "orchestrator.py",
+      "sha256": "8105dfc4a3ba91c3b69337beea835215141b5fac4ebaa30a9bd647f80f2ea47c"
+    },
+    {
+      "path": "schemas/candidate-capture.schema.json",
+      "sha256": "0ca897358eee2bb37f1d7fe621b724853d5106cfa281d89c535980aae1fe9c7f"
+    },
+    {
+      "path": "schemas/recovery-grader-baseline.json",
+      "sha256": "fbbe1c3dc8921be57666bd85df7fa3bfe1ba40ad182dab8df3d0a399aa3568ac"
+    },
+    {
+      "path": "ssdlc_candidates.py",
+      "sha256": "9571c6b0dcef6856a626b3750033817fb89d0c3ec9e9ffd1b0bb2061bff54340"
+    },
+    {
+      "path": "ssdlc_design.py",
+      "sha256": "902f55dde67fcc1a8403e1faff7c40c2ac0e53b00db3ad2f763584c517f79c7e"
+    },
+    {
+      "path": "ssdlc_grader.py",
+      "sha256": "0760f470233fbb3f65beb61212cc76f90bf5d448e4ce2c3c89dab001501bd2ae"
+    },
+    {
+      "path": "ssdlc_reconciliation.py",
+      "sha256": "16c510ebffc1752b697c1ff4be6d156042e3c71010f5e981a025ad5a8f3e107f"
+    },
+    {
+      "path": "ssdlc_recovery.py",
+      "sha256": "ed04e5fd5d54f57946d57103d644e1564e7054e57a0a193e16dca501e4915853"
+    },
+    {
+      "path": "ssdlc_tasks.py",
+      "sha256": "2ae82df6e221853521f0fda35e67e7b139d742a4d52e8735e48aefb0c0f25af3"
+    },
+    {
+      "path": "tests/replay/README.md",
+      "sha256": "53b4c5c4fdadac1a66e4bfc2fa15239002e605111ba62cf57c8a277c8f99517d"
+    },
+    {
+      "path": "tests/replay/benchmark.py",
+      "sha256": "f045ac590f66c4e17e524699edfe58aecaf79aed293f4c2311ceaab863718f13"
+    },
+    {
+      "path": "tests/replay/fixtures/i2-recovery.json",
+      "sha256": "660c417264ad56f92e30c18fe70f59f288f8f58cfb69c03b365e40cec6e2b31a"
+    },
+    {
+      "path": "tests/test_design_recovery.py",
+      "sha256": "6487ce1d7d5bcbc4867357a81e7d6aa3bc2273a48a6b9694e191f91f888b9b1f"
+    },
+    {
+      "path": "tests/test_i2_hardening.py",
+      "sha256": "12c574e1c5d2da71e3a01aef6a7dcf46bc26920a5a80923d7e9ff2994ee4693b"
+    },
+    {
+      "path": "tests/test_reconciliation.py",
+      "sha256": "b478a5731643512e98f57e134dd93929aa7521d9d9fdacc46e49b0cf3a56164e"
+    },
+    {
+      "path": "tests/test_recovery_benchmark.py",
+      "sha256": "d178f264d9ee51e24ae7cffe19fa77289cb75ce75a708918f158c2e40cbc3845"
+    },
+    {
+      "path": "tests/test_recovery_limits.py",
+      "sha256": "cce7eb708b8b3e17b6dcbf867aa64f403739e33cd0116daf6147a71af3ca6c9d"
+    }
+  ],
+  "execution": {
+    "provider_calls_executed": 0,
+    "historical_issue22_resumed": false,
+    "historical_state_mutated": false,
+    "auto_merge": false
+  },
+  "validation": {
+    "repository_full_suite": {
+      "status": "passed",
+      "tests": 916,
+      "elapsed_seconds": 343.411,
+      "command": "PATH=/usr/bin:/bin:/usr/local/bin python3 -m unittest discover -s tests -q",
+      "scope": "Full suite on preceding revision; final stale-mode and overlapping-finding progress regressions are additionally covered by final targeted tests and the final Docker export. Exact-commit CI remains authoritative."
+    },
+    "final_mode_tests": {
+      "status": "passed",
+      "tests": 26,
+      "elapsed_seconds": 0.227,
+      "command": "PYTHONPATH=tests python3 -m unittest test_i2_hardening.PersistentModeTests -q"
+    },
+    "final_docker_tests": {
+      "status": "passed",
+      "tests": 92,
+      "elapsed_seconds": 62.268,
+      "image_id": "sha256:67d6aa23250928dba124ad4ee4edb7b6c4aa33fef37c0ff1a7a6ddc078356665",
+      "command": "PYTHONPATH=tests python3 -m unittest test_i2_hardening test_design_recovery test_recovery_limits test_not_dispatched test_recovery_benchmark test_reconciliation -q",
+      "source": "Read-only standalone Git export; all changed sources match source_files hashes",
+      "network": "none",
+      "credentials_mounted": false
+    },
+    "real_role_timeout_smoke": {
+      "status": "passed",
+      "role_calls": 1,
+      "attempts": 1,
+      "termination": "timeout",
+      "completion_confirmation": "unconfirmed_completion",
+      "checkpoint": true,
+      "ready_for_signoff": false,
+      "removal_and_absence_confirmed": true,
+      "network": "none",
+      "credentials_mounted": false,
+      "image_id": "sha256:67d6aa23250928dba124ad4ee4edb7b6c4aa33fef37c0ff1a7a6ddc078356665",
+      "elapsed_seconds": 5.193
+    },
+    "protected_replay": {
+      "corpus": "i2-recovery-v2",
+      "baseline_id": "i2-hardening-v2",
+      "cases": 12,
+      "failed_cases": 0,
+      "required_interventions": 9,
+      "avoidable_interventions": 0,
+      "escaped_seeded_defects": 0,
+      "report_ref": "docs/evidence/i2-hardening-replay-results.json",
+      "sha256": "e970c1e5e2893ebdcccbf95cc46daf6fdd750f315f3bd2848ad5eccfa6ec492b"
+    },
+    "gitleaks": {
+      "status": "passed",
+      "mode": "redacted, no-git selected public-source scan",
+      "findings": 0
+    },
+    "diff_check": {
+      "status": "passed"
+    },
+    "ci": {
+      "workflow": ".github/workflows/test.yml",
+      "gate": "python3 -m unittest discover -s tests -v",
+      "expected_tests": 917,
+      "authority": "PR check attached to exact pushed commit; workflow permissions/gates unchanged"
+    }
+  },
+  "coverage": {
+    "design_lifetime_progress": "test_design_recovery: oscillating_obligations_do_not_count_as_new_resolutions; diagnosis_report_cannot_be_cited_as_material_progress; empty_adr_before_diagnosis_does_not_reset_streak; overlapping_findings_do_not_spend_the_first_real_resolution_early (no unnecessary diagnosis)",
+    "registered_design_stops": "test_design_recovery: round_exhaustion_with_progress_policy_is_registered; empty_adr_after_diagnosis_stops_without_another_round; invalid_review_after_diagnosis_is_a_registered_stop_without_next_round; interrupted_architect_after_diagnosis_cannot_reserve_another_round",
+    "persistent_mode": "test_i2_hardening.PersistentModeTests: every_phase_refuses_deleted_limits_even_without_autonomous_env; mode_marker_or_state_binding_tampering_refuses; native_state_save_preserves_mode_even_from_a_stale_projection; crash_during_authorization_does_not_reset_counters_on_retry",
+    "capture_refusals": "test_i2_hardening.CaptureIntegrityTests: missing/replaced Git, corrupt index, nested Git, backslash/control names; active_writer_during_capture_never_produces_adoptable_source; complete_rejection_after_crash_before_journal_append_is_reconciled",
+    "isolated_protection_and_timeout": "test_i2_hardening.CaptureIntegrityTests: protected_path_alone_blocks; git_metadata_alone_blocks_without_source_protected_change; role_timeout_adapter_fences_before_capture_without_redispatch",
+    "grader_integrity": "test_i2_hardening.GraderTargetTests and GraderProtectionTests: immutable-base self-detection, protected paths and prefixes, bypassed manifest capture, each dependency hash and manifest membership",
+    "non_dispatch": "test_not_dispatched retained; test_i2_hardening.PersistentModeTests: missing_role_executable_is_proven_not_dispatched; supervisor_intent_refusal_precedes_engine_and_is_not_uncertain",
+    "frozen_cycle_and_disclosures": "test_i2_hardening.DeliveryDisclosureTests: outer_cycle_uses_frozen_policy_not_environment; evidence_pack_and_signoff_show_unconfirmed_producer_completion",
+    "transport_compatibility": "test_i2_hardening.PersistentModeTests: legacy_transport_uses_three_attempts_and_auth_does_not_retry; test_recovery_limits: bounded HTTP lost response is not resent"
+  },
+  "scope_limits": [
+    "New bounded authorizations persist the new mode; changing an existing frozen controller requires explicit compatibility/migration, not copying code into its runtime.",
+    "Bounded transport retry is deliberately inactive in production until non-dispatch or replay-safety proof exists. The transport reservation helper alone is not a retry scheduler.",
+    "Host-owned hashes/pins are integrity references, not authentication against replacement of both references and payload by a same-user host writer. Full containment remains I3.",
+    "The semantic replay does not measure ready PRs, live-model-call deltas, human callbacks or operator waits; those fields are removed. Full independent correctness remains I4.",
+    "Source/output preservation assumes writable host evidence storage; failed/incomplete publication never permits another provider dispatch."
+  ],
+  "public_artifact_policy": "Only source/schema/documentation, synthetic replay and aggregate validation are public. Raw runtime captures, authorizations, transcripts, source snapshots and credential files are excluded."
+}

@@ -190,7 +190,16 @@ class DesignSession:
     def _progress(self, session, record, history, assessment, adr):
         from ssdlc_recovery import progress, RecoveryStop
         prior = history[-1].get('assessment', {}) if history else {}
-        record['progress'] = progress(prior, assessment)
+        previous_records = [r for r in session['rounds'] if r['round'] < record['round'] and r.get('progress_evaluated')]
+        resolved_once = {ref for r in previous_records for ref in r.get('progress', {}).get('resolved_obligations', [])}
+        for previous in previous_records:
+            closed_refs = {ref for f in previous.get('assessment', {}).get('findings', [])
+                           if f['status'] == 'RESOLVED' and f['severity'] == 'BLOCKING'
+                           for key in ('requirement_refs', 'standard_refs', 'quality_check_refs') for ref in f.get(key, [])}
+            # A resolved finding does not clear an obligation still blocked by
+            # another finding in that same assessment.
+            resolved_once.update(closed_refs - set(previous['progress']['open_obligations']))
+        record['progress'] = progress(prior, assessment, resolved_once)
         seen = {e['sha256'] for r in session['rounds'] if r['round'] < record['round']
                 for e in r.get('progress', {}).get('material_evidence', [])}
         catalogue = set(self.inputs['context']['requirement_catalogue']['required_ids'])
@@ -199,7 +208,7 @@ class DesignSession:
                     and set(e['obligation_refs']) & set(record['progress']['open_obligations']) and self.verify_evidence(e)]
         record['progress']['material_evidence'] = material
         record['progress']['material_progress'] |= bool(material)
-        previous = session['rounds'][-2] if len(session['rounds']) > 1 else {}
+        previous = previous_records[-1] if previous_records else {}
         streak = 0 if not history or record['progress']['material_progress'] else previous.get('stagnant_rounds', 0) + 1
         record['stagnant_rounds'] = streak
         if previous.get('diagnosis') and not record['progress']['material_progress']:
@@ -209,7 +218,9 @@ class DesignSession:
                 raise RecoveryStop('OUTCOME_UNCERTAIN', 'Design diagnosis reserved without a captured result')
             if 'diagnosis' not in record:
                 if record['round'] >= session['round_limit']:
-                    raise RecoveryStop('LIMIT_REACHED', 'No remaining authorized design round for a diagnosis repair')
+                    record.update(status='BLOCKED', failure_kind='DESIGN_STALLED')
+                    self._save(session)
+                    raise RecoveryStop('DESIGN_STALLED', 'No remaining authorized design round for a diagnosis repair')
                 subject = digest(record['progress']['open_obligations'])
                 record['diagnosis_reserved'] = subject
                 self._save(session)
@@ -229,6 +240,16 @@ class DesignSession:
         record['progress_evaluated'] = True
         self._save(session)
 
+    def _pending_diagnosis(self, session):
+        previous = next((r for r in reversed(session['rounds']) if r.get('progress_evaluated')), {})
+        return bool(previous.get('diagnosis'))
+
+    def _stall(self, session, record, message):
+        from ssdlc_recovery import RecoveryStop
+        record.update(status='BLOCKED', failure_kind='DESIGN_STALLED')
+        self._save(session)
+        raise RecoveryStop('DESIGN_STALLED', message)
+
     def run(self):
         session = self._load()
         if session.get('import_complete') is False:
@@ -236,6 +257,9 @@ class DesignSession:
         while True:
             record = session['rounds'][-1] if session['rounds'] else None
             if record and record['status'] == 'BLOCKED':
+                if self.progress_policy and record.get('failure_kind') == 'LIMIT_REACHED':
+                    from ssdlc_recovery import RecoveryStop
+                    raise RecoveryStop('LIMIT_REACHED', 'No remaining authorized design round for a diagnosis repair')
                 if self.progress_policy and record.get('failure_kind') == 'DESIGN_STALLED':
                     from ssdlc_recovery import RecoveryStop
                     raise RecoveryStop('DESIGN_STALLED', 'Design did not progress after the bounded diagnosis')
@@ -255,7 +279,14 @@ class DesignSession:
                 self._save(session)
             if not record or record['status'] in ('REJECTED', 'ARCH_UNCERTAIN'):
                 if len(session['rounds']) >= session['round_limit']:
+                    if self.progress_policy:
+                        from ssdlc_recovery import RecoveryStop
+                        record.update(status='BLOCKED', failure_kind='DESIGN_STALLED')
+                        self._save(session)
+                        raise RecoveryStop('DESIGN_STALLED', 'Authorized design rounds exhausted; no further dispatch')
                     raise PlanError(f"Design round limit exhausted ({session['round_limit']}); resume with an explicit higher --rounds limit; evidence: {self.root}")
+                if self.progress_policy and record and record['status'] == 'ARCH_UNCERTAIN' and self._pending_diagnosis(session):
+                    self._stall(session, record, 'Architect produced no confirmed ADR after diagnosis')
                 history = self._history(session)
                 adr = next(((self.root / r['adr']).read_text() for r in reversed(session['rounds']) if 'adr' in r), '')
                 self.budget()
@@ -264,12 +295,16 @@ class DesignSession:
                 self._save(session)
                 print(f"[02-design] Architect round {record['round']}/{session['round_limit']}; preserving prior ADR and {len(history)} reviews.", flush=True)
                 if self.progress_policy and len(session['rounds']) > 1:
-                    prior_round = session['rounds'][-2]
+                    prior_round = next((r for r in reversed(session['rounds'][:-1]) if r.get('progress_evaluated')), {})
                     if 'diagnosis' in prior_round:
                         history.append({'diagnosis': (self.root / prior_round['diagnosis']).read_text()[-8000:],
                                         'instruction': 'Apply the bounded diagnosis within approved obligations; next round must show material progress.'})
                 draft = self.architect(record['round'], adr, history)
                 if not draft.strip():
+                    record['status'] = 'ARCH_UNCERTAIN'
+                    self._save(session)
+                    if self.progress_policy and self._pending_diagnosis(session):
+                        self._stall(session, record, 'Architect returned an empty ADR after diagnosis')
                     raise PlanError('Architect returned an empty ADR; reserved round remains consumed')
                 self._evidence(session, record, 'adr', draft)
                 if self.progress_policy:
@@ -295,7 +330,12 @@ class DesignSession:
                 record['status'] = 'APPROVED' if assessment['verdict'] == 'APPROVED' else 'REJECTED'
                 self._save(session)
             else:
-                assessment = self._review(session, record, adr, history)
+                try:
+                    assessment = self._review(session, record, adr, history)
+                except PlanError:
+                    if self.progress_policy:
+                        self._stall(session, record, 'No valid design review; progress cannot be established')
+                    raise
             if record['status'] == 'APPROVED':
                 print(f"[02-design] APPROVED in round {record['round']}.", flush=True)
                 continue

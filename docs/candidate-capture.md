@@ -105,3 +105,39 @@ the issue #22 cache mechanism, guard/capture/verification/commit interruptions,
 tampering, unsafe changes, additions/deletions, persistent attempts and refusal
 to silently change historical execution mode. No provider, subscription login
 or real development run is needed for these cases.
+
+## I2 integrity rejection hardening (#29)
+
+After a confirmed return/termination, metadata failures no longer discard the
+source/output evidence. Missing/replaced `.git` or a corrupt index are recorded
+as `git_metadata_unavailable`/`protected_metadata` without executing Git against
+changed configuration. Nested `.git`, backslash/control-character names, links
+and non-regular entries are recorded as unsafe. Regular bytes use confined,
+no-follow file descriptors and content-addressed blobs; an unsafe name is never
+used as an evidence-store destination or adopted into authoritative source.
+
+A mutation observed while copying or on the final stability check adds
+`source_changed`/`source_unavailable`. Copied bytes retain their actual digest;
+a rejection receipt is not a claim of a stable or executable candidate. These
+receipts preserve available payload and producer output and produce INTEGRITY,
+including on resume, without another developer call. An adapter's unconfirmed
+writer outcome still remains uncertain; model text cannot supply quiescence.
+If the main receipt cannot be formed but the evidence filesystem remains writable,
+a hash-bound `capture-rejection.json` and `rejected-output.log` are journaled as
+a non-dispatchable integrity refusal. A storage failure preventing even this
+record grants no replay permission; the retained workspace requires recovery.
+A complete refusal left by a crash before its journal append is recovered by
+matching the original invocation binding and output digest; it is not downgraded
+to an uncertain producer outcome or redispatched.
+
+The immutable `capture/developer.log` remains original producer evidence. Its
+readable attempt-level copy is flushed and atomically replaced on first write;
+resume reuses identical bytes instead of truncating the file. Timeout completion
+remains `unconfirmed_completion` even after independent tests pass and appears
+in both evidence-pack and sign-off disclosures.
+
+In self-development, the host grader baseline and `tests/replay/` are protected
+in planning, snapshots and capture. Revising the grader or its fakes requires an
+explicit baseline review, rather than a candidate changing its own expectations.
+Full instruction/network containment and independent oracles retain their I3/I4
+scope; this change does not claim protection against a same-user host attacker.

@@ -156,6 +156,25 @@ def overlay(source, destination, names):
             raise CandidateError('Unsupported candidate source entry')
 
 
+def _capture_read(root, name):
+    """Archive unsafe literal names by digest, never follow symlinks or Git links."""
+    parts = Path(name).parts
+    if not parts or Path(name).is_absolute() or '..' in parts:
+        raise CandidateError('Unconfined capture entry')
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for part in parts[:-1]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd); fd = child
+        source = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+        with os.fdopen(source, 'rb') as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise CandidateError('Capture entry is not a regular file')
+            return stream.read()
+    finally:
+        os.close(fd)
+
+
 class CandidateStore:
     def __init__(self, attempt_dir):
         self.attempt = attempt_dir
@@ -164,14 +183,26 @@ class CandidateStore:
     def capture(self, workspace, baseline, initial, metadata, binding, result, targets, protected):
         if self.root.exists():
             raise CandidateError('Candidate capture already exists')
-        observed = inventory(workspace)
-        observed_metadata = git_metadata(workspace)
         entries, caches, issues = {}, {}, []
+        try:
+            observed = inventory(workspace)
+        except (CandidateError, OSError):
+            observed = {}
+            issues.append('source_unavailable')
+        try:
+            observed_metadata = git_metadata(workspace)
+        except (CandidateError, OSError):
+            observed_metadata = None
+            issues.append('git_metadata_unavailable')
         if observed_metadata != metadata['metadata']:
             # Do not execute Git with a role-modified configuration.
             issues.append('protected_metadata')
-        elif git_identity(workspace) != metadata:
-            issues.append('protected_metadata')
+        else:
+            try:
+                if git_identity(workspace) != metadata:
+                    issues.append('protected_metadata')
+            except (CandidateError, OSError):
+                issues.append('git_metadata_unavailable')
         for name in sorted(set(baseline) | set(observed) | set(initial)):
             before, after = baseline.get(name), observed.get(name)
             if before == after == initial.get(name):
@@ -180,7 +211,9 @@ class CandidateStore:
                 caches[name] = after
                 continue
             entries[name] = {'before': before, 'starting': initial.get(name), 'after': after}
-            if any(part in protected for part in Path(name).parts):
+            if '.git' in Path(name).parts or '\\' in name or any(ord(c) < 32 for c in name):
+                issues.append('unsafe_entry')
+            if name in protected or any(name.startswith(p) for p in protected if p.endswith('/')) or any(part in protected for part in Path(name).parts):
                 issues.append('protected_path')
             if name not in targets:
                 issues.append('scope_required')
@@ -192,12 +225,29 @@ class CandidateStore:
         for name, entry in entries.items():
             after = entry['after']
             if after and after['kind'] == 'file':
-                data = _path(workspace, name).read_bytes()
-                if hashlib.sha256(data).hexdigest() != after['sha256']:
-                    raise CandidateError('Source changed during capture')
-                blob = temporary / 'blobs' / after['sha256']
+                try:
+                    data = _capture_read(workspace, name)
+                except (CandidateError, OSError):
+                    entry['after'] = {'kind': 'unsupported'}
+                    issues.append('source_unavailable')
+                    continue
+                actual_sha = hashlib.sha256(data).hexdigest()
+                if actual_sha != after['sha256']:
+                    issues.append('source_changed')
+                    entry['after'] = dict(after, sha256=actual_sha)
+                blob = temporary / 'blobs' / actual_sha
                 if not blob.exists():
                     _write(blob, data)
+        try:
+            if inventory(workspace) != observed:
+                issues.append('source_changed')
+        except (CandidateError, OSError):
+            issues.append('source_unavailable')
+        try:
+            if git_metadata(workspace) != observed_metadata:
+                issues.append('source_changed')
+        except (CandidateError, OSError):
+            issues.append('git_metadata_unavailable')
         output = result['output'].encode()
         _write(temporary / 'developer.log', output)
         receipt = {'schema_version': 1, 'binding': binding, 'producer': {k: v for k, v in result.items() if k != 'output'},
@@ -205,8 +255,6 @@ class CandidateStore:
                    'payload_sha256': signature(entries),
                    'generated_artifacts': caches, 'issues': sorted(set(issues))}
         validate_receipt(receipt)
-        if inventory(workspace) != observed or git_metadata(workspace) != observed_metadata:
-            raise CandidateError('Source or metadata changed during capture')
         _write(temporary / 'receipt.json', (json.dumps(receipt, sort_keys=True) + '\n').encode())
         _sync(temporary / 'blobs')
         _sync(temporary)

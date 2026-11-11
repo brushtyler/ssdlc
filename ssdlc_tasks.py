@@ -264,6 +264,11 @@ class TaskPlanValidator:
         if not any(ref.startswith('AC-') for ref in self.requirements):
             raise PlanError('No acceptance criteria found in requirements')
         self._validate_quality()
+        from ssdlc_grader import protected_paths
+        grader_paths = protected_paths(self.repo, plan['base_commit'])
+        if grader_paths:
+            from ssdlc_grader import guard_baseline
+            guard_baseline()
         tasks = {t['task_id']: t for t in plan['tasks']}
         if len(tasks) != len(plan['tasks']):
             raise PlanError('Duplicate task_id')
@@ -274,6 +279,8 @@ class TaskPlanValidator:
             if not deps <= tasks.keys() or task['task_id'] in deps:
                 raise PlanError(f'Unknown or self dependency: {task["task_id"]}')
             for path in task['target_files']:
+                if path in grader_paths or any(path.startswith(p) for p in grader_paths if p.endswith('/')):
+                    raise PlanError('Replay grader baseline requires an explicit reviewed revision, outside candidate tasks')
                 confined(self.repo, path)
                 if path == '.' or (self.repo / path).is_dir():
                     raise PlanError('target_files must name files, not directories')
@@ -563,6 +570,11 @@ class TaskScheduler:
         self.historical_capture_authority = historical_capture_authority
         self.dispatch_budget = dispatch_budget or budget
         self.runtime_identity = copy.deepcopy(runtime_identity or {})
+        from ssdlc_grader import protected_paths
+        self.grader_paths = protected_paths(worktree, plan['base_commit'])
+        if self.grader_paths:
+            from ssdlc_grader import guard_baseline
+            guard_baseline()
         if max_attempts < 1:
             raise PlanError('max_attempts must be positive')
         self.journal = TaskJournal(directory)
@@ -880,7 +892,7 @@ class TaskScheduler:
 
     def _protected(self) -> dict:
         result = {}
-        for name in PROTECTED:
+        for name in PROTECTED | self.grader_paths:
             root = self.wt / name
             if root.is_symlink():
                 result[name] = ['symlink', os.readlink(root)]
@@ -1397,8 +1409,22 @@ class TaskScheduler:
             if result.get('quiescent') is not True:
                 raise DevelopmentBlocked('DEVELOPER_INVOCATION', 'Developer writers are not confirmed quiescent; no redispatch')
             store = CandidateStore(attempt_dir)
-            store.capture(workspace, baseline, initial, metadata, self._capture_binding(task, record),
-                          result, set(task['target_files']), PROTECTED)
+            try:
+                store.capture(workspace, baseline, initial, metadata, self._capture_binding(task, record),
+                              result, set(task['target_files']), PROTECTED | self.grader_paths)
+            except (CandidateError, OSError):
+                from ssdlc_candidates import _write
+                output = attempt_dir / 'rejected-output.log'
+                _write(output, result['output'].encode())
+                rejection = {'schema_version': 1, 'category': 'INTEGRITY',
+                    'binding': self._capture_binding(task, record), 'producer': {k:v for k,v in result.items() if k != 'output'},
+                    'output_ref': str(output.relative_to(self.directory)), 'output_sha256': file_hash(output)}
+                path = attempt_dir / 'capture-rejection.json'
+                atomic_json(path, rejection)
+                record.update(status='CANDIDATE_CAPTURED', capture_rejection={
+                    'ref': str(path.relative_to(self.directory)), 'sha256': file_hash(path)})
+                self._save('CAPTURE_INTEGRITY_REJECTED')
+                raise DevelopmentBlocked('INTEGRITY', 'Capture failed; output and rejection preserved') from None
             return self._load_capture(task, record, store)
         except CandidateError as exc:
             raise DevelopmentBlocked('INTEGRITY', str(exc)) from exc
@@ -1422,6 +1448,31 @@ class TaskScheduler:
     def _resume_capture(self, task, record):
         from ssdlc_candidates import CandidateStore, CandidateError
         attempt_dir = self.directory / task['task_id'] / f"attempt-{record['attempts']}"
+        orphan = attempt_dir / 'capture-rejection.json'
+        if not record.get('capture_rejection') and orphan.exists():
+            try:
+                path = confined(self.directory, str(orphan.relative_to(self.directory)), protect=False)
+                rejection = json.loads(path.read_text())
+                output = confined(self.directory, rejection['output_ref'], protect=False)
+                if (rejection['schema_version'] != 1 or rejection['category'] != 'INTEGRITY'
+                        or rejection['binding'] != self._capture_binding(task, record)
+                        or rejection['producer'].get('quiescent') is not True
+                        or file_hash(output) != rejection['output_sha256']):
+                    raise ValueError()
+            except (OSError, ValueError, KeyError, TypeError, TaskError):
+                raise DevelopmentBlocked('INTEGRITY', 'Malformed orphan capture refusal; no redispatch') from None
+            record.update(status='CANDIDATE_CAPTURED', capture_rejection={
+                'ref': str(path.relative_to(self.directory)), 'sha256': file_hash(path)})
+            self._save('CAPTURE_REJECTION_RECOVERED')
+        if record.get('capture_rejection'):
+            meta = record['capture_rejection']
+            path = confined(self.directory, meta['ref'], protect=False)
+            rejection = json.loads(path.read_text())
+            output = confined(self.directory, rejection['output_ref'], protect=False)
+            if (file_hash(path) != meta['sha256'] or rejection['binding'] != self._capture_binding(task, record)
+                    or file_hash(output) != rejection['output_sha256']):
+                raise DevelopmentBlocked('INTEGRITY', 'Capture rejection evidence changed')
+            raise DevelopmentBlocked('INTEGRITY', 'Prior capture was rejected; no redispatch')
         try:
             result = self._load_capture(task, record, CandidateStore(attempt_dir))
         except CandidateError as exc:
@@ -1469,7 +1520,16 @@ class TaskScheduler:
 
     def _finish_attempt(self, task, record, result, attempt_dir):
         attempt = record['attempts']
-        (attempt_dir / 'developer.log').write_text(result['output'])
+        log = attempt_dir / 'developer.log'
+        data = result['output'].encode()
+        if not log.exists() or log.read_bytes() != data:
+            fd, temporary = tempfile.mkstemp(prefix='.developer-log-', dir=attempt_dir)
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(data); stream.flush(); os.fsync(stream.fileno())
+            os.replace(temporary, log)
+            directory_fd = os.open(attempt_dir, os.O_RDONLY | os.O_DIRECTORY)
+            try: os.fsync(directory_fd)
+            finally: os.close(directory_fd)
         record['producer'] = {k: v for k, v in result.items() if k != 'output'}
         self.guard()
         self._assert_tree()

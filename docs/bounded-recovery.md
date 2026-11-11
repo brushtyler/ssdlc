@@ -34,7 +34,20 @@ including direct phase entrypoints and nested CLI/API adapters (counted once).
 A lost response remains charged and blocks another dispatch. Returned or
 confirmed-terminated calls reconcile once. No provider switch, restart or failed
 repair refunds a reservation. Task attempt ceilings are persisted for the I2
-scheduler. A missing role/phase cap refuses dispatch.
+scheduler. A missing role/phase cap refuses dispatch. The outer dev/review/QA cycle also
+uses the frozen development-attempt ceiling, rather than current environment
+defaults.
+
+Authorization publishes a persistent `execution-mode.json` outside `limits/`
+and binds its policy digest into `state.json.bounded_execution` as soon as state
+exists. An INTENT marker precedes initialization; ACTIVE follows the durable
+limit journal. Interrupted initialization retries the same binding without
+resetting an existing journal. Every entrypoint fails closed if policy/journal
+or either mode binding disappears or changes, including non-autonomous launches.
+Native state writes retain the binding even from a stale state projection. This
+adds a marker for newly authorized runs; it is not permission to copy a new
+controller into an existing run. Historical admission uses #27's transaction,
+which publishes the same marker after its final accounting binding is sealed.
 
 `metered_usd` sums positive API usage observations;
 `cli_estimate_usd` sums positive CLI estimates. They are independent thresholds,
@@ -83,8 +96,9 @@ controller over a frozen run or manually rewrite its state.
 | Timed-out candidate fails code checks | Preserve partial candidate and normal repair context; the next developer consumes the next attempt and repairs in place |
 | Launcher/timeout/resource exit (124–127), empty suite, or failing clean preflight under I2 | `ENVIRONMENT_DIAGNOSIS`; preserve evidence, no model code-repair loop. Broader collection/witness classification remains I4 |
 | Protected, unsafe or out-of-scope source | Existing capture and scope/integrity guards still refuse adoption |
-| Inference HTTP error/lost response | One POST only. Current route has no tested non-dispatch/idempotency guarantee, so no automatic resend, even for 429/503/504 |
-| Future trusted adapter proves non-dispatch on a supported operation | Persistent retry reservation, exponential backoff plus supplied bounded jitter, named retry allowance and original deadline; uncertainty grants no replay authority |
+| Bounded I2 inference HTTP error/lost response | One POST only. Current route has no tested non-dispatch/idempotency guarantee, so no automatic resend, even for 429/503/504 |
+| Bounded transport retries | Disabled in production until a route has tested non-dispatch or replay-safety proof. `LimitsStore.transport` is a reservation primitive, not a connected retry loop; its supplied jitter and `not_before` are not claimed as production scheduling |
+| Legacy HTTP route without a frozen I2 profile | Restored three-attempt retry for 429/503/504, URL transport errors and timeout, with generated jitter and bounded backoff; auth failures do not retry. This is legacy compatibility, not I2 safe replay or an autonomous route |
 | Git index lock exists without a host ownership/creation receipt | `GIT_LOCK_UNOWNED`; retain the file. Neither age nor a PID lookup authorizes deletion |
 | Stable ticket/scheduler/limits `flock` files exist | Reuse the existing kernel locks; never unlink them |
 
@@ -102,6 +116,10 @@ deltas (at most 12,000 characters per delta in history), short review excerpts,
 compact prior assessments and references to the complete retained artifacts.
 They preserve stable approved obligation IDs and all round/review reservations.
 New prose, hashes, finding IDs and unsupported assertions do not count as progress.
+Resolved obligations are tracked across all evaluated rounds, including those
+already marked resolved in the first review; reopening and resolving one again
+cannot count as new progress. Empty/interrupted ADR rounds do not erase that
+history or the stagnant streak.
 
 Progress is either a supported independent-review resolution of an obligation,
 or a new host-verified evidence hash cited against approved obligations.
@@ -109,13 +127,18 @@ Registered static source-inspection facts may supply that evidence. Inspection
 uses AST parsing, never imports repository code, and is explicitly not a
 correctness oracle. Unregistered/duplicate evidence cannot reset the counter.
 The diagnosis is model text and cannot approve the design or become host proof.
+Its attached host inspection is tagged `purpose: diagnosis_context`, excluded
+from the progress catalogue and rejected by the host evidence predicate. A cited
+report from that diagnosis cannot manufacture progress on the next round.
 
 After two consecutive revisions without progress, reserve one explicitly allowed
 diagnosis, within the same role/phase/total bounds. No allowance or no remaining
 repair round means a registered stop. A lost diagnosis response stays uncertain;
 resume cannot call it or the architect again. A captured diagnosis survives
 restart and informs the next round. If that round still shows no progress,
-`DESIGN_STALLED` persists. The five-round initial limit does not become six
+`DESIGN_STALLED` persists. An empty/interrupted ADR after diagnosis, an
+unavailable valid review, or exhausted authorized rounds also produces a
+registered stop without allocating additional rounds. The five-round initial limit does not become six
 implicitly. Changing the policy of an existing design session requires an
 explicit migration; legacy sessions retain their old contract.
 
@@ -136,7 +159,7 @@ This is the incremental A3 inventory, not a claim that all older legacy stops
 have been normalized. Existing failure precedence, ownership checks, capture
 integrity and privacy cases remain in the complete suite.
 
-The host-owned `i2-recovery-v1` manifest pins nine scenarios and exact outcomes,
+The host-owned `i2-recovery-v2` manifest pins twelve scenarios and exact outcomes,
 invocations, attempts, diagnoses and checkpoint status. Candidate worktrees
 cannot change this grader/manifest through their writable mounts. CI runs the
 entire unit suite, including `test_recovery_benchmark`, which executes and grades
@@ -145,10 +168,11 @@ the complete replay corpus. The same gate is available standalone through
 Any wrong outcome/counter or exceeded case-time tolerance fails the gate. Changes
 to baseline expectations are explicit reviewed fixture changes.
 
-Reports separate checkpoints, expected stops, ready PRs, elapsed time, logical
-invocations and live model calls. Expected stops still count required operator
+Reports measure checkpoints, expected stops, elapsed time and logical
+invocations. Ready-PR, live-model-call, callback and operator-wait fields have
+been removed because this harness does not measure them. Expected stops still count required operator
 interventions; no callback execution or waiting is fabricated. The current
-corpus expects three successful engine outcomes and six operator-requiring
+corpus expects three successful engine outcomes and nine operator-requiring
 policy stops, with zero avoidable interventions. It does not claim ready-PR
 completion, the ten independently verified C-gate defects, or production latency
 and cost guarantees. See `docs/evidence/i2-offline-validation.json` for sanitized
@@ -160,3 +184,35 @@ provenance. Raw transcripts, authorizations and run journals stay private.
 transition from a stopped I1 generation into cumulative native I2 enforcement.
 It never installs a fresh profile over historical consumption. Other new-run I2
 hardening remains in issue #29.
+
+## Protected baseline and issue #29 validation
+
+`schemas/recovery-grader-baseline.json` (`i2-hardening-v2`) pins the grader,
+expectations, replay fixtures, imported test helpers and existing CI gate by
+SHA256. The host verifies those bytes before executing the corpus and before
+self-development planning/scheduling. Self-development is identified from the
+immutable base commit, not role-created files. Candidate manifests cannot target
+those files, the baseline control file, or any path under `tests/replay/`;
+capture also blocks them if validation is bypassed. Direct, explicitly reviewed
+baseline changes must update the pins alongside the code. Hashes are host-owned
+integrity references, not authentication against a host user who replaces both.
+
+The v2 baseline adds oscillating findings, diagnosis-as-evidence and empty ADR
+after diagnosis. `escaped_seeded_defects` is derived from the seeded repair's
+observed source/checkpoint, not a constant success claim. Other metrics remain
+out of scope until measured. The standalone replay is still
+`PYTHONPATH=tests python3 -m replay.benchmark --output FILE`; existing CI unit
+discovery executes it and rejects pin drift or wrong outcomes/counters.
+
+`tests/test_i2_hardening.py` additionally covers deleted/tampered mode bindings,
+each bounded entrypoint, capture integrity refusals and active writers, isolated
+protected violations, real role-adapter timeout fencing, frozen outer limits,
+legacy HTTP retry and completion disclosures. Existing `test_not_dispatched`
+regressions from #27 remain authority for trusted prelaunch refusal. Missing
+role executables, unavailable native developer isolation, missing AGY credentials
+and refused supervisor dispatch intent also carry trusted non-dispatch proof; arbitrary
+post-launch exception text/category does not authorize replay. Timeout/import
+completion uncertainty appears in the evidence pack and the explicit sign-off
+output; passing task checks still grants no global readiness by itself.
+Deterministic evidence compilation remains an authorized service operation after
+historical admission, so a limit/stop report does not require another model call.
