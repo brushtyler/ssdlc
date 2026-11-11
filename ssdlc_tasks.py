@@ -823,74 +823,101 @@ class TaskScheduler:
 
             save('REVALIDATION_STARTED')
             for tid in visit:
-                record = self.state['tasks'][tid]
-                blocked = [dep for dep in tasks[tid]['depends_on']
-                           if self.state['tasks'][dep]['status'] != 'COMPLETED']
-                if blocked:
-                    result.blocked.append(dict(task_id=tid, blocked_by=blocked))
-                    run['blocked'][tid] = blocked
-                    save('REVALIDATION_TASK_BLOCKED', tid)
-                    continue
-                attempts = record.setdefault('revalidations', [])
-                n = max((a['attempt'] for a in attempts), default=0) + 1
-                while os.path.lexists(self.directory / tid / f'revalidate-{n}'):
-                    n += 1
-                directory = self.directory / tid / f'revalidate-{n}'
-                attempt = dict(attempt=n, run=run['run'], status='RUNNING', head=head,
-                               tree=tree, dir=str(directory.relative_to(self.directory)),
-                               started_checks=[], checks=[])
-                attempts.append(attempt)
-                save('REVALIDATION_TASK_STARTED', tid, attempt)
-
-                def before(index, check_id):
-                    attempt['started_checks'].append(dict(index=index, check_id=check_id))
-                    save('REVALIDATION_CHECK_STARTED', tid, attempt, check_id)
-
-                def gate(index=None, check=None):
-                    check_id = check['check_id'] if check else None
-                    if (git(self.wt, 'rev-parse', 'HEAD') != head or self._changed()
-                            or self._protected() != protected or self._ignored() != ignored):
-                        raise _VerifierMutation('Verifier changed worktree', tid, check_id)
-                    problems = self._inventory_problems(self.state)
-                    if problems:
-                        p = problems[0]
-                        raise _EvidenceChanged(f"Evidence changed for task {p['task_id']!r}: {p['reason']}",
-                                               tid, check_id, p['path'])
-                    self._assert_evidence_dir(directory, tid, check_id)
-
-                try:
-                    try:
-                        self._make_attempt_dir(directory)
-                    except _RevalidationStop as exc:
-                        raise type(exc)('Cannot create evidence directory', tid, path=exc.path) from exc
-                    checks = self._verify(tasks[tid], attempt, directory,
-                                          event='REVALIDATION_CHECK_FINISHED',
-                                          before_check=before, after_check=gate, exclusive=True)
-                    gate()
-                except _RevalidationStop as exc:
-                    attempt['status'] = 'ABORTED'
-                    attempt['abort'] = dict(kind=exc.kind, check_id=exc.check_id,
-                                            path=exc.path, message=str(exc))
-                    run['status'] = 'ABORTED'
-                    save('REVALIDATION_ABORTED', tid, attempt, exc.check_id)
-                    raise
-                if ([c['check_id'] for c in checks] == self._expected_check_ids(tid)
-                        and all(c['exit_code'] == 0 and not c['empty_suite'] for c in checks)):
-                    attempt['status'] = 'PASSED'
-                    record['restored_by'] = n
-                    record['status'] = 'COMPLETED'
-                    result.passed.append(tid)
-                    save('REVALIDATION_TASK_PASSED', tid, attempt)
-                else:
-                    attempt['status'] = 'FAILED'
-                    diagnostics = [dict(c, outcome=('empty_suite' if c['empty_suite'] else
-                                   f"exit:{c['exit_code']}" if c['exit_code'] else 'passed')) for c in checks]
-                    result.failed.append(dict(task_id=tid, attempt=n,
-                                              evidence_dir=attempt['dir'], checks=diagnostics))
-                    save('REVALIDATION_TASK_FAILED', tid, attempt)
+                outcome = self._revalidate_task(tid, run, head, tree, protected, ignored)
+                result.passed.extend(outcome.passed)
+                result.failed.extend(outcome.failed)
+                result.blocked.extend(outcome.blocked)
             run['status'] = 'COMPLETE' if result.complete else 'INCOMPLETE'
             save('REVALIDATION_FINISHED')
             return result
+
+    def _revalidate_task(self, tid, run, head, tree, protected, ignored):
+        """Verify one task without acquiring a lock or finalizing its run."""
+        tasks = self._plan_index()
+        result = RevalidationResult([], [], [], [])
+
+        def save(event, tid=None, attempt=None, check_id=None):
+            run['cursor'] = dict(task_id=tid, attempt=attempt['attempt'] if attempt else None,
+                                 check_id=check_id, head=head, tree=tree,
+                                 dir=attempt['dir'] if attempt else None)
+            self._save(event)
+
+        record = self.state['tasks'][tid]
+        blocked = [dep for dep in tasks[tid]['depends_on']
+                   if self.state['tasks'][dep]['status'] != 'COMPLETED']
+        if blocked:
+            result.blocked.append(dict(task_id=tid, blocked_by=blocked))
+            run['blocked'][tid] = blocked
+            save('REVALIDATION_TASK_BLOCKED', tid)
+            return result
+        attempts = record.setdefault('revalidations', [])
+        n = max((a['attempt'] for a in attempts), default=0) + 1
+        while os.path.lexists(self.directory / tid / f'revalidate-{n}'):
+            n += 1
+        directory = self.directory / tid / f'revalidate-{n}'
+        attempt = dict(attempt=n, run=run['run'], status='RUNNING', head=head,
+                       tree=tree, dir=str(directory.relative_to(self.directory)),
+                       started_checks=[], checks=[])
+        attempts.append(attempt)
+        save('REVALIDATION_TASK_STARTED', tid, attempt)
+
+        def before(index, check_id):
+            attempt['started_checks'].append(dict(index=index, check_id=check_id))
+            save('REVALIDATION_CHECK_STARTED', tid, attempt, check_id)
+
+        def gate(index=None, check=None):
+            check_id = check['check_id'] if check else None
+            if (git(self.wt, 'rev-parse', 'HEAD') != head or self._changed()
+                    or self._protected() != protected or self._ignored() != ignored):
+                raise _VerifierMutation('Verifier changed worktree', tid, check_id)
+            problems = self._inventory_problems(self.state)
+            if problems:
+                p = problems[0]
+                raise _EvidenceChanged(f"Evidence changed for task {p['task_id']!r}: {p['reason']}",
+                                       tid, check_id, p['path'])
+            self._assert_evidence_dir(directory, tid, check_id)
+
+        try:
+            try:
+                self._make_attempt_dir(directory)
+            except _RevalidationStop as exc:
+                raise type(exc)('Cannot create evidence directory', tid, path=exc.path) from exc
+            checks = self._verify(tasks[tid], attempt, directory,
+                                  event='REVALIDATION_CHECK_FINISHED',
+                                  before_check=before, after_check=gate, exclusive=True)
+            gate()
+        except _RevalidationStop as exc:
+            attempt['status'] = 'ABORTED'
+            attempt['abort'] = dict(kind=exc.kind, check_id=exc.check_id,
+                                    path=exc.path, message=str(exc))
+            run['status'] = 'ABORTED'
+            save('REVALIDATION_ABORTED', tid, attempt, exc.check_id)
+            raise
+        if ([c['check_id'] for c in checks] == self._expected_check_ids(tid)
+                and all(c['exit_code'] == 0 and not c['empty_suite'] for c in checks)):
+            attempt['status'] = 'PASSED'
+            record['restored_by'] = n
+            record['status'] = 'COMPLETED'
+            result.passed.append(tid)
+            save('REVALIDATION_TASK_PASSED', tid, attempt)
+        else:
+            attempt['status'] = 'FAILED'
+            diagnostics = [dict(c, outcome=('empty_suite' if c['empty_suite'] else
+                           f"exit:{c['exit_code']}" if c['exit_code'] else 'passed')) for c in checks]
+            result.failed.append(dict(task_id=tid, attempt=n,
+                                      evidence_dir=attempt['dir'], checks=diagnostics))
+            save('REVALIDATION_TASK_FAILED', tid, attempt)
+        return result
+
+    def _finalize_txn_run(self, run) -> None:
+        """Finalize an open transaction revalidation run without taking a lock."""
+        if run['status'] == 'COMPLETE':
+            return
+        run['status'] = 'COMPLETE'
+        run['cursor'] = dict(task_id=None, attempt=None, check_id=None,
+                             head=self.state['expected_head'],
+                             tree=git(self.wt, 'rev-parse', 'HEAD^{tree}'), dir=None)
+        self._save('REVALIDATION_FINISHED')
 
     def _changed(self) -> list[str]:
         out = git(self.wt, '-c', 'status.renames=false', 'status', '--porcelain=v1', '-z', '--untracked-files=all')
@@ -1148,6 +1175,15 @@ class TaskScheduler:
         except (KeyError, TypeError, AttributeError):
             problems.append(dict(task_id=None, check_id=None, path=None, reason='malformed_record'))
         return problems + self._validate_preflights(state)
+
+    def verify_inventory(self) -> list[dict]:
+        """Inspect the durable scheduler inventory under the scheduler lock."""
+        with ticket_lock(self.directory / 'scheduler.lock'):
+            return self._inventory_problems(self.journal.peek())
+
+    def _inventory_problems_active(self, active, revalidating, pcf=None) -> list[dict]:
+        """Strict inventory skeleton; active-state relaxations are not enabled."""
+        return self._inventory_problems(self.state)
 
     def _preflight(self) -> None:
         """Run required checks at the clean checkpoint in the actual task worktree."""
@@ -1748,36 +1784,41 @@ class TaskScheduler:
                 self._preflight()
             if any(state['tasks'][dep]['status'] != 'COMPLETED' for dep in task['depends_on']):
                 raise TaskError('Dependency has not completed')
-            while record['attempts'] < self.max_attempts:
-                self._assert_tree()
-                self.guard()
-                self.dispatch_budget()
-                repair = self._repair_context(record)
-                self._restore_candidate(task, record)
-                record['attempts'] += 1
-                attempt = record['attempts']
-                record.update(status='RUNNING', start_commit=state['expected_head'], checks=[],
-                              protected_snapshot=self._protected())
-                if self.isolate_candidates:
-                    record.pop('capture_sha256', None)
-                if self.isolate_candidates:
-                    record.update(status='DISPATCH_RESERVED', invocation_id=uuid.uuid4().hex)
-                    record.pop('producer', None)
-                    self._save('DISPATCH_RESERVED')
-                else:
-                    self._save('TASK_STARTED')
-                attempt_dir = self._attempt_directory(task, record)
-                prompt = self._developer_prompt(task, record)
-                print(f"[task-dev] {task['task_id']} attempt {attempt}/{self.max_attempts}: "
-                      + (f"repairing archived attempt {repair['attempt']}" if repair else 'implementing from verified checkpoint'), flush=True)
-                if self.isolate_candidates:
-                    result = self._capture_developer(task, record, prompt, attempt_dir)
-                else:
-                    result = self.developer(task, attempt, prompt)
-                self._finish_attempt(task, record, result, attempt_dir)
-                if record['status'] == 'COMPLETED':
-                    break
-            if record['status'] != 'COMPLETED':
-                raise TaskError(f'Task {task["task_id"]} exhausted its persistent attempt limit')
+            self._execute_task(task, record)
         self.guard()
         return copy.deepcopy(state)
+
+    def _execute_task(self, task, record, *, corrective=None, strict_scope=False) -> None:
+        """Execute the ordinary per-task attempt loop without acquiring a lock."""
+        state = self.state
+        while record['attempts'] < self.max_attempts:
+            self._assert_tree()
+            self.guard()
+            self.dispatch_budget()
+            repair = self._repair_context(record)
+            self._restore_candidate(task, record)
+            record['attempts'] += 1
+            attempt = record['attempts']
+            record.update(status='RUNNING', start_commit=state['expected_head'], checks=[],
+                          protected_snapshot=self._protected())
+            if self.isolate_candidates:
+                record.pop('capture_sha256', None)
+            if self.isolate_candidates:
+                record.update(status='DISPATCH_RESERVED', invocation_id=uuid.uuid4().hex)
+                record.pop('producer', None)
+                self._save('DISPATCH_RESERVED')
+            else:
+                self._save('TASK_STARTED')
+            attempt_dir = self._attempt_directory(task, record)
+            prompt = self._developer_prompt(task, record)
+            print(f"[task-dev] {task['task_id']} attempt {attempt}/{self.max_attempts}: "
+                  + (f"repairing archived attempt {repair['attempt']}" if repair else 'implementing from verified checkpoint'), flush=True)
+            if self.isolate_candidates:
+                result = self._capture_developer(task, record, prompt, attempt_dir)
+            else:
+                result = self.developer(task, attempt, prompt)
+            self._finish_attempt(task, record, result, attempt_dir)
+            if record['status'] == 'COMPLETED':
+                break
+        if record['status'] != 'COMPLETED':
+            raise TaskError(f'Task {task["task_id"]} exhausted its persistent attempt limit')
