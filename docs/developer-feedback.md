@@ -115,6 +115,10 @@ stateDiagram-v2
 Routes are `AMENDMENT`, `PREREQUISITE`, `ADVISORY`, `REJECTED` and
 `INCONCLUSIVE`. A planner cannot add files beyond the request or delegated path
 list, change obligations, or attach authorized files to a non-amendment route.
+Only an `IMPROVEMENT` request can become an advisory. A missing-target blocker
+cannot be downgraded to optional backlog. Equivalent file/obligation ordering
+deduplicates; changed classification or registered evidence requires explicit
+reconciliation and cannot silently inherit the previous decision.
 Reviews bind the exact proposal and record a coverage assessment; this is a
 reviewer's judgment, not a mechanical proof that assertions were preserved.
 The native activation/candidate verification gates remain mandatory.

@@ -5,7 +5,8 @@
   "full_suite": {
     "tests": 978,
     "seconds": 365.525,
-    "exit_code": 0
+    "exit_code": 0,
+    "tested_commit": "4bcb98949f3b2731e93f1afbc2ee3f291e6c379b"
   },
   "focused_tests": 28,
   "isolated_a5": {
@@ -36,5 +37,8 @@
     "private runtime paths and bindings",
     "raw provider/check logs",
     "credentials and local configuration"
-  ]
+  ],
+  "final_focused_tests": 31,
+  "final_focused_seconds": 6.815,
+  "final_changes": "Prevent blocker-to-advisory downgrade and approval reuse after classification/evidence changes; canonicalize equivalent sets"
 }

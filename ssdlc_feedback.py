@@ -218,6 +218,9 @@ class FeedbackStore:
 
     def submit(self, source, request, developer, *, failed_tests=(), impact=None):
         actor(developer); validate_request(source, request)
+        request = copy.deepcopy(request)
+        for field in ('obligation_refs', 'requested_files'):
+            request[field] = sorted(request[field])
         binding = source_binding(source)
         _unique(list(failed_tests), _identity)
         # Attempt IDs and generated prose do not disguise a repeated cause.
@@ -232,6 +235,8 @@ class FeedbackStore:
                 existing = state['requests'][identity]
                 if existing['binding'] != binding:
                     raise FeedbackError('Repeated cause with changed source requires explicit reconciliation')
+                if existing['request'] != request:
+                    raise FeedbackError('Repeated cause with changed classification or evidence requires reconciliation')
                 return copy.deepcopy(existing)
             # Later generations require an admitted native lineage, not merely
             # a caller asserting a new parent. Native integration owns it.
@@ -270,6 +275,8 @@ class FeedbackStore:
                     raise FeedbackError('Only an existing-obligation missing target can be amended')
                 if not set(files) <= set(policy['allowed_files']):
                     raise FeedbackError('Amendment is outside delegated paths')
+            elif proposal['route'] == 'ADVISORY' and row['request']['cause'] != 'IMPROVEMENT':
+                raise FeedbackError('A blocking scope request cannot be downgraded to advisory')
             elif files:
                 raise FeedbackError('Non-amendment route cannot authorize file changes')
             row.update(status='PROPOSED', planner=copy.deepcopy(planner), proposal=copy.deepcopy(proposal))

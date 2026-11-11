@@ -68,6 +68,14 @@ class FeedbackTests(unittest.TestCase):
         self.assertEqual(original, replayed)
         self.assertEqual((self.store.root / 'task-journal.jsonl').read_bytes(), before)
 
+    def test_equivalent_obligation_order_is_not_a_new_request(self):
+        original = self.authorized()
+        changed_order = dict(self.request, obligation_refs=list(reversed(self.request['obligation_refs'])))
+        before = (self.store.root / 'task-journal.jsonl').read_bytes()
+        duplicate = self.store.submit(self.source, changed_order, a('developer:retry'))
+        self.assertEqual(duplicate, original)
+        self.assertEqual((self.store.root / 'task-journal.jsonl').read_bytes(), before)
+
     def test_operator_authorization_is_exact_and_not_inferred_from_request(self):
         for key, value in [('authorized', False), ('source_fenced', False), ('policy_sha256', '0' * 64)]:
             auth = dict(self.authorization, **{key: value})
@@ -161,7 +169,8 @@ class FeedbackTests(unittest.TestCase):
             with self.subTest(route=route):
                 store = FeedbackStore(self.root / route / 'ISSUE22', clock=lambda: 100)
                 store.authorize(self.policy, self.authorization)
-                row = store.submit(self.source, self.request, a('developer'))
+                request = dict(self.request, cause='IMPROVEMENT') if route == 'ADVISORY' else self.request
+                row = store.submit(self.source, request, a('developer'))
                 row = store.propose(row['request_id'], dict(route=route, requested_files=[], reason_code='triaged'), a('planner'), self.source)
                 store.review(row['request_id'], dict(proposal_sha256=row['proposal_sha256'], verdict='APPROVED',
                     coverage_preserved=True, reason_code='reviewed'), a('reviewer'), self.source)
@@ -232,6 +241,22 @@ class FeedbackTests(unittest.TestCase):
             auth = dict(self.authorization, **{key: 1 if key != 'schema_version' else True})
             with self.subTest(key=key), self.assertRaises(FeedbackError):
                 self.store.authorize(self.policy, auth)
+
+    def test_blocking_request_cannot_be_downgraded_to_optional_backlog(self):
+        row = self.authorized()
+        with self.assertRaisesRegex(FeedbackError, 'downgraded'):
+            self.store.propose(row['request_id'], dict(route='ADVISORY', requested_files=[], reason_code='optional'),
+                               a('planner'), self.source)
+        self.assertEqual(self.store.inspect()['requests'][row['request_id']]['status'], 'REQUESTED')
+
+    def test_changed_classification_cannot_reuse_an_existing_optional_decision(self):
+        request = dict(self.request, cause='IMPROVEMENT')
+        self.store.authorize(self.policy, self.authorization)
+        row = self.store.submit(self.source, request, a('developer'))
+        with self.assertRaisesRegex(FeedbackError, 'changed classification'):
+            self.store.submit(self.source, self.request, a('developer'))
+        self.assertEqual(len(self.store.inspect()['requests']), 1)
+        self.assertEqual(self.store.inspect()['requests'][row['request_id']]['request']['cause'], 'IMPROVEMENT')
 
 
 if __name__ == '__main__':
