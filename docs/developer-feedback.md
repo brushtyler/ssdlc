@@ -10,7 +10,7 @@ future execution authority; a recorded approval never grants model dispatch.
 | --- | --- | --- |
 | F1 | Typed requests, conservative diagnosis, persistent routing/role receipts, ownership and independence metadata | Implemented offline; native inspection commands below |
 | F2 | Funded role adapter, delegated native activation, technical fencing, lineage and cumulative amendment limits | In development: offline funded consultations, accounting bindings and live lock borrowing; delegated activation not enabled |
-| F3 | Supervisor recovery integration, sanitized idempotent GitHub projections, prerequisite proposals and supported return | Pending; no new DAG node or GitHub ticket starts implicitly |
+| F3 | Supervisor recovery integration, sanitized idempotent GitHub projections, prerequisite proposals/return, consultative PO routing | Pending; no new DAG node, product decision or GitHub ticket starts implicitly |
 
 This does not complete #39 or #38. It does not change a running controller or
 authorize migration of the historical #22 run. The current #22 T08 case is a
@@ -96,10 +96,52 @@ who can rewrite both history and authority.
 Requests contain only cause enums, obligation IDs, literal requested paths and
 registered evidence hashes. Unknown fields/prose are rejected. Obligation IDs
 must belong to the task. Native source bindings include the parent selector,
-plan, failed attempt, captured candidate, source files and counters. Stale
+plan, task-state digest, failed attempt, captured candidate, source files and counters. Stale
 sources require reconciliation; a new generation needs a native admitted
 lineage, not a caller-supplied parent. Exact duplicate submissions do not append
 history or consume another allowance.
+
+The early-F2 corrections from the
+[F1 review](https://github.com/brushtyler/ssdlc/issues/39#issuecomment-6808458501)
+enforce these additional recording invariants:
+
+- The host derives requested-file classes and failed-test identities from the
+  bound Git/journal/check evidence. Caller-provided test sets or impact
+  attribution must match that evidence. The proposal binds the class digest;
+  `coverage_preserved: true` never overrides the file policy.
+- Baseline/completed tests route amendments to `OPERATOR_DECISION`.
+  Completed production ownership yields `OWNER_REVALIDATION_REQUIRED`, not
+  permission to proceed using old evidence. Unknown/legacy class metadata
+  cannot grant a native amendment disposition.
+- Approved eligible amendments reserve provisional quota in the canonical
+  journal. Ticket and task ceilings and cumulative manifest-file additions are
+  checked before `NATIVE_AMENDMENT_REQUIRED`. Replaying a review reserves no
+  second slot. A file granted to another task counts as another expansion;
+  reservation is not execution, and no automatic quota refund occurs. F2's
+  native activation must reconcile the final outcome.
+- Strong independence applies to diagnosis and planner as well as reviewer.
+  The final assessment includes every role associated with the request, with
+  exact duplicate metadata for the same role coalesced. Shared model/context
+  or unknown model metadata cannot be hidden by a fresh reviewer alone.
+- A captured `CHECK_FAILURE` whose verified checks localize entirely outside
+  the manifest can create a `HOST_HINT`. This is an observation, not a claim
+  that the failed test must change. Host and developer origins have distinct
+  request IDs and can share a cause ID. A later source occurrence is recorded
+  without inheriting the old approval and requires native source reconciliation
+  before consultation; the recording policy itself cannot admit it to execution.
+- `REQUIREMENT_CONFLICT` always needs the operator under the first policy and
+  cannot become an amendment/advisory. Consultative PO routing is assigned to
+  F3 with its own explicit allowance; it may recommend a product change but
+  cannot approve changed requirements or start that work.
+
+The existing manual scope transition continues to require an explicit captured
+`SCOPE_REQUIRED`. Its read-only inspector accepts host hints only through an
+explicit flag used by feedback diagnosis. Preparation/activation are not
+silently extended by that flag. The normal scheduler preserves `CHECK_FAILURE`
+and adds a bounded, non-authorizing scope hint to repair context; automatic
+interception before a later developer dispatch remains F3. File localization
+does not by itself suspend ordinary code repair or turn test paths into edit
+permissions.
 
 The recording state machine is:
 
@@ -132,6 +174,13 @@ responses are retained before interpretation, can be replayed exactly and
 remain capturable after deadline. Conflicting responses stop reconciliation.
 F2 must bind these receipts to real, funded invocations and validate native
 accounting advances before enabling an execution handler.
+
+For native sources the ledger retains an accounting anchor. A fresh source after
+consultation can match the original request only when the captured native role
+returns prove the exact accounting advance. The original binding and model
+answer are not rewritten. A restart can finish recording the same reviewed
+proposal against fresh counters using those receipts; a new candidate or an
+unrelated invocation still requires explicit reconciliation.
 
 Public projections contain enum status, opaque request IDs, task IDs, counts and
 independence disclosure. They omit paths, raw responses, private logs, source

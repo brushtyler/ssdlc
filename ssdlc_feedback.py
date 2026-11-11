@@ -14,7 +14,7 @@ import time
 
 from ssdlc_tasks import TaskError, TaskJournal, atomic_json, digest, file_hash, ticket_lock
 from ssdlc_transitions import _regular
-from ssdlc_feedback_analysis import actor, independence
+from ssdlc_feedback_analysis import actor, independence, path_classes, failure_hint, historical_impact
 
 
 class FeedbackError(TaskError):
@@ -96,10 +96,15 @@ def source_binding(source):
     """Bind the exact native stopped source, including attempts and candidate."""
     row = source['journal']['tasks'][source['task_id']]
     failure = row['failed_attempts'][-1]
-    if failure['category'] != 'SCOPE_REQUIRED' or not failure.get('capture_sha256'):
-        raise FeedbackError('Feedback requires a captured explicit scope refusal')
-    return dict(task_id=source['task_id'], attempt=row['attempts'], parent_selector=source['parent_selector'],
+    origin = 'DEVELOPER' if failure['category'] == 'SCOPE_REQUIRED' else 'HOST_HINT'
+    if (not failure.get('capture_sha256') or failure['category'] not in {'SCOPE_REQUIRED', 'CHECK_FAILURE'}
+            or origin == 'HOST_HINT' and failure_hint(source, next(t for t in source['plan']['tasks']
+                if t['task_id'] == source['task_id']))['classification'] != 'ALL_OUTSIDE'):
+        raise FeedbackError('Feedback requires a captured scope refusal or an all-outside host hypothesis')
+    return dict(task_id=source['task_id'], attempt=row['attempts'], origin=origin,
+                parent_selector=source['parent_selector'],
                 plan_sha256=digest(source['plan']), source_files_sha256=digest(source['files']),
+                task_state_sha256=digest(source['journal']),
                 failure_sha256=digest(failure), capture_sha256=failure['capture_sha256'],
                 counters_sha256=digest(source['counters']))
 
@@ -122,6 +127,72 @@ def validate_request(source, request):
         literal_path(ref); _hash(sha)
         if source['files'].get(ref) != sha or file_hash(_regular(source['root'], ref)) != sha:
             raise FeedbackError('Unregistered or changed feedback evidence')
+
+
+def participants(state, row, role=None, metadata=None):
+    """Deduplicate the same recorded role, never two roles sharing a context."""
+    entries = [('developer', row['developer'])]
+    entries += [(name, row[name]) for name in ('planner', 'reviewer') if name in row]
+    entries += [(call['role'], call['actor']) for call in state['role_calls']
+                if call['request_id'] == row['request_id']]
+    if metadata is not None:
+        entries.append((role, metadata))
+    unique = {}
+    for name, value in entries:
+        unique[(name, digest(value))] = value
+    return list(unique.values())
+
+
+def class_disposition(row):
+    classes = row.get('path_classes')
+    if not isinstance(classes, dict) or digest(classes) != row.get('path_classes_sha256'):
+        return 'OPERATOR_DECISION'
+    kinds = [classes.get(path, {}).get('kind') for path in row['proposal']['requested_files']]
+    if any(kind not in {'NEW_FILE', 'UNOWNED_SOURCE', 'COMPLETED_SOURCE'} for kind in kinds):
+        return 'OPERATOR_DECISION'
+    if 'COMPLETED_SOURCE' in kinds:
+        return 'OWNER_REVALIDATION_REQUIRED'
+    return None
+
+
+def reserve_amendment(policy, state, row):
+    """Provisional recording quota; F2 must bind final native activation."""
+    tid, paths = row['binding']['task_id'], row['proposal']['requested_files']
+    prior = state['amendments']
+    reason = ('TICKET_AMENDMENTS_EXHAUSTED' if len(prior) >= policy['max_amendments'] else
+              'TASK_AMENDMENTS_EXHAUSTED' if sum(item['task_id'] == tid for item in prior)
+                  >= policy['max_amendments_per_task'] else
+              'ADDED_FILES_EXHAUSTED' if sum(len(item['paths']) for item in prior) + len(paths)
+                  > policy['max_added_files'] else None)
+    if reason:
+        row['quota_status'] = 'EXHAUSTED'
+        row['quota_reason'] = reason
+        return
+    prior.append(dict(request_id=row['request_id'], task_id=tid, paths=copy.deepcopy(paths),
+                      proposal_sha256=row['proposal_sha256'], review_sha256=digest(row['review']), status='RESERVED'))
+    state['added_files'].extend(paths)
+    row['quota_status'] = 'RESERVED'
+
+
+def matches_source(state, row, source):
+    """Allow exactly captured consultation accounting, never a new candidate."""
+    current = source_binding(source)
+    if row['binding'] == current:
+        return True
+    anchor = row.get('accounting_anchor')
+    mutable = {'source_files_sha256', 'counters_sha256'}
+    if (not anchor or row.get('source_root_sha256') != digest(str(Path(source['root']).resolve()))
+            or {k: v for k, v in row['binding'].items() if k not in mutable}
+                != {k: v for k, v in current.items() if k not in mutable}):
+        return False
+    from ssdlc_feedback_bindings import validate_accounting_advance
+    calls = [call for call in state['role_calls'] if 'native' in call
+             and call['native']['invocation_id'] not in anchor['counters']['invocations']]
+    try:
+        validate_accounting_advance(anchor, source, calls)
+    except TaskError:
+        return False
+    return True
 
 
 class FeedbackStore:
@@ -216,37 +287,60 @@ class FeedbackStore:
             raise FeedbackError('Feedback policy expired')
         return authority['policy'], copy.deepcopy(state)
 
-    def submit(self, source, request, developer, *, failed_tests=(), impact=None):
+    def submit(self, source, request, developer, *, failed_tests=None, impact=None):
         actor(developer); validate_request(source, request)
         request = copy.deepcopy(request)
         for field in ('obligation_refs', 'requested_files'):
             request[field] = sorted(request[field])
         binding = source_binding(source)
-        _unique(list(failed_tests), _identity)
+        task = next(t for t in source['plan']['tasks'] if t['task_id'] == source['task_id'])
+        hint = failure_hint(source, task)
+        derived_tests = sorted({row['test_id'] for row in hint['failures']})
+        if failed_tests is not None and (not isinstance(failed_tests, (list, tuple))
+                                        or sorted(failed_tests) != derived_tests):
+            raise FeedbackError('Failed tests must match host-derived bound evidence')
+        classes = path_classes(source, request['requested_files'])
+        attribution = historical_impact(source, request['requested_files'])
+        if impact is not None and impact != attribution:
+            raise FeedbackError('Impact attribution must match registered host evidence')
         # Attempt IDs and generated prose do not disguise a repeated cause.
-        checks = sorted({check['check_id'] for failed in source['journal']['tasks'][source['task_id']]['failed_attempts']
-                         for check in failed.get('checks', []) if check['exit_code'] != 0 or check['empty_suite']})
+        checks = sorted({row['check_id'] for row in hint['failures']} | set(hint['unresolved_checks']))
         cause = dict(ticket=self.ticket.name, task_id=binding['task_id'], parent_plan=binding['plan_sha256'],
-                     files=sorted(request['requested_files']), failed_checks=checks, failed_tests=sorted(failed_tests))
-        identity = digest(cause)
+                     files=sorted(request['requested_files']), failed_checks=checks, failed_tests=derived_tests)
+        identity = digest(dict(cause_id=digest(cause), origin=binding['origin']))
+        root_sha = digest(str(Path(source['root']).resolve()))
         with ticket_lock(self.root / 'feedback.lock'):
             policy, state = self._active()
             if identity in state['requests']:
                 existing = state['requests'][identity]
-                if existing['binding'] != binding:
+                if not matches_source(state, existing, source):
                     raise FeedbackError('Repeated cause with changed source requires explicit reconciliation')
                 if existing['request'] != request:
                     raise FeedbackError('Repeated cause with changed classification or evidence requires reconciliation')
                 return copy.deepcopy(existing)
-            # Later generations require an admitted native lineage, not merely
-            # a caller asserting a new parent. Native integration owns it.
-            if digest(binding) != policy['source_binding_sha256']:
+            # Record an opposite-origin occurrence of the same cause without
+            # inheriting the old source's authority. Native reconciliation is
+            # mandatory before any consultation/activation on that occurrence.
+            unbound = digest(binding) != policy['source_binding_sha256']
+            counterpart = any(row.get('cause_id') == digest(cause) and row.get('origin') != binding['origin']
+                and row.get('source_root_sha256') == root_sha
+                and row['binding']['parent_selector'] == binding['parent_selector']
+                for row in state['requests'].values())
+            if unbound and not counterpart:
                 raise FeedbackError('Feedback source is outside authorized lineage')
             if len(state['requests']) >= policy['max_requests']:
                 raise FeedbackError('Feedback request allowance exhausted')
+            anchor = None
+            if 'limits/task-journal.jsonl' in source['files']:
+                from ssdlc_feedback_bindings import accounting_anchor
+                anchor = accounting_anchor(source)
             row = dict(request_id=identity, request=copy.deepcopy(request), binding=binding,
                        developer=copy.deepcopy(developer), status='REQUESTED', rounds=0, decisions=[],
-                       failed_tests=sorted(failed_tests), impact=copy.deepcopy(impact),
+                       cause_id=digest(cause), origin=binding['origin'], failed_tests=derived_tests,
+                       source_root_sha256=root_sha, source_reconciliation_required=unbound,
+                       accounting_anchor=anchor,
+                       failure_hint=hint, path_classes=classes, path_classes_sha256=digest(classes),
+                       impact=attribution,
                        occurrences=[dict(binding=binding, developer=copy.deepcopy(developer))])
             state['requests'][identity] = row
             self._append('FEEDBACK_REQUESTED', state)
@@ -261,8 +355,10 @@ class FeedbackStore:
         with ticket_lock(self.root / 'feedback.lock'):
             policy, state = self._active()
             row = state['requests'][identity]
-            if row['status'] != 'REQUESTED' or row['binding'] != source_binding(source):
+            if row['status'] != 'REQUESTED' or not matches_source(state, row, source):
                 raise FeedbackError('Proposal requires a fresh requested source')
+            if row.get('path_classes') != path_classes(source, row['request']['requested_files']):
+                raise FeedbackError('Bound file classes changed before proposal')
             if not independence(planner, row['developer'])['distinct_roles']:
                 raise FeedbackError('Developer cannot plan its own scope expansion')
             if row['rounds'] >= policy['max_rounds']:
@@ -281,7 +377,8 @@ class FeedbackStore:
                 raise FeedbackError('Non-amendment route cannot authorize file changes')
             row.update(status='PROPOSED', planner=copy.deepcopy(planner), proposal=copy.deepcopy(proposal))
             row['rounds'] += 1
-            row['proposal_sha256'] = digest(dict(binding=row['binding'], proposal=proposal, planner=planner))
+            row['proposal_sha256'] = digest(dict(binding=row['binding'], proposal=proposal, planner=planner,
+                                                path_classes_sha256=row['path_classes_sha256']))
             self._append('FEEDBACK_PROPOSED', state)
             return copy.deepcopy(row)
 
@@ -292,11 +389,16 @@ class FeedbackStore:
         if review['verdict'] not in ('APPROVED', 'REJECTED', 'INCONCLUSIVE') or type(review['coverage_preserved']) is not bool:
             raise FeedbackError('Invalid independent feedback review')
         with ticket_lock(self.root / 'feedback.lock'):
-            _, state = self._active()
+            policy, state = self._active()
             row = state['requests'][identity]
-            if row['status'] != 'PROPOSED' or row['binding'] != source_binding(source):
+            if (row['status'] == 'REVIEWED' and row['review'] == review and row['reviewer'] == reviewer
+                    and matches_source(state, row, source)):
+                return copy.deepcopy(row)
+            if row['status'] != 'PROPOSED' or not matches_source(state, row, source):
                 raise FeedbackError('Review requires a fresh proposal')
-            quality = independence(row['developer'], row['planner'], reviewer)
+            if row.get('path_classes') != path_classes(source, row['request']['requested_files']):
+                raise FeedbackError('Bound file classes changed before review')
+            quality = independence(*participants(state, row, 'reviewer', reviewer))
             if not quality['distinct_roles']:
                 raise FeedbackError('Independent reviewer identity required')
             if review['proposal_sha256'] != row['proposal_sha256']:
@@ -306,18 +408,41 @@ class FeedbackStore:
             row.update(status='REVIEWED', reviewer=copy.deepcopy(reviewer), review=copy.deepcopy(review),
                        independence=quality)
             row['decisions'].append(dict(proposal=copy.deepcopy(row['proposal']), review=copy.deepcopy(review)))
+            if (review['verdict'] == 'APPROVED' and row['proposal']['route'] == 'AMENDMENT'
+                    and not row.get('source_reconciliation_required', True)
+                    and not class_disposition(row) and not (policy['require_strong_independence']
+                                                           and quality['reduced_independence'])):
+                reserve_amendment(policy, state, row)
             self._append('FEEDBACK_REVIEWED', state)
             return copy.deepcopy(row)
 
     def disposition(self, identity):
-        row = self.inspect()['requests'][identity]
+        state = self.inspect()
+        row = state['requests'][identity]
+        authority, _ = self._read()
+        if row.get('source_reconciliation_required', True):
+            return 'OPERATOR_DECISION'
+        if row['request']['cause'] == 'REQUIREMENT_CONFLICT':
+            return 'OPERATOR_DECISION'
+        quality = independence(*participants(state, row))
+        if (not quality['distinct_roles'] or authority['policy']['require_strong_independence']
+                and quality['reduced_independence']):
+            return 'OPERATOR_DECISION'
+        if row.get('proposal', {}).get('route') == 'AMENDMENT':
+            disposition = class_disposition(row)
+            if disposition:
+                return disposition
         if row['status'] not in ('REVIEWED', 'APPLIED'):
             return 'WAITING'
         if row['review']['verdict'] != 'APPROVED':
             return 'OPERATOR_DECISION'
-        authority, _ = self._read()
-        if authority['policy']['require_strong_independence'] and row['independence']['reduced_independence']:
-            return 'OPERATOR_DECISION'
+        if row['proposal']['route'] == 'AMENDMENT':
+            if row.get('quota_status') == 'EXHAUSTED':
+                return 'LIMIT_REACHED'
+            if row.get('quota_status') != 'RESERVED' or not any(
+                    item['request_id'] == identity and item['proposal_sha256'] == row['proposal_sha256']
+                    for item in state['amendments']):
+                return 'OPERATOR_DECISION'
         return {'AMENDMENT': 'NATIVE_AMENDMENT_REQUIRED', 'PREREQUISITE': 'BLOCKED_PREREQUISITE',
                 'ADVISORY': 'BACKLOG_ONLY', 'REJECTED': 'REJECTED_NO_RETRY',
                 'INCONCLUSIVE': 'OPERATOR_DECISION'}[row['proposal']['route']]
@@ -335,22 +460,21 @@ class FeedbackStore:
         with ticket_lock(self.root / 'feedback.lock'):
             policy, state = self._active()
             row = state['requests'][identity]
+            if row.get('source_reconciliation_required', True):
+                raise FeedbackError('New source occurrence requires native reconciliation before consultation')
             expected_status = 'PROPOSED' if role == 'reviewer' else 'REQUESTED'
             if row['status'] != expected_status:
                 raise FeedbackError('Role does not match the feedback stage')
-            actors = [row['developer']]
-            if role == 'reviewer':
-                actors.append(row['planner'])
-            quality = independence(*actors, metadata)
-            if not quality['distinct_roles']:
-                raise FeedbackError('Role context must be independent')
-            if role == 'reviewer' and policy['require_strong_independence'] and quality['reduced_independence']:
-                raise FeedbackError('Reduced independence requires operator decision')
             operation = digest(dict(request_id=identity, role=role, round=row['rounds'],
                                     proposal_sha256=row.get('proposal_sha256')))
             previous = next((r for r in state['role_calls'] if r['operation_id'] == operation), None)
             if previous is not None:
                 raise FeedbackError('Role already reserved; reuse its receipt or reconcile, never redispatch')
+            quality = independence(*participants(state, row, role, metadata))
+            if not quality['distinct_roles']:
+                raise FeedbackError('Role context must be independent')
+            if policy['require_strong_independence'] and quality['reduced_independence']:
+                raise FeedbackError('Reduced independence requires operator decision')
             if any(r['status'] == 'INTENT' for r in state['role_calls']):
                 raise FeedbackError('Unknown feedback outcome requires reconciliation')
             if sum(r['role'] == role for r in state['role_calls']) >= policy['role_calls'][role]:
@@ -414,9 +538,12 @@ class FeedbackStore:
         state = self.inspect()
         return dict(schema_version=1, requests=[dict(request_id=key, task_id=row['binding']['task_id'],
                     status=row['status'], rounds=row['rounds'], disposition=self.disposition(key),
+                    origin=row.get('origin', 'UNKNOWN'), quota_reason=row.get('quota_reason'),
                     reduced_independence=row.get('independence', {}).get('reduced_independence'))
                     for key, row in sorted(state['requests'].items())],
-                    role_calls=len(state['role_calls']), amendments=len(state['amendments']))
+                    role_calls=len(state['role_calls']), amendments=len(state['amendments']),
+                    amendments_reserved=sum(item['status'] == 'RESERVED' for item in state['amendments']),
+                    amendments_applied=sum(item['status'] == 'APPLIED' for item in state['amendments']))
 
 
 def exact_authorization(value, expected):
@@ -449,7 +576,7 @@ def main(argv=None):
         else:
             request = json.loads(Path(args.request).read_text())
             with ticket_lock(ticket / 'ticket.lock'):
-                source = inspect_scope(ticket)
+                source = inspect_scope(ticket, allow_host_hints=True)
                 with ticket_lock(source['root'] / '03-dev/tasks/scheduler.lock'):
                     result = native_preview(source, request)
         print(json.dumps(result, sort_keys=True))

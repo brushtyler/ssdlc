@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 from ssdlc_feedback import FeedbackError, FeedbackStore, literal_path, source_binding
-from ssdlc_tasks import digest, file_hash
+from ssdlc_tasks import digest, file_hash, git
 
 
 def a(name):
@@ -20,10 +20,21 @@ class FeedbackTests(unittest.TestCase):
         self.root = Path(temp.name)
         self.evidence = self.root / 'source'
         self.evidence.mkdir()
+        worktree = self.evidence / 'worktree'
+        (worktree / 'tests').mkdir(parents=True)
+        (worktree / 'app.py').write_text('value = 1\n')
+        (worktree / 'tests/test_reconciliation.py').write_text('def test_case():\n    assert True\n')
+        git(worktree, 'init', '-q')
+        git(worktree, 'config', 'user.name', 'Offline fixture')
+        git(worktree, 'config', 'user.email', 'fixture@example.invalid')
+        git(worktree, 'add', '.')
+        git(worktree, '-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'Synthetic baseline')
+        base = git(worktree, 'rev-parse', 'HEAD')
         (self.evidence / 'developer.log').write_text('SCOPE_REQUIRED: existing obligation needs test adaptation')
         self.source = dict(root=self.evidence, task_id='T08',
             parent_selector={'transition_id': 'parent'},
-            plan={'tasks': [{'task_id': 'T08', 'ac_refs': ['AC-37'], 'sec_refs': ['SEC-11']}]},
+            plan={'base_commit': base, 'tasks': [{'task_id': 'T08', 'target_files': ['app.py'],
+                                                'ac_refs': ['AC-37'], 'sec_refs': ['SEC-11']}]},
             files={'developer.log': file_hash(self.evidence / 'developer.log')}, counters={'invocations': 37},
             journal={'tasks': {'T08': {'status': 'FAILED', 'attempts': 2, 'failed_attempts': [
                 {'category': 'SCOPE_REQUIRED', 'capture_sha256': 'a' * 64}]}}})
@@ -50,13 +61,29 @@ class FeedbackTests(unittest.TestCase):
             requested_files=self.request['requested_files'], reason_code='existing_obligation_missing_test'),
             a('planner:separate-context'), self.source)
 
+    def configure_new_files(self, paths):
+        self.policy['allowed_files'] = list(paths)
+        self.policy['source_binding_sha256'] = digest(source_binding(self.source))
+        self.authorization['policy_sha256'] = digest(self.policy)
+
+    def approve_file(self, path, reviewer=None):
+        self.store.authorize(self.policy, self.authorization)
+        request = dict(self.request, requested_files=[path])
+        row = self.store.submit(self.source, request, a('developer'))
+        row = self.store.propose(row['request_id'], dict(route='AMENDMENT', requested_files=[path],
+            reason_code='missing_target'), a('planner'), self.source)
+        review = dict(proposal_sha256=row['proposal_sha256'], verdict='APPROVED',
+                      coverage_preserved=True, reason_code='preserved')
+        return self.store.review(row['request_id'], review, reviewer or a('reviewer'), self.source)
+
     def test_t08_like_feedback_is_reviewed_but_not_execution_authority(self):
         row = self.proposed()
         result = self.store.review(row['request_id'], dict(proposal_sha256=row['proposal_sha256'],
             verdict='APPROVED', coverage_preserved=True, reason_code='preserve_history_and_stagnation'),
             a('reviewer:separate-context'), self.source)
         self.assertEqual(result['status'], 'REVIEWED')
-        self.assertEqual(self.store.disposition(row['request_id']), 'NATIVE_AMENDMENT_REQUIRED')
+        self.assertEqual(self.store.disposition(row['request_id']), 'OPERATOR_DECISION')
+        self.assertEqual(result['path_classes']['tests/test_reconciliation.py']['kind'], 'BASELINE_TEST')
         self.assertFalse((self.ticket / 'execution/active.json').exists())
         self.assertEqual(self.source['journal']['tasks']['T08']['attempts'], 2)
         self.assertEqual(self.store.inspect()['amendments'], [])
@@ -191,7 +218,7 @@ class FeedbackTests(unittest.TestCase):
         self.assertNotIn('developer.log', text)
         self.assertNotIn('test_reconciliation.py', text)
         self.assertNotIn('source', text)
-        self.assertEqual(json.loads(text)['requests'][0]['disposition'], 'WAITING')
+        self.assertEqual(json.loads(text)['requests'][0]['disposition'], 'OPERATOR_DECISION')
 
     def test_role_intent_prevents_duplicate_dispatch_after_restart(self):
         row = self.authorized()
@@ -257,6 +284,120 @@ class FeedbackTests(unittest.TestCase):
             self.store.submit(self.source, self.request, a('developer'))
         self.assertEqual(len(self.store.inspect()['requests']), 1)
         self.assertEqual(self.store.inspect()['requests'][row['request_id']]['request']['cause'], 'IMPROVEMENT')
+
+    def test_each_amendment_quota_is_enforced_before_native_disposition(self):
+        for quota in ('max_amendments', 'max_amendments_per_task', 'max_added_files'):
+            case = FeedbackTests(); case.setUp(); self.addCleanup(case.doCleanups)
+            with self.subTest(quota=quota):
+                case.policy[quota] = 1
+                case.configure_new_files(['first.py', 'second.py'])
+                first = case.approve_file('first.py')
+                self.assertEqual(case.store.disposition(first['request_id']), 'NATIVE_AMENDMENT_REQUIRED')
+                second = case.approve_file('second.py')
+                self.assertEqual(case.store.disposition(second['request_id']), 'LIMIT_REACHED')
+                state = case.store.inspect()
+                self.assertEqual(len(state['amendments']), 1)
+                self.assertEqual(state['added_files'], ['first.py'])
+
+    def test_approved_recording_quota_replays_without_double_reservation(self):
+        self.configure_new_files(['new.py'])
+        row = self.approve_file('new.py')
+        before = (self.store.root / 'task-journal.jsonl').read_bytes()
+        same = self.store.review(row['request_id'], row['review'], row['reviewer'], self.source)
+        self.assertEqual(row, same)
+        self.assertEqual((self.store.root / 'task-journal.jsonl').read_bytes(), before)
+        restarted = FeedbackStore(self.ticket, clock=lambda: 100)
+        self.assertEqual(restarted.disposition(row['request_id']), 'NATIVE_AMENDMENT_REQUIRED')
+        self.assertEqual(len(restarted.inspect()['amendments']), 1)
+
+    def test_completed_production_owner_requires_native_revalidation(self):
+        self.source['journal']['tasks']['T01'] = dict(status='COMPLETED', attempts=1, changed_files=['app.py'])
+        self.configure_new_files(['app.py'])
+        row = self.approve_file('app.py')
+        self.assertEqual(self.store.disposition(row['request_id']), 'OWNER_REVALIDATION_REQUIRED')
+        self.assertEqual(row['path_classes']['app.py']['owners'], ['T01'])
+        self.assertEqual(self.store.inspect()['amendments'], [])
+
+    def test_completed_test_cannot_be_delegated_by_a_coverage_boolean(self):
+        self.source['journal']['tasks']['T01'] = dict(status='COMPLETED', attempts=1,
+            changed_files=['tests/test_reconciliation.py'])
+        self.configure_new_files(['tests/test_reconciliation.py'])
+        row = self.approve_file('tests/test_reconciliation.py')
+        self.assertEqual(self.store.disposition(row['request_id']), 'OPERATOR_DECISION')
+        self.assertEqual(row['path_classes']['tests/test_reconciliation.py']['kind'], 'COMPLETED_TEST')
+        self.assertEqual(self.store.inspect()['amendments'], [])
+
+    def test_planner_and_diagnosis_independence_fail_before_reservation(self):
+        row = self.authorized()
+        for role in ('planner', 'diagnosis'):
+            metadata = dict(a(role), engine=row['developer']['engine'], model=row['developer']['model'])
+            with self.subTest(role=role), self.assertRaisesRegex(FeedbackError, 'Reduced independence'):
+                self.store.reserve_role(row['request_id'], role, metadata)
+        unknown = dict(a('planner'), model='UNKNOWN')
+        with self.assertRaisesRegex(FeedbackError, 'Reduced independence'):
+            self.store.reserve_role(row['request_id'], 'planner', unknown)
+        self.assertEqual(self.store.inspect()['role_calls'], [])
+
+    def test_diagnosis_participates_in_final_independence_assessment(self):
+        self.configure_new_files(['new.py'])
+        self.store.authorize(self.policy, self.authorization)
+        row = self.store.submit(self.source, dict(self.request, requested_files=['new.py']), a('developer'))
+        diagnosis = self.store.reserve_role(row['request_id'], 'diagnosis', a('diagnosis'))
+        self.store.record_role_result(diagnosis['operation_id'], dict(reason_code='missing_target'))
+        row = self.approve_file('new.py', reviewer=dict(a('reviewer'), engine='diagnosis', model='diagnosis'))
+        self.assertEqual(self.store.disposition(row['request_id']), 'OPERATOR_DECISION')
+        self.assertTrue(row['independence']['reduced_independence'])
+        self.assertEqual(self.store.inspect()['amendments'], [])
+
+    def test_failed_test_set_is_derived_not_chosen_by_the_caller(self):
+        self.store.authorize(self.policy, self.authorization)
+        with self.assertRaisesRegex(FeedbackError, 'host-derived'):
+            self.store.submit(self.source, self.request, a('developer'), failed_tests=['invented.Case.test_one'])
+        self.assertEqual(self.store.inspect()['requests'], {})
+        row = self.store.submit(self.source, self.request, a('developer'), failed_tests=[])
+        self.assertEqual(row['failed_tests'], [])
+
+    def test_requirement_conflict_is_always_an_operator_product_decision(self):
+        request = dict(self.request, cause='REQUIREMENT_CONFLICT')
+        self.store.authorize(self.policy, self.authorization)
+        row = self.store.submit(self.source, request, a('developer'))
+        self.assertEqual(self.store.disposition(row['request_id']), 'OPERATOR_DECISION')
+        for route, files in [('AMENDMENT', request['requested_files']), ('ADVISORY', [])]:
+            with self.subTest(route=route), self.assertRaises(FeedbackError):
+                self.store.propose(row['request_id'], dict(route=route, requested_files=files,
+                    reason_code='new_requirement'), a('planner'), self.source)
+
+    def test_host_outside_failure_opens_only_a_distinct_non_authorizing_hypothesis(self):
+        ref = '03-dev/tasks/T08/attempt-2/verification-1/check-0.log'
+        path = self.evidence / ref; path.parent.mkdir(parents=True)
+        path.write_text('FAIL: test_case (test_reconciliation.Case.test_case)\n'
+                        'Traceback (most recent call last):\nAssertionError\n'
+                        'Ran 1 test in 0.1s\nFAILED (failures=1)\n')
+        self.source['files'][ref] = file_hash(path)
+        failure = self.source['journal']['tasks']['T08']['failed_attempts'][-1]
+        failure.update(category='CHECK_FAILURE', tree='1' * 40,
+            checks=[dict(check_id='CHECK-TESTS', exit_code=1, empty_suite=False,
+                         log_ref=ref.removeprefix('03-dev/tasks/'), sha256=file_hash(path))])
+        self.policy['source_binding_sha256'] = digest(source_binding(self.source))
+        self.authorization['policy_sha256'] = digest(self.policy)
+        row = self.authorized()
+        self.assertEqual(row['origin'], 'HOST_HINT')
+        self.assertEqual(row['failure_hint']['classification'], 'ALL_OUTSIDE')
+        self.assertEqual(row['failed_tests'], ['test_reconciliation.Case.test_case'])
+        self.assertFalse(row['failure_hint']['authorization'])
+        later = copy.deepcopy(self.source)
+        later['journal']['tasks']['T08']['attempts'] = 3
+        later['journal']['tasks']['T08']['failed_attempts'].append(dict(failure,
+            category='SCOPE_REQUIRED', capture_sha256='e' * 64, checks=[]))
+        self.assertEqual(source_binding(later)['origin'], 'DEVELOPER')
+        later_row = self.store.submit(later, self.request, a('developer'))
+        self.assertEqual(later_row['cause_id'], row['cause_id'])
+        self.assertNotEqual(later_row['request_id'], row['request_id'])
+        self.assertTrue(later_row['source_reconciliation_required'])
+        self.assertEqual(self.store.disposition(later_row['request_id']), 'OPERATOR_DECISION')
+        with self.assertRaisesRegex(FeedbackError, 'native reconciliation'):
+            self.store.reserve_role(later_row['request_id'], 'planner', a('planner'))
+        self.assertEqual(len(self.store.inspect()['requests']), 2)
 
 
 if __name__ == '__main__':

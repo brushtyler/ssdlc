@@ -12,6 +12,7 @@ from ssdlc_feedback_roles import _usage
 from ssdlc_scope_amendments import subject
 from ssdlc_tasks import TaskJournal, digest
 from ssdlc_transitions import _regular
+from ssdlc_candidates import inventory
 
 
 ACCOUNTING_REFS = frozenset({'limits/task-journal.jsonl', 'limits/tasks-state.json'})
@@ -30,6 +31,7 @@ def technical_subject(source, plan, reason):
     reviewed['source_files_sha256'] = digest(technical_files(source))
     reviewed['compatibility'] = 'feedback-technical-subject-v1'
     reviewed['accounting_authority_sha256'] = digest(source['envelope'])
+    reviewed['checkpoint_worktree_sha256'] = source['worktree_sha256']
     return reviewed
 
 
@@ -41,9 +43,11 @@ def accounting_anchor(source):
     sha = hashlib.sha256(data).hexdigest()
     if source['files'].get(ref) != sha:
         raise FeedbackError('Accounting changed before the consultation anchor')
+    if digest(inventory(source['root'] / 'worktree')) != source['worktree_sha256']:
+        raise FeedbackError('Checkpoint changed before the consultation anchor')
     return dict(schema_version=1, technical_files_sha256=digest(technical_files(source)),
                 counters=copy.deepcopy(source['counters']), envelope_sha256=digest(source['envelope']),
-                journal_size=len(data), journal_sha256=sha)
+                journal_size=len(data), journal_sha256=sha, worktree_sha256=source['worktree_sha256'])
 
 
 def validate_accounting_advance(anchor, current, calls):
@@ -51,6 +55,9 @@ def validate_accounting_advance(anchor, current, calls):
     if (anchor['envelope_sha256'] != digest(current['envelope'])
             or anchor['technical_files_sha256'] != digest(technical_files(current))):
         raise FeedbackError('Technical inputs or accounting authority changed during consultation')
+    if (anchor['worktree_sha256'] != current.get('worktree_sha256')
+            or digest(inventory(current['root'] / 'worktree')) != anchor['worktree_sha256']):
+        raise FeedbackError('Checkpoint worktree changed during consultation')
     before, after = anchor['counters'], current['counters']
     if {k: v for k, v in before.items() if k != 'invocations'} != {k: v for k, v in after.items() if k != 'invocations'}:
         raise FeedbackError('Consultation changed cumulative accounting anchors')

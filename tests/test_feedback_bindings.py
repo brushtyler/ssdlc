@@ -104,6 +104,14 @@ class FeedbackBindingTests(unittest.TestCase):
         with self.assertRaisesRegex(FeedbackError, 'Current native accounting changed'):
             validate_accounting_advance(self.anchor, fresh, calls)
 
+    def test_worktree_mutation_is_not_hidden_by_matching_cached_source_metadata(self):
+        self.consult()
+        calls = self.feedback.inspect()['role_calls']
+        fresh = inspect(self.fixture.ticket)
+        (fresh['root'] / 'worktree/app.py').write_text('value = 999\n')
+        with self.assertRaisesRegex(FeedbackError, 'Checkpoint worktree changed'):
+            validate_accounting_advance(self.anchor, fresh, calls)
+
 
 if __name__ == '__main__':
     unittest.main()

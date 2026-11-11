@@ -32,7 +32,7 @@ def _git_read(root, *args):
     return git(root, '--no-optional-locks', '-c', 'core.fsmonitor=false', *args)
 
 
-def inspect(ticket):
+def inspect(ticket, *, allow_host_hints=False):
     """Inspect the selected stopped generation; no repairing loads or writers."""
     from ssdlc_candidates import CandidateStore, inventory
     ticket = _ticket(ticket)
@@ -70,7 +70,8 @@ def inspect(ticket):
     task_id = selected[0]
     failed = state['tasks'][task_id].get('failed_attempts', [])
     if not failed or failed[-1]['category'] != 'SCOPE_REQUIRED':
-        raise TransitionError('Only an explicit SCOPE_REQUIRED failure is supported')
+        if not (allow_host_hints and failed and failed[-1]['category'] == 'CHECK_FAILURE'):
+            raise TransitionError('Only an explicit SCOPE_REQUIRED failure is supported')
     if any(row['status'] not in {'FAILED', 'COMPLETED', 'PENDING'} for row in state['tasks'].values()):
         raise TransitionError('Active or invalidated work requires separate reconciliation')
     for tid, row in state['tasks'].items():
@@ -111,11 +112,16 @@ def inspect(ticket):
     task = next(t for t in plan['tasks'] if t['task_id'] == task_id)
     if not all(state['tasks'][dep]['status'] == 'COMPLETED' for dep in task['depends_on']):
         raise TransitionError('Failed task dependencies are incomplete')
-    return dict(root=root, projection=projection, state=outer, journal=state, plan=plan,
+    result = dict(root=root, projection=projection, state=outer, journal=state, plan=plan,
                 quality=quality, context=context, envelope=envelope, counters=counters,
                 task_id=task_id, capture_bindings=bindings, files=_files(root),
                 worktree_sha256=digest(inventory(worktree)),
                 parent_selector=_read(ticket / 'execution', 'active.json'))
+    if failed[-1]['category'] != 'SCOPE_REQUIRED':
+        from ssdlc_feedback_analysis import failure_hint
+        if failure_hint(result, task)['classification'] != 'ALL_OUTSIDE':
+            raise TransitionError('Host scope hypothesis requires all failed checks localized outside the task')
+    return result
 
 
 def subject(source, plan, reason):

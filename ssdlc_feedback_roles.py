@@ -62,6 +62,7 @@ class FundedFeedbackRoles:
             current = tasks['tasks'].get(record['binding']['task_id'])
             plan = json.loads(_regular(self.limits.root, '02-design/plan.json').read_text())
             if (not current or current.get('status') != 'FAILED'
+                    or digest(tasks) != record['binding'].get('task_state_sha256')
                     or current.get('attempts') != record['binding']['attempt']
                     or not current.get('failed_attempts')
                     or digest(current['failed_attempts'][-1]) != record['binding']['failure_sha256']
