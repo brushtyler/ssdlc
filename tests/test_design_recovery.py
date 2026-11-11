@@ -114,3 +114,91 @@ class DesignRecoveryTests(unittest.TestCase):
         self.assertEqual(len(self.arch_calls), 1)
         self.make().run()
         self.assertEqual(len(self.arch_calls), 4); self.assertEqual(len(self.review_calls), 4)
+
+    def scenario(self, name):
+        from types import SimpleNamespace
+        from orchestrator import SSDLCOrchestrator
+        from ssdlc_tasks import atomic_json, file_hash
+        owner = SimpleNamespace(ssdlc_root=self.root, repo_root=self.root,
+                                state={'base_commit': 'fixture', 'artifacts': {}})
+        source = self.root / 'source.py'; source.write_text('value = 1\n')
+        proof = {}
+        def arch(rnd, previous, history):
+            self.arch_calls.append(rnd)
+            return '' if name == 'design_empty_after_diagnosis' and rnd == 4 else '# ADR ' + str(rnd)
+        def reviewer(rnd, adr, history):
+            self.review_calls.append(rnd)
+            if name == 'design_oscillation':
+                return review([finding('F1', requirement_refs=['AC-1'], status='OPEN' if rnd % 2 else 'RESOLVED'),
+                               finding('F2', requirement_refs=['SEC-2'], status='RESOLVED' if rnd % 2 else 'OPEN')])
+            result = json.loads(review([finding()]))
+            if proof: result['progress_evidence'] = [proof.copy()]
+            return json.dumps(result)
+        def diagnosis(subject, adr, history):
+            self.diagnoses.append(subject)
+            ref = '02-design/design-session/source-inspection-' + subject + '.json'
+            path = self.root / ref
+            atomic_json(path, {'kind': 'source_inspection', 'purpose': 'diagnosis_context',
+                              'base_commit': 'fixture', 'files': [{'path': 'source.py', 'sha256': file_hash(source)}]})
+            owner.state['artifacts'][ref] = {'path': ref, 'sha256': file_hash(path)}
+            proof.update(artifact_ref=ref, sha256=file_hash(path), obligation_refs=['SEC-2'])
+            return 'Model diagnosis is advice, not proof'
+        return self.make(architect=arch, reviewer=reviewer, diagnose=diagnosis,
+                         verify_evidence=lambda item: SSDLCOrchestrator._valid_design_progress_evidence(owner, item))
+
+    def test_oscillating_obligations_do_not_count_as_new_resolutions(self):
+        for _ in range(2):
+            with self.assertRaises(RecoveryStop) as stop: self.scenario('design_oscillation').run()
+            self.assertEqual(stop.exception.category, 'DESIGN_STALLED')
+        self.assertEqual(len(self.arch_calls), 5)
+        self.assertEqual(self.state()['rounds'][3]['progress']['resolved_obligations'], [])
+        self.assertEqual(self.state()['rounds'][4]['progress']['resolved_obligations'], [])
+
+    def test_diagnosis_report_cannot_be_cited_as_material_progress(self):
+        with self.assertRaises(RecoveryStop) as stop: self.scenario('design_diagnosis_citation').run()
+        self.assertEqual(stop.exception.category, 'DESIGN_STALLED')
+        self.assertEqual(len(self.arch_calls), 4)
+        self.assertEqual(self.state()['rounds'][-1]['progress']['material_evidence'], [])
+        self.assertEqual(len(self.diagnoses), 1)
+
+    def test_empty_adr_after_diagnosis_stops_without_another_round(self):
+        for _ in range(2):
+            with self.assertRaises(RecoveryStop) as stop: self.scenario('design_empty_after_diagnosis').run()
+            self.assertEqual(stop.exception.category, 'DESIGN_STALLED')
+        self.assertEqual(len(self.arch_calls), 4); self.assertEqual(len(self.review_calls), 3)
+        self.assertEqual(len(self.diagnoses), 1)
+
+    def test_empty_adr_before_diagnosis_does_not_reset_streak(self):
+        def arch(rnd, previous, history):
+            self.arch_calls.append(rnd)
+            return '' if rnd == 3 else '# ADR ' + str(rnd)
+        with self.assertRaisesRegex(PlanError, 'empty ADR'): self.make(resolve=False, architect=arch, initial_limit=8).run()
+        with self.assertRaises(RecoveryStop) as stop: self.make(resolve=False, architect=arch, initial_limit=8).run()
+        self.assertEqual(stop.exception.category, 'DESIGN_STALLED')
+        self.assertEqual(len(self.diagnoses), 1)
+        self.assertEqual(len(self.arch_calls), 5)
+
+    def test_round_exhaustion_with_progress_policy_is_registered(self):
+        with self.assertRaises(RecoveryStop) as stop: self.make(resolve=False, initial_limit=1).run()
+        self.assertEqual(stop.exception.category, 'DESIGN_STALLED')
+
+    def test_invalid_review_after_diagnosis_is_a_registered_stop_without_next_round(self):
+        def reviewer(rnd, adr, history):
+            self.review_calls.append(rnd)
+            return review([finding()]) if rnd < 4 else 'not a valid review'
+        for _ in range(2):
+            with self.assertRaises(RecoveryStop) as stop: self.make(resolve=False, reviewer=reviewer).run()
+            self.assertEqual(stop.exception.category, 'DESIGN_STALLED')
+        self.assertEqual(len(self.arch_calls), 4); self.assertEqual(len(self.review_calls), 5)
+        self.assertEqual(len(self.diagnoses), 1)
+
+    def test_interrupted_architect_after_diagnosis_cannot_reserve_another_round(self):
+        def architect(rnd, previous, history):
+            self.arch_calls.append(rnd)
+            if rnd == 4: raise RuntimeError('unknown ADR outcome')
+            return '# ADR ' + str(rnd)
+        with self.assertRaises(RuntimeError): self.make(resolve=False, architect=architect).run()
+        with self.assertRaises(RecoveryStop) as stop: self.make(resolve=False, architect=architect).run()
+        self.assertEqual(stop.exception.category, 'DESIGN_STALLED')
+        self.assertEqual(self.arch_calls, [1, 2, 3, 4])
+        self.assertEqual(len(self.diagnoses), 1)

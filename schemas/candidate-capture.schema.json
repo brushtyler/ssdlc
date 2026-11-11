@@ -47,7 +47,7 @@
     "generated_artifacts": {"type": "object", "additionalProperties": {"$ref": "#/$defs/file"}},
     "issues": {
       "type": "array", "uniqueItems": true,
-      "items": {"enum": ["protected_metadata", "protected_path", "scope_required", "unsafe_entry"]}
+      "items": {"enum": ["protected_metadata", "protected_path", "scope_required", "unsafe_entry", "git_metadata_unavailable", "source_changed", "source_unavailable"]}
     }
   },
   "$defs": {

@@ -8,14 +8,12 @@ import time
 import urllib.error
 from unittest.mock import patch
 
-from replay.test_timeout_recovery import TimeoutRecoveryTests
-from test_design_recovery import DesignRecoveryTests
-from test_recovery_limits import policy
 from ssdlc_recovery import LimitsStore
 from ssdlc_tasks import TaskError, git
 
 
 def task_case(name):
+    from replay.test_timeout_recovery import TimeoutRecoveryTests
     case = TimeoutRecoveryTests('test_quiescent_timeout_produces_checkpoint_without_another_dispatch')
     case.setUp()
     outcome = None
@@ -63,12 +61,14 @@ def task_case(name):
 def run_case(name):
     if name in ('timeout_checkpoint', 'timeout_repair', 'uncertain_timeout', 'unowned_git_lock', 'out_of_scope_timeout'):
         return task_case(name)
-    if name in ('design_repair', 'design_stall'):
+    if name in ('design_repair', 'design_stall', 'design_oscillation', 'design_diagnosis_citation', 'design_empty_after_diagnosis'):
+        from test_design_recovery import DesignRecoveryTests
         case = DesignRecoveryTests('test_rewording_does_not_reset_stagnation_diagnosis_then_next_round_repairs')
         case.setUp()
         try:
             try:
-                case.make(resolve=name == 'design_repair').run()
+                session = case.make(resolve=name == 'design_repair') if name in ('design_repair', 'design_stall') else case.scenario(name)
+                session.run()
                 outcome = case.state()['rounds'][-1]['status']
             except TaskError as exc:
                 outcome = getattr(exc, 'category', type(exc).__name__)
@@ -77,6 +77,7 @@ def run_case(name):
         finally:
             case.doCleanups()
     if name == 'cost_limit':
+        from test_recovery_limits import policy
         with tempfile.TemporaryDirectory() as tmp:
             store = LimitsStore(Path(tmp), lambda: 100)
             store.authorize(policy(), {'ticket': 'offline-benchmark'})
@@ -89,19 +90,28 @@ def run_case(name):
                 outcome = getattr(exc, 'category', type(exc).__name__)
             return {'outcome': outcome, 'logical_invocations': len(store._load()[1]['invocations']), 'checkpoint': False}
     if name == 'uncertain_transport':
-        from orchestrator import EngineRunner
-        with patch.dict('os.environ', {'OPENROUTER_API_KEY': 'offline-sentinel'}), \
-             patch('orchestrator.urllib.request.urlopen', side_effect=urllib.error.URLError('lost response')) as request:
+        from orchestrator import EngineRunner, _dispatch_local
+        from test_recovery_limits import policy
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LimitsStore(Path(tmp)); store.authorize(policy(), {'ticket': 'offline-benchmark'})
+            previous = getattr(_dispatch_local, 'limits', None); _dispatch_local.limits = store
             try:
-                EngineRunner.call_openrouter('model', 'system', 'user', 'p', 't', '03-dev')
-                outcome = 'unexpected-success'
-            except TaskError as exc:
-                outcome = getattr(exc, 'category', type(exc).__name__)
-            return {'outcome': outcome, 'logical_invocations': request.call_count, 'checkpoint': False}
+                with patch.dict('os.environ', {'OPENROUTER_API_KEY': 'offline-sentinel', 'SSDLC_SUPERVISED_RUN_ID': 'offline'}), \
+                     patch('orchestrator._supervision_event', return_value=True), \
+                     patch('orchestrator.urllib.request.urlopen', side_effect=urllib.error.URLError('lost response')) as request:
+                    try:
+                        EngineRunner.call_openrouter('model', 'system', 'user', 'p', 't', '03-dev')
+                        outcome = 'unexpected-success'
+                    except TaskError as exc:
+                        outcome = getattr(exc, 'category', type(exc).__name__)
+                return {'outcome': outcome, 'logical_invocations': request.call_count, 'checkpoint': False}
+            finally: _dispatch_local.limits = previous
     raise ValueError('Unregistered benchmark case')
 
 
 def main(argv=None):
+    from ssdlc_grader import verify_baseline
+    baseline_id = verify_baseline()
     p = argparse.ArgumentParser()
     p.add_argument('--output', required=True)
     a = p.parse_args(argv)
@@ -115,12 +125,11 @@ def main(argv=None):
         stop = observed['outcome'] not in ('COMPLETED', 'APPROVED')
         false_block = expected['outcome'] in ('COMPLETED', 'APPROVED') and stop
         results.append({'case': name, 'passed': passed, 'observed': observed, 'elapsed_seconds': round(elapsed, 6),
-                        'live_model_calls': 0, 'human_callbacks_executed': 0, 'total_interventions_required': int(stop),
+                        'total_interventions_required': int(stop),
                         'avoidable_interventions': int(false_block),
                         'escaped_seeded_defects': int(name == 'timeout_repair' and observed['outcome'] == 'COMPLETED' and not observed['checkpoint']),
-                        'operator_wait_seconds': 0,
-                        'ready_pr': False})
-    report = {'schema_version': 1, 'corpus': manifest['corpus'], 'cases': results,
+                        'seeded_defect_checked': name == 'timeout_repair'})
+    report = {'schema_version': 1, 'corpus': manifest['corpus'], 'baseline_id': baseline_id, 'cases': results,
               'failed_cases': sum(not c['passed'] for c in results),
               'note': 'Semantic engine/checkpoint and expected-stop benchmark, not ready-PR delivery or the ten-defect C oracle. Expected stops still count required operator interventions. No callbacks were executed; waits were not simulated.'}
     Path(a.output).write_text(json.dumps(report, indent=2) + '\n')
