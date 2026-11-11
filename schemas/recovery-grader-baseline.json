@@ -1,11 +1,12 @@
 {
   "schema_version": 1,
-  "baseline_id": "i2-hardening-v2",
-  "change_authority": "Explicit issue #29 offline bootstrap review. Candidate tasks cannot update this baseline.",
+  "baseline_id": "i2-integrity-v3",
+  "change_authority": "Explicit issue #32 offline baseline revision: isolated A5 entrypoint and CI job; corpus outcomes unchanged.",
   "files": {
-    ".github/workflows/test.yml": "bff2d70c679d0e0a77ce1f083f2931994661d89b21632f472b38b47be7f2ed58",
-    "ssdlc_grader.py": "0760f470233fbb3f65beb61212cc76f90bf5d448e4ce2c3c89dab001501bd2ae",
-    "tests/replay/README.md": "53b4c5c4fdadac1a66e4bfc2fa15239002e605111ba62cf57c8a277c8f99517d",
+    ".github/workflows/test.yml": "a60d422e785de563fcafa1d28e81c9ebb3691d3cb39df96f924a8f2e656fce64",
+    "ssdlc_grader.py": "00ceea0a60fa03947cc75328cf6ab4af660af51e5831feef261a6c38180767c9",
+    "ssdlc_replay_gate.py": "db2bbbf054aff07f7b6434739fc5c7a5d909151102f0b2fc85b2294c7cacadff",
+    "tests/replay/README.md": "db8b337b627ce34f1fca25b21ac674570d3e1e1a95efc003e4fd637aa876ab74",
     "tests/replay/__init__.py": "8159993444bfd088fff3d1eb62e9550e4db9ac9d3eed449e1e4c7748e861249e",
     "tests/replay/benchmark.py": "f045ac590f66c4e17e524699edfe58aecaf79aed293f4c2311ceaab863718f13",
     "tests/replay/fixtures/i2-recovery.json": "660c417264ad56f92e30c18fe70f59f288f8f58cfb69c03b365e40cec6e2b31a",
@@ -14,7 +15,7 @@
     "tests/replay/test_timeout_recovery.py": "8ee53895b4bed04157c115004c091940dadd90859bb8ff1c97e7d5bce99ae981",
     "tests/test_design_recovery.py": "6487ce1d7d5bcbc4867357a81e7d6aa3bc2273a48a6b9694e191f91f888b9b1f",
     "tests/test_design_session.py": "b1caad21f8429004467882c4a22d71d4c83172fd6f1f58337f71fe4782a29925",
-    "tests/test_recovery_benchmark.py": "d178f264d9ee51e24ae7cffe19fa77289cb75ce75a708918f158c2e40cbc3845",
+    "tests/test_recovery_benchmark.py": "8a13703baa0d7da05cd49c0b839ca2ae4c8a8c4c1b5aecff2788bf4fd4a18b43",
     "tests/test_recovery_limits.py": "cce7eb708b8b3e17b6dcbf867aa64f403739e33cd0116daf6147a71af3ca6c9d",
     "tests/test_task_bootstrap.py": "0ae1c10418327a327cee73effdc9cfa6d1cf7f9829a9cd9459e4995a9fe57311"
   }

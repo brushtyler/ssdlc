@@ -47,8 +47,26 @@ class ReconciliationTests(ContinuationTests):
                 {'origin': 'task:T1:1', 'role': '03-dev', 'phase': '03-dev', 'engine': 'codex',
                  'reason': 'Preserved developer attempt has unknown usage'}],
             'limit_sources': [], 'combined_reported_usd_cap': 10,
+            'unknown_usage_reserve': {'metered_usd': 0.001, 'cli_estimate_usd': 0.001, 'reason': 'Synthetic offline allowance, not measured billing'},
             'time': {'started_at': time.time() - 1000, 'basis': 'operator_attestation',
                      'reason': 'Test fixture has no created_at'}}
+
+    def test_unknown_usage_decision_is_bound_and_reserved_in_active_profile(self):
+        staged = self.stage()
+        proposal = staged['proposal']
+        unknown_count = len(proposal['decisions']['unknown_usage'])
+        self.assertGreater(unknown_count, 0)
+        auth = self.auth(staged)
+        auth['accept_unknown_history'] = False
+        with self.assertRaisesRegex(TaskError, 'Unknown/ambiguous'):
+            activate(self.target, staged['preparation'], auth)
+        self.select(staged)
+        root = runtime_root(self.target)
+        envelope, counters = LimitsStore(root)._load(repair=False)
+        self.assertEqual(envelope['policy']['historical_unknown_usage']['invocations'], unknown_count)
+        self.assertAlmostEqual(envelope['policy']['historical_unknown_usage']['cli_estimate_usd'], 0.001 * unknown_count)
+        self.assertEqual(sum('conservative_usage' in row for row in counters['invocations'].values()), unknown_count)
+        self.assertEqual(counters['historical']['ledger'], self.outer['ledger'])
 
     def before_import(self):
         pass

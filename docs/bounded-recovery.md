@@ -123,7 +123,9 @@ history or the stagnant streak.
 
 Progress is either a supported independent-review resolution of an obligation,
 or a new host-verified evidence hash cited against approved obligations.
-Registered static source-inspection facts may supply that evidence. Inspection
+Registered static source-inspection facts explicitly tagged
+`purpose: progress_evidence` may supply that evidence. Untagged legacy reports,
+unknown purpose values and diagnosis reports cannot count as progress. Inspection
 uses AST parsing, never imports repository code, and is explicitly not a
 correctness oracle. Unregistered/duplicate evidence cannot reset the counter.
 The diagnosis is model text and cannot approve the design or become host proof.
@@ -164,7 +166,7 @@ invocations, attempts, diagnoses and checkpoint status. Candidate worktrees
 cannot change this grader/manifest through their writable mounts. CI runs the
 entire unit suite, including `test_recovery_benchmark`, which executes and grades
 the complete replay corpus. The same gate is available standalone through
-`PYTHONPATH=tests python3 -m replay.benchmark --output FILE`.
+`python3 -I ssdlc_replay_gate.py --output FILE`.
 Any wrong outcome/counter or exceeded case-time tolerance fails the gate. Changes
 to baseline expectations are explicit reviewed fixture changes.
 
@@ -187,7 +189,7 @@ hardening remains in issue #29.
 
 ## Protected baseline and issue #29 validation
 
-`schemas/recovery-grader-baseline.json` (`i2-hardening-v2`) pins the grader,
+`schemas/recovery-grader-baseline.json` (`i2-integrity-v3`) pins the grader,
 expectations, replay fixtures, imported test helpers and existing CI gate by
 SHA256. The host verifies those bytes before executing the corpus and before
 self-development planning/scheduling. Self-development is identified from the
@@ -201,7 +203,7 @@ The v2 baseline adds oscillating findings, diagnosis-as-evidence and empty ADR
 after diagnosis. `escaped_seeded_defects` is derived from the seeded repair's
 observed source/checkpoint, not a constant success claim. Other metrics remain
 out of scope until measured. The standalone replay is still
-`PYTHONPATH=tests python3 -m replay.benchmark --output FILE`; existing CI unit
+`python3 -I ssdlc_replay_gate.py --output FILE`; existing CI unit
 discovery executes it and rejects pin drift or wrong outcomes/counters.
 
 `tests/test_i2_hardening.py` additionally covers deleted/tampered mode bindings,
@@ -216,3 +218,18 @@ completion uncertainty appears in the evidence pack and the explicit sign-off
 output; passing task checks still grants no global readiness by itself.
 Deterministic evidence compilation remains an authorized service operation after
 historical admission, so a limit/stop report does not require another model call.
+
+
+Issue #32 isolates the A5 CI job from general unittest discovery. The pinned
+`ssdlc_replay_gate.py` requires Python isolated mode and stages only the pinned
+test modules/fixtures in a disposable import directory. The original `tests/`
+is never added to its import path. New discovery modules cannot monkeypatch this
+process; `PYTHONPATH` and user site are ignored. The unit gate also invokes the
+isolated entrypoint, but CI independently runs it in a separate job. Production
+modules remain the candidate under test; this is import isolation from discovery,
+not a sandbox against arbitrary malicious production code or host dependencies.
+The v3 baseline preserves all twelve corpus cases and expected outcomes. Target
+aliases are normalized before grader protection checks; parent traversal remains
+forbidden. Controller snapshots ignore global/system Git configuration and
+injected Git config, and override global excludes/fsmonitor, retaining only
+repository-owned ignore rules.

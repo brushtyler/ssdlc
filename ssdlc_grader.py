@@ -6,7 +6,7 @@ import subprocess
 
 MANIFEST = 'schemas/recovery-grader-baseline.json'
 REQUIRED = frozenset({
-    'ssdlc_grader.py', MANIFEST, '.github/workflows/test.yml',
+    'ssdlc_grader.py', 'ssdlc_replay_gate.py', MANIFEST, '.github/workflows/test.yml',
     'tests/replay/benchmark.py', 'tests/replay/fixtures/i2-recovery.json',
     'tests/replay/README.md', 'tests/replay/__init__.py',
     'tests/replay/test_candidate_capture.py', 'tests/replay/fixtures/issue22-cache.json',

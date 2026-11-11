@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "issue": 32,
+  "execution": "direct offline implementation; no SSDLC run or provider calls",
+  "checks": [
+    {
+      "command": "PYTHONPATH=tests python3 -m unittest test_issue32_integrity test_historical_accounting test_reconciliation -q",
+      "tests": 43,
+      "result": "passed"
+    },
+    {
+      "command": "PYTHONPATH=tests python3 -m unittest test_recovery_benchmark test_i2_hardening.GraderProtectionTests -q",
+      "tests": 3,
+      "result": "passed"
+    },
+    {
+      "command": "python3 -I ssdlc_replay_gate.py --output FILE",
+      "cases": 12,
+      "failures": 0,
+      "baseline_id": "i2-integrity-v3"
+    }
+  ],
+  "coverage": [
+    "unknown usage requires explicit conservative reserves and hash-bound acceptance even when all other historical limits are known",
+    "observed usage stays null; derived profile and immutable historical invocation bindings retain reserve allocations",
+    "reserves consume individual and combined dollar caps; missing reserves refuse dispatch",
+    "I1-to-I2 prepare/activation persists unknown usage count and allocations",
+    "discovery-only monkeypatch module remains unimported while weakened production progress fails isolated grading",
+    "protected target aliases and parent traversal are rejected",
+    "untagged and diagnosis inspection reports cannot count as progress",
+    "controller snapshots are stable across HOME/global ignores/injected config and still detect untracked file changes"
+  ],
+  "limitations": [
+    "Conservative reserves are operator-declared allowances, not observed subscription charges or guaranteed billing upper bounds.",
+    "A5 separates test discovery imports; it does not contain arbitrary malicious production code or host dependencies.",
+    "No historical #22 activation, budget extension or automatic selected-I2 profile migration was performed."
+  ],
+  "privacy": "No private run artifacts, authorizations, transcripts, credentials or host paths are included."
+}

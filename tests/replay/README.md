@@ -18,8 +18,15 @@ metrics arrive in later increments.
 
 
 The I2 v2 corpus adds design oscillation, diagnosis citation and empty
-post-diagnosis ADR. Run `PYTHONPATH=tests python3 -m replay.benchmark --output FILE`.
+post-diagnosis ADR. Run `python3 -I ssdlc_replay_gate.py --output FILE`.
 The host verifies `schemas/recovery-grader-baseline.json` before loading the
 semantic test helpers. Changes to this directory or imported grader/fake files
 require a reviewed baseline revision and matching pins; candidate tasks cannot
 perform that revision. The report omits unmeasured ready-PR/live-call metrics.
+
+
+The issue #32 baseline (`i2-integrity-v3`) pins the isolated entrypoint and its
+separate CI job. Only pinned test modules and fixtures are staged for imports;
+new `tests/test_*.py` files are not discovered or reachable through the original
+tests directory. All twelve corpus expectations are unchanged. Direct in-process
+benchmark execution is useful for development but is not the isolated CI gate.

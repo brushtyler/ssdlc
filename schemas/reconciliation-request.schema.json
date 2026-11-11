@@ -211,6 +211,29 @@
           "minLength": 1
         }
       }
+    },
+    "unknown_usage_reserve": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "metered_usd",
+        "cli_estimate_usd",
+        "reason"
+      ],
+      "properties": {
+        "metered_usd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "cli_estimate_usd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
     }
   }
 }

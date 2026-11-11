@@ -71,6 +71,29 @@
     "invocation_timeout_seconds": {
       "type": "integer",
       "minimum": 1
+    },
+    "historical_unknown_usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "invocations",
+        "metered_usd",
+        "cli_estimate_usd"
+      ],
+      "properties": {
+        "invocations": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "metered_usd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "cli_estimate_usd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
     }
   },
   "$defs": {
