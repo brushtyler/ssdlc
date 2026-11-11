@@ -68,6 +68,21 @@ class ReconciliationTests(ContinuationTests):
         self.assertEqual(sum('conservative_usage' in row for row in counters['invocations'].values()), unknown_count)
         self.assertEqual(counters['historical']['ledger'], self.outer['ledger'])
 
+    def test_exclusive_reserve_model_survives_native_prepare_and_activation(self):
+        self.request['profile']['unknown_usage_reserve_model'] = 'exclusive_cost_kind_v1'
+        self.request['unknown_usage_reserve'].update(metered_usd=0.1, cli_estimate_usd=0.1)
+        staged = self.stage()
+        self.select(staged)
+        store = LimitsStore(runtime_root(self.target))
+        envelope, counters = store._load(repair=False)
+        self.assertEqual(envelope['policy']['unknown_usage_reserve_model'], 'exclusive_cost_kind_v1')
+        self.assertAlmostEqual(envelope['policy']['historical_unknown_usage']['combined_usd'], 0.5)
+        store.require_capacity('03-dev', '03-dev')  # 9.26 known + .5 reserve fits the preserved $10 cap.
+        legacy = dict(envelope['policy']); legacy.pop('unknown_usage_reserve_model')
+        with self.assertRaisesRegex(RecoveryStop, 'combined reported-cost cap exhausted'):
+            store.check(counters, legacy)
+        self.assertEqual(counters['historical']['ledger'], self.outer['ledger'])
+
     def before_import(self):
         pass
 

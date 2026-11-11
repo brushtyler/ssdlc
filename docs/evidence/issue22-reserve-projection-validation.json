@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "issue": 22,
+  "purpose": "Versioned single-invocation reserve projection; follow-up to issue32",
+  "checks": {
+    "targeted_tests": 45,
+    "result": "passed",
+    "replay_cases": 12,
+    "replay_failures": 0,
+    "baseline_id": "i2-fixtures-v4"
+  },
+  "invariants": [
+    "observed null usage remains null",
+    "individual caps reserve full per-kind allowances",
+    "exclusive_cost_kind_v1 combined cap reserves each invocation maximum once",
+    "profiles without the opt-in mode retain additive behavior",
+    "mode, derived aggregate and decisions survive native prepare and activation",
+    "profile hash and explicit unknown-history authorization bind the allocation model"
+  ],
+  "limitations": [
+    "An operator-specified sample mean is a proxy allocation, not a recovered observation or proven monetary upper bound.",
+    "This change does not authorize provider calls or activate historical issue22."
+  ],
+  "provider_calls": 0
+}
