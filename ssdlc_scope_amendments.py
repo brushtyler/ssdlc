@@ -161,6 +161,7 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
     """Stage a reviewed amendment, retaining all prior generations and counters."""
     from ssdlc_preparations import unfinished, register, update, pending, clear_pending
     from ssdlc_candidates import inventory
+    validate_document('plan', plan)
     ticket, repo = _ticket(ticket), Path(repo).resolve()
     if ticket != repo / '.ssdlc' / plan.get('ticket_id', ''):
         raise TransitionError('Scope target must be the canonical ticket of the target repository')

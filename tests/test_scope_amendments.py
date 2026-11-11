@@ -129,6 +129,14 @@ class ScopeAmendmentTests(unittest.TestCase):
         plan = copy.deepcopy(self.plan); plan['tasks'][0]['target_files'].append('extra.py')
         with self.assertRaises(TaskError): subject(self.source, plan, self.reason)
 
+    def test_malformed_plan_refuses_before_creating_preparation(self):
+        before = sorted((self.ticket / 'execution/preparations').iterdir())
+        for malformed in ([], None, 'not a plan', {'schema_version': 'future'}):
+            with self.subTest(value=malformed), self.assertRaises(TaskError):
+                prepare(self.ticket, self.repo, malformed, self.review, self.reason,
+                        runtime_identity=self.identity, controller_snapshot=self.new_controller)
+        self.assertEqual(sorted((self.ticket / 'execution/preparations').iterdir()), before)
+
     def test_review_and_authorization_bind_expanded_scope(self):
         self.review['subject_sha256'] = '0' * 64
         with self.assertRaisesRegex(TaskError, 'Independent review'):
