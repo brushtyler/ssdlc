@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "issue": 39,
+  "increment": "F1 recording and diagnosis only",
+  "full_suite": {
+    "tests": 978,
+    "seconds": 365.525,
+    "exit_code": 0,
+    "tested_commit": "4bcb98949f3b2731e93f1afbc2ee3f291e6c379b"
+  },
+  "focused_tests": 28,
+  "isolated_a5": {
+    "cases": 12,
+    "failed_cases": 0
+  },
+  "live_provider_calls": 0,
+  "historical_case": {
+    "task_id": "T08",
+    "failure_classification": "ALL_OUTSIDE",
+    "path_class": "BASELINE_TEST",
+    "attempts_remaining": 1,
+    "impact_attribution": "DETECTABLE",
+    "stop_reasons": [
+      "BASELINE_COVERAGE_REVIEW_REQUIRED",
+      "FEEDBACK_ALLOWANCE_UNAVAILABLE"
+    ],
+    "model_dispatches": 0,
+    "execution_authorized": false
+  },
+  "not_implemented": [
+    "funded role execution",
+    "delegated native activation and technical fencing",
+    "automatic supervisor recovery",
+    "GitHub publication and prerequisite execution"
+  ],
+  "omitted": [
+    "private runtime paths and bindings",
+    "raw provider/check logs",
+    "credentials and local configuration"
+  ],
+  "final_focused_tests": 33,
+  "final_focused_seconds": 9.821,
+  "final_changes": "Prevent blocker downgrade and stale decision reuse, canonicalize equivalent sets, refuse partial native accounting without any repairing journal load"
+}

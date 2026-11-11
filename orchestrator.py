@@ -5214,6 +5214,9 @@ def _supervised_exit_code(value) -> int:
 
 def main(argv=None) -> int:
     words = sys.argv[1:] if argv is None else argv
+    if words and words[0].startswith('feedback-'):
+        from ssdlc_feedback import main as feedback_main
+        return feedback_main(words)
     if words and words[0].startswith('continuation-scope-'):
         from ssdlc_scope_amendments import main as scope_main
         return scope_main(words)
