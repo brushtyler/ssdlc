@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "profile_id",
+    "invocations",
+    "wall_seconds",
+    "role_invocations",
+    "phase_invocations",
+    "transport_retries",
+    "design_diagnoses",
+    "metered_usd",
+    "cli_estimate_usd",
+    "development_attempts",
+    "design_rounds",
+    "invocation_timeout_seconds"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "profile_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "invocations": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "wall_seconds": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "role_invocations": {
+      "$ref": "#/$defs/caps"
+    },
+    "phase_invocations": {
+      "$ref": "#/$defs/caps"
+    },
+    "transport_retries": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 20
+    },
+    "design_diagnoses": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "metered_usd": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "cli_estimate_usd": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "development_attempts": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10
+    },
+    "design_rounds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 8
+    },
+    "invocation_timeout_seconds": {
+      "type": "integer",
+      "minimum": 1
+    }
+  },
+  "$defs": {
+    "caps": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+      },
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 1
+      }
+    }
+  }
+}

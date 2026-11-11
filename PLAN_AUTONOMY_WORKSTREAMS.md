@@ -190,19 +190,21 @@ The following order is binding; unrelated work may run in parallel only after th
 | --- | --- | --- |
 | I0. Capture and isolation stabilization | Minimal A1 capability decisions, A2 issue #22 fixture, A3 mappings for new reasons, A4.1 and A4.3; develop with offline semantic engines in a separate branch | Completed developer work survives secondary failure/crash; fresh verification leaves source unchanged; no second developer call; malicious/protected/out-of-scope changes still stop |
 | I1. Native continuation and plan safety | I0; A6c, then A6a and A4.2; A2 issue #20 and Tier S fixtures | Controller migration and plan amendments survive crash; original counters/history/order survive; preserved issue #22 T01 can enter fresh verification through an explicit authorized transition |
-| I2. Bounded recovery and design | I1; A3 inventory, A4.4–A4.7, A6b and initial A5 gate | Timeout, retry, limits, locks and design-stagnation scenarios converge or produce the expected registered stop; no operator state edits |
+| I2. Bounded recovery and design — incomplete | I1; A3 inventory, A4.4–A4.7, A6b, initial A5 gate and cumulative-limit reconciliation ([issue #27](https://github.com/brushtyler/ssdlc/issues/27)) | New-run recovery plus explicitly authorized historical I1 continuation preserve cumulative limits/counters; timeout, retry, lock and design cases converge or produce the expected registered stop, without operator state edits |
 | I3. Containment | B1a and B2/B6 spikes may start alongside I0; then B1b, B2, B4, B6, B7, B3 and B5 refusal tests, using A2/A3 | B sandbox controls and route-specific residual-risk decisions are accepted; outgoing scan and network controls pass; B5 final-profile activation waits for I5b |
 | I4. Oracle foundation | I1/I2 plus I3 sandbox controls; C1, C2 and C5a | Classified witness, inventory, mutation and instability cases pass; correct rejections count honestly even before automatic repair exists |
-| I5a. Corrective loop | I2; resume issue #22 task-only/bootstrap work and complete Step 3b.3; may proceed alongside I3/I4 | Seeded attributable defects enter a real authorized corrective transaction, preserve attempts and revalidate tasks/dependents/global gates |
+| I5a. Corrective loop | Complete I2, including issue #27; resume issue #22 task-only/bootstrap work and complete Step 3b.3; may proceed alongside I3/I4 | Seeded attributable defects enter a real authorized corrective transaction, preserve attempts and revalidate tasks/dependents/global gates |
 | I5b. Independent roles | I3/I4 and I5a before C3/C4 activation | Seeded defects are repaired and freshly re-gated without operator action; test disputes/adjudication respect persistent limits |
 | I6. Integrated delivery | A5, all B, C1–C4/C5a and corrective-loop acceptance; connect issue #4 | Authorized issue reaches a ready PR with fresh evidence and no avoidable intervention; duplicate/out-of-order GH events do not duplicate work |
+
+PR #26 is the first I2 increment for new runs and remains independently reviewable/mergeable. **I2 is not complete** until [issue #27](https://github.com/brushtyler/ssdlc/issues/27) provides native cumulative-limit reconciliation and exact authorization for historical I1 generations. That issue blocks resuming historical #22 development / I5a; it does not renumber I3 or block containment spikes already permitted here. Issue creation and plan updates grant no execution or budget authority.
 
 I0 is a small direct implementation/bootstrap PR, not another attempt to execute the full autonomy plan. Do not resume paid issue #22 development merely because this document is updated. First merge/test stabilization, then migrate the suspended run through I1 with explicit controller/input authorization and its existing limits. Preserve the original unverified T01 source and evidence until reconciliation completes. If the source fails fresh checks, repair it through the authorized workflow; never import the old self-reported test results as trusted proof.
 
 ```mermaid
 flowchart LR
     I0["I0 Capture + artifact isolation"] --> I1["I1 Controller migration + plan safety"]
-    I1 --> I2["I2 Bounded recovery + design"]
+    I1 --> I2["I2 Recovery + design + historical limits (#27)"]
     I0 --> SPIKE["B2/B6 capability spikes"]
     B1a["B1a Egress boundary"] --> B1b["B1b Provisioning"]
     SPIKE --> B2["B2 Credential route policy"]
@@ -308,6 +310,8 @@ Completion is demonstrated, not inferred from merged schemas or individual unit 
 
 - [x] I0 replay passes with zero live model calls and exactly-once developer dispatch in recoverable cases (issue #23; see `docs/candidate-capture.md` and its offline evidence).
 - [x] I1 pre-checkpoint continuation and reviewed amendment replay pass without model dispatch; supported compatibility and evidence are in `docs/continuations.md`. Issue #22 still needs resolved-source review and explicit migration authorization.
+- [x] I2 new-run recovery/safe-stop fixtures cover fenced timeout, persistent limits, uncertain transport, unowned locks and bounded design diagnosis; initial A5 corpus and compatibility limits are documented in `docs/bounded-recovery.md`. Historical I1 continuations remain fenced pending cumulative-limit reconciliation.
+- [ ] I2 completion: issue #27 reconciles historical cumulative limits and authorizes native I1 development resume atomically, with crash/duplicate-dispatch regressions. This is required before historical #22 development / I5a.
 - [ ] A4 and A6 fault cases preserve source, history, counters and explicit uncertainty across restart.
 - [ ] A5 uses protected scenarios and reports total/avoidable interventions and justified refusals separately.
 - [ ] Every enabled route passes B capability, bypass, positive-control and publication cases; residual exposure is authorized explicitly.
