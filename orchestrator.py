@@ -150,6 +150,9 @@ def _bounded_entrypoint(fn):
             assert_controller(Path(__file__).resolve().parent, envelope['binding']['controller'])
             if envelope['binding']['ticket'] != self.ticket_id:
                 raise TaskError('Limit policy belongs to another ticket')
+            if os.environ.get('SSDLC_AUTONOMOUS', '').lower() == 'true':
+                from ssdlc_recovery import validate_launch_caps
+                validate_launch_caps(envelope['policy'], fn.__name__)
             _dispatch_local.limits = store
         elif os.environ.get('SSDLC_AUTONOMOUS', '').lower() == 'true':
             from ssdlc_recovery import RecoveryStop

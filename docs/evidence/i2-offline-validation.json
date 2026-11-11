@@ -7,7 +7,7 @@
   "source_files": [
     {
       "path": "orchestrator.py",
-      "sha256": "de019cf954e45861047a86a860e18a8b84733b5fc1526c23a1549467232b0b5e"
+      "sha256": "7868d894b167a32d182666cfc3cc8565155282e626b6d54de06d4cdcc56193c8"
     },
     {
       "path": "schemas/candidate-capture.schema.json",
@@ -39,7 +39,7 @@
     },
     {
       "path": "ssdlc_recovery.py",
-      "sha256": "53e96db8a15d1917662fc7fe4750c53d2f9ea407b4e389e1429581c4e836e15c"
+      "sha256": "8901e9cf19f2d45e6fa20b96af0417e6b4d5a5c3cb9467a357c13ea7ca505dbf"
     },
     {
       "path": "tests/replay/benchmark.py",
@@ -55,7 +55,7 @@
     },
     {
       "path": "tests/test_recovery_limits.py",
-      "sha256": "06d9649a4005050ee82414b574f063c7fdaf78c544a53f17a22c180700ead557"
+      "sha256": "3f9a41072c9fa5fdf703acd66339d5db63470f7dbac70f1209e7c885d55b31e4"
     },
     {
       "path": "tests/replay/fixtures/i2-recovery.json",
@@ -68,10 +68,10 @@
   ],
   "targeted_suite": {
     "result": "PASS",
-    "tests": 121,
-    "duration_seconds": 24.348,
+    "tests": 123,
+    "duration_seconds": 26.798,
     "python": "3.14.4",
-    "command": "PYTHONPATH=tests python3 -m unittest test_recovery_limits test_design_recovery replay.test_timeout_recovery test_design_session test_container_resources replay.test_candidate_capture test_task_bootstrap.OrchestratorBootstrapTests -q",
+    "command": "PYTHONPATH=tests python3 -m unittest test_recovery_limits test_design_recovery replay.test_timeout_recovery test_design_session test_container_resources replay.test_candidate_capture test_task_bootstrap.OrchestratorBootstrapTests test_recovery_benchmark -q",
     "environment": "Host, standard PATH"
   },
   "intermediate_full_suite": {

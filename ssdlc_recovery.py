@@ -229,3 +229,19 @@ def inspect_design_sources(repo, names):
         files.append(entry)
     return {'schema_version': 1, 'kind': 'source_inspection', 'base_commit': git(Path(repo), 'rev-parse', 'HEAD'),
             'files': files, 'not_correctness_proof': True}
+
+
+def validate_launch_caps(policy, entrypoint):
+    """Check required role/phase caps before autonomous launch spends any call."""
+    roles = {
+        'run_pipeline': {'00-recon', '01-po', '02-design-arch', '02-design-sec',
+                         '02-design-task-plan', '02-design-task-plan-review', '03-dev',
+                         '04-review', '05-qa', '05b-appsec', '06-ops', '07-docs'},
+        'resume_task_planning': {'02-design-task-plan', '02-design-task-plan-review'},
+        'resume_pair_design': {'02-design-arch', '02-design-sec'},
+    }.get(entrypoint, set())
+    if policy['design_diagnoses'] and entrypoint in ('run_pipeline', 'resume_pair_design'):
+        roles = roles | {'02-design-diagnosis'}
+    phases = {'02-design' if r.startswith('02-design-') else r for r in roles}
+    if not roles <= policy['role_invocations'].keys() or not phases <= policy['phase_invocations'].keys():
+        raise RecoveryStop('LIMIT_REACHED', 'Autonomous launch is missing required role/phase caps; no model dispatch')

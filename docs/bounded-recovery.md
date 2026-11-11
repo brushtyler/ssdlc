@@ -54,7 +54,8 @@ existing bounded Docker grace. Bounded HTTP inference requires the detached
 supervisor to enforce the overall deadline; socket inactivity timeouts alone
 cannot establish a whole-request deadline.
 
-`SSDLC_AUTONOMOUS=true` refuses launch without a profile. It does not activate
+`SSDLC_AUTONOMOUS=true` refuses launch without a profile and checks all known
+required role/phase caps before the first model invocation. It does not activate
 B5, GitHub issue intake or final unattended delivery. Ordinary legacy execution
 without a profile retains its existing limits, apart from the safe HTTP and Git
 lock refusals below. Deleting a policy while its journal exists refuses as

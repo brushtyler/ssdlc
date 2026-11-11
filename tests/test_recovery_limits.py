@@ -187,3 +187,16 @@ class LimitsTests(unittest.TestCase):
                 EngineRunner._run_role_command(['true'], cwd=self.root, env=None, timeout=300)
             self.assertEqual(call.call_args.kwargs['timeout'], 5)
         finally: _dispatch_local.limits = previous
+
+
+    def test_autonomous_launch_rejects_missing_later_caps_before_spending(self):
+        from ssdlc_recovery import validate_launch_caps
+        with self.assertRaisesRegex(RecoveryStop, 'missing required'):
+            validate_launch_caps(policy(), 'run_pipeline')
+        required = {'00-recon', '01-po', '02-design-arch', '02-design-sec',
+                    '02-design-task-plan', '02-design-task-plan-review', '02-design-diagnosis',
+                    '03-dev', '04-review', '05-qa', '05b-appsec', '06-ops', '07-docs'}
+        explicit = policy(role_invocations={r: 10 for r in required},
+                          phase_invocations={('02-design' if r.startswith('02-design-') else r): 10 for r in required})
+        validate_launch_caps(explicit, 'run_pipeline')
+        self.assertEqual(self.store._load()[1]['invocations'], {})
