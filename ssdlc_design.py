@@ -192,9 +192,13 @@ class DesignSession:
         prior = history[-1].get('assessment', {}) if history else {}
         previous_records = [r for r in session['rounds'] if r['round'] < record['round'] and r.get('progress_evaluated')]
         resolved_once = {ref for r in previous_records for ref in r.get('progress', {}).get('resolved_obligations', [])}
-        resolved_once.update(ref for r in previous_records for f in r.get('assessment', {}).get('findings', [])
-                             if f['status'] == 'RESOLVED' and f['severity'] == 'BLOCKING'
-                             for key in ('requirement_refs', 'standard_refs', 'quality_check_refs') for ref in f.get(key, []))
+        for previous in previous_records:
+            closed_refs = {ref for f in previous.get('assessment', {}).get('findings', [])
+                           if f['status'] == 'RESOLVED' and f['severity'] == 'BLOCKING'
+                           for key in ('requirement_refs', 'standard_refs', 'quality_check_refs') for ref in f.get(key, [])}
+            # A resolved finding does not clear an obligation still blocked by
+            # another finding in that same assessment.
+            resolved_once.update(closed_refs - set(previous['progress']['open_obligations']))
         record['progress'] = progress(prior, assessment, resolved_once)
         seen = {e['sha256'] for r in session['rounds'] if r['round'] < record['round']
                 for e in r.get('progress', {}).get('material_evidence', [])}

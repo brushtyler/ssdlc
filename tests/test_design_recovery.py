@@ -202,3 +202,18 @@ class DesignRecoveryTests(unittest.TestCase):
         self.assertEqual(stop.exception.category, 'DESIGN_STALLED')
         self.assertEqual(self.arch_calls, [1, 2, 3, 4])
         self.assertEqual(len(self.diagnoses), 1)
+
+    def test_overlapping_findings_do_not_spend_the_first_real_resolution_early(self):
+        def reviewer(rnd, adr, history):
+            self.review_calls.append(rnd)
+            return review([
+                finding('F1', status='RESOLVED', requirement_refs=['AC-1']),
+                finding('F2', status='RESOLVED' if rnd >= 2 else 'OPEN', requirement_refs=['AC-1']),
+                finding('F3', status='RESOLVED' if rnd >= 4 else 'OPEN', requirement_refs=['SEC-2']),
+            ])
+        self.make(reviewer=reviewer).run()
+        rounds = self.state()['rounds']
+        self.assertEqual(rounds[1]['progress']['resolved_obligations'], ['AC-1'])
+        self.assertTrue(rounds[1]['progress']['material_progress'])
+        self.assertEqual(self.diagnoses, [])
+        self.assertEqual(len(self.arch_calls), 4)

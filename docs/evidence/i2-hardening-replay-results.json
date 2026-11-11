@@ -12,7 +12,7 @@
         "attempts": 1,
         "checkpoint": true
       },
-      "elapsed_seconds": 0.607789,
+      "elapsed_seconds": 0.636269,
       "total_interventions_required": 0,
       "avoidable_interventions": 0,
       "escaped_seeded_defects": 0,
@@ -27,7 +27,7 @@
         "attempts": 2,
         "checkpoint": true
       },
-      "elapsed_seconds": 0.896914,
+      "elapsed_seconds": 0.907866,
       "total_interventions_required": 0,
       "avoidable_interventions": 0,
       "escaped_seeded_defects": 0,
@@ -42,7 +42,7 @@
         "attempts": 1,
         "checkpoint": false
       },
-      "elapsed_seconds": 0.243244,
+      "elapsed_seconds": 0.235538,
       "total_interventions_required": 1,
       "avoidable_interventions": 0,
       "escaped_seeded_defects": 0,
@@ -57,7 +57,7 @@
         "attempts": 0,
         "checkpoint": false
       },
-      "elapsed_seconds": 0.078478,
+      "elapsed_seconds": 0.077962,
       "total_interventions_required": 1,
       "avoidable_interventions": 0,
       "escaped_seeded_defects": 0,
@@ -72,7 +72,7 @@
         "attempts": 1,
         "checkpoint": false
       },
-      "elapsed_seconds": 0.258477,
+      "elapsed_seconds": 0.286742,
       "total_interventions_required": 1,
       "avoidable_interventions": 0,
       "escaped_seeded_defects": 0,
@@ -86,7 +86,7 @@
         "logical_invocations": 1,
         "checkpoint": false
       },
-      "elapsed_seconds": 0.008341,
+      "elapsed_seconds": 0.010733,
       "total_interventions_required": 1,
       "avoidable_interventions": 0,
       "escaped_seeded_defects": 0,
@@ -100,7 +100,7 @@
         "logical_invocations": 1,
         "checkpoint": false
       },
-      "elapsed_seconds": 0.01285,
+      "elapsed_seconds": 0.013912,
       "total_interventions_required": 1,
       "avoidable_interventions": 0,
       "escaped_seeded_defects": 0,
@@ -115,7 +115,7 @@
         "diagnoses": 1,
         "checkpoint": false
       },
-      "elapsed_seconds": 0.018246,
+      "elapsed_seconds": 0.018534,
       "total_interventions_required": 0,
       "avoidable_interventions": 0,
       "escaped_seeded_defects": 0,
@@ -130,7 +130,7 @@
         "diagnoses": 1,
         "checkpoint": false
       },
-      "elapsed_seconds": 0.016813,
+      "elapsed_seconds": 0.017796,
       "total_interventions_required": 1,
       "avoidable_interventions": 0,
       "escaped_seeded_defects": 0,
@@ -145,7 +145,7 @@
         "diagnoses": 1,
         "checkpoint": false
       },
-      "elapsed_seconds": 0.025643,
+      "elapsed_seconds": 0.027745,
       "total_interventions_required": 1,
       "avoidable_interventions": 0,
       "escaped_seeded_defects": 0,
@@ -160,7 +160,7 @@
         "diagnoses": 1,
         "checkpoint": false
       },
-      "elapsed_seconds": 0.017425,
+      "elapsed_seconds": 0.019505,
       "total_interventions_required": 1,
       "avoidable_interventions": 0,
       "escaped_seeded_defects": 0,
@@ -175,7 +175,7 @@
         "diagnoses": 1,
         "checkpoint": false
       },
-      "elapsed_seconds": 0.013613,
+      "elapsed_seconds": 0.014107,
       "total_interventions_required": 1,
       "avoidable_interventions": 0,
       "escaped_seeded_defects": 0,

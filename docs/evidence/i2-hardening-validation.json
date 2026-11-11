@@ -24,7 +24,7 @@
     },
     {
       "path": "schemas/recovery-grader-baseline.json",
-      "sha256": "532b2da58675ab185ea8b3e4a1a47ddd00a2cfb24903fb667d7002bad1a657b6"
+      "sha256": "fbbe1c3dc8921be57666bd85df7fa3bfe1ba40ad182dab8df3d0a399aa3568ac"
     },
     {
       "path": "ssdlc_candidates.py",
@@ -32,7 +32,7 @@
     },
     {
       "path": "ssdlc_design.py",
-      "sha256": "95e338dc9234d342902658de0e057577be22626f68d472a3501f1291bd21a399"
+      "sha256": "902f55dde67fcc1a8403e1faff7c40c2ac0e53b00db3ad2f763584c517f79c7e"
     },
     {
       "path": "ssdlc_grader.py",
@@ -64,7 +64,7 @@
     },
     {
       "path": "tests/test_design_recovery.py",
-      "sha256": "8505b6c74241850fde86b86210a44710436032da22cbe98b7851926822b8b552"
+      "sha256": "6487ce1d7d5bcbc4867357a81e7d6aa3bc2273a48a6b9694e191f91f888b9b1f"
     },
     {
       "path": "tests/test_i2_hardening.py",
@@ -95,7 +95,7 @@
       "tests": 916,
       "elapsed_seconds": 343.411,
       "command": "PATH=/usr/bin:/bin:/usr/local/bin python3 -m unittest discover -s tests -q",
-      "scope": "Full repository pass; the final stale-state/missing-mode overwrite guard is additionally verified by final_mode_tests and the final Docker source export. Exact-commit CI remains authoritative."
+      "scope": "Full suite on preceding revision; final stale-mode and overlapping-finding progress regressions are additionally covered by final targeted tests and the final Docker export. Exact-commit CI remains authoritative."
     },
     "final_mode_tests": {
       "status": "passed",
@@ -105,8 +105,8 @@
     },
     "final_docker_tests": {
       "status": "passed",
-      "tests": 91,
-      "elapsed_seconds": 62.16,
+      "tests": 92,
+      "elapsed_seconds": 62.268,
       "image_id": "sha256:67d6aa23250928dba124ad4ee4edb7b6c4aa33fef37c0ff1a7a6ddc078356665",
       "command": "PYTHONPATH=tests python3 -m unittest test_i2_hardening test_design_recovery test_recovery_limits test_not_dispatched test_recovery_benchmark test_reconciliation -q",
       "source": "Read-only standalone Git export; all changed sources match source_files hashes",
@@ -136,7 +136,7 @@
       "avoidable_interventions": 0,
       "escaped_seeded_defects": 0,
       "report_ref": "docs/evidence/i2-hardening-replay-results.json",
-      "sha256": "fd6cc02bc17160442dc147d5525c5f25a18b051677d2e84de798865ff6e431e7"
+      "sha256": "e970c1e5e2893ebdcccbf95cc46daf6fdd750f315f3bd2848ad5eccfa6ec492b"
     },
     "gitleaks": {
       "status": "passed",
@@ -149,12 +149,12 @@
     "ci": {
       "workflow": ".github/workflows/test.yml",
       "gate": "python3 -m unittest discover -s tests -v",
-      "expected_tests": 916,
+      "expected_tests": 917,
       "authority": "PR check attached to exact pushed commit; workflow permissions/gates unchanged"
     }
   },
   "coverage": {
-    "design_lifetime_progress": "test_design_recovery: oscillating_obligations_do_not_count_as_new_resolutions; diagnosis_report_cannot_be_cited_as_material_progress; empty_adr_before_diagnosis_does_not_reset_streak",
+    "design_lifetime_progress": "test_design_recovery: oscillating_obligations_do_not_count_as_new_resolutions; diagnosis_report_cannot_be_cited_as_material_progress; empty_adr_before_diagnosis_does_not_reset_streak; overlapping_findings_do_not_spend_the_first_real_resolution_early (no unnecessary diagnosis)",
     "registered_design_stops": "test_design_recovery: round_exhaustion_with_progress_policy_is_registered; empty_adr_after_diagnosis_stops_without_another_round; invalid_review_after_diagnosis_is_a_registered_stop_without_next_round; interrupted_architect_after_diagnosis_cannot_reserve_another_round",
     "persistent_mode": "test_i2_hardening.PersistentModeTests: every_phase_refuses_deleted_limits_even_without_autonomous_env; mode_marker_or_state_binding_tampering_refuses; native_state_save_preserves_mode_even_from_a_stale_projection; crash_during_authorization_does_not_reset_counters_on_retry",
     "capture_refusals": "test_i2_hardening.CaptureIntegrityTests: missing/replaced Git, corrupt index, nested Git, backslash/control names; active_writer_during_capture_never_produces_adoptable_source; complete_rejection_after_crash_before_journal_append_is_reconciled",
