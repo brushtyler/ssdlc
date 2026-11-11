@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "issue": 39,
+  "increment": "F2 opt-in native delegation host API",
+  "tested_base_commit": "562e231",
+  "implementation_files": {
+    "ssdlc_feedback_delegation.py": "0cee0a31d2997c3428f3149c269c5703918fbd6a90f3a6dc96cd7d8b44313d4b",
+    "ssdlc_feedback.py": "9ce81a473466739cf2a84211a1a8bf0586c327bee6ff4f9f309ac24f6ecaeeb2",
+    "ssdlc_feedback_roles.py": "0e57f1a2f3b91556191fb8e96842c1561933f1ba6a299f467f26238a20afbd93",
+    "ssdlc_reconciliation.py": "7a9a8bf53ad8d2e505675b75759fa3bb1fdf0e382341ddfeb8128ed728f6083e",
+    "ssdlc_recovery.py": "6b1dbf63a21f1da1eec69fac110c5d176c16ae71288374fd6e74a37c8deaeb96",
+    "ssdlc_scope_amendments.py": "ca0f4ab81f2135ea818518dffe30cbdfcd07822f812f5eb09f9d6963f03ee52d",
+    "ssdlc_transitions.py": "1dc73347fd2cc6c519d6a5edf9be75c7c645091a4dc186ade7b4f3746d412657",
+    "schemas/recovery-limits.schema.json": "749bcb645bdcfbe51c2c6e28b69b6fc6d0f25686465253a0768b5b6df6e3390f",
+    "tests/test_feedback_delegation.py": "a78fa111e69dfdb7ff23788bfc2cc5cfa97743179afe826d9b3b07fefc55cb9e"
+  },
+  "validation_scope": "Implementation and tests unchanged after validation; this evidence and documentation clarification added afterward",
+  "full_suite": {
+    "tests": 1025,
+    "test_seconds": 435.791,
+    "wall_seconds": 436.522,
+    "exit_code": 0
+  },
+  "focused_feedback": {
+    "tests": 69,
+    "seconds": 67.888,
+    "exit_code": 0
+  },
+  "manual_scope_regression": {
+    "tests": 19,
+    "seconds": 38.756,
+    "exit_code": 0
+  },
+  "isolated_a5": {
+    "cases": 12,
+    "failed_cases": 0
+  },
+  "live_provider_calls": 0,
+  "historical_issue22_changed": false,
+  "real_in_contract_tests": [
+    "Native task and accounting journals",
+    "Git checkpoints and isolated worktrees",
+    "Kernel exclusive locks and ownership",
+    "Native transition selector and runtime resolution",
+    "Canonical quota reconciliation and native scheduler repair"
+  ],
+  "simulated_in_contract_tests": [
+    "Provider responses and usage observations",
+    "External controller and Docker observations"
+  ],
+  "native_cases": [
+    "Funded activation preserves history and uses the next normal development attempt",
+    "Six selector/quota publication crash boundaries replay without double spending",
+    "Lost prepare response reuses sealed decisions",
+    "Two admitted descendant generations preserve cumulative quotas and attempt floors",
+    "Execution grant and funded raw proof are separately required",
+    "Quota exhaustion refuses before another consultation",
+    "Environment, writer, lost-lock and prepared runtime mutation refusal",
+    "Grant, historical cost and captured response mutation refusal",
+    "Old-generation adapters cannot dispatch or reconcile against historical accounting",
+    "Invalid/unfunded delegation refuses before native limits initialization"
+  ],
+  "not_implemented": [
+    "Production provider/supervisor adapter and automatic pre-redispatch interception",
+    "Native grant-derived initial recording bootstrap",
+    "Explicit grant upgrade transition for already-admitted I2 profiles",
+    "Sanitized idempotent GitHub projections",
+    "Prerequisite workflow and consultative PO routing"
+  ],
+  "omitted": [
+    "Private runtime paths and bindings",
+    "Raw provider/check logs",
+    "Credentials and local configuration"
+  ]
+}

@@ -440,6 +440,9 @@ def resolve_execution(ticket):
     ticket = Path(ticket)
     store = TransitionStore(ticket / 'execution')
     projection = store.load()
+    from ssdlc_feedback_delegation import ensure_reconciled
+    intent = _read(ticket / 'execution' / projection['transition_id'], 'intent.json')
+    ensure_reconciled(ticket, projection, intent['proposal'])
     pending = ticket / 'execution/pending.json'
     if pending.exists() and _read(ticket / 'execution', 'pending.json')['transition_id'] != projection['transition_id']:
         raise TransitionError('Execution amendment pending; dispatch is fenced')

@@ -29,13 +29,20 @@ class FundedFeedbackRoles:
 
     def _authority(self):
         self.guard()
+        if (self.feedback.ticket / 'execution/active.json').exists():
+            from ssdlc_reconciliation import resolve_execution
+            if resolve_execution(self.feedback.ticket) != self.limits.root:
+                raise FeedbackError('Consultation requires the currently selected native generation')
         raw = _regular(self.limits.root, 'limits/task-journal.jsonl').read_bytes()
         if not raw.endswith(b'\n'):
             raise FeedbackError('Incomplete native accounting requires reconciliation before consultation')
-        authority, _ = self.feedback._read()
+        authority, feedback_state = self.feedback._read()
         envelope, counters = self.limits._load(repair=False)
         p = authority['policy']
-        if (p['limits_sha256'] != digest(envelope)
+        descendants = feedback_state.get('admitted_generations', {}).values()
+        admitted = any(a['limits_sha256'] == digest(envelope)
+                       and a['profile_sha256'] == digest(envelope['policy']) for a in descendants)
+        if (p['limits_sha256'] != digest(envelope) and not admitted
                 or p['ticket'] != envelope['binding']['ticket']
                 or p['controller_sha256'] != digest(execution_contract(envelope['binding']['controller']))
                 or p['expires_at'] > counters['deadline_at']):
@@ -54,7 +61,10 @@ class FundedFeedbackRoles:
             raise FeedbackError('Unknown feedback role')
         with ticket_lock(self.feedback.root / 'consultation.lock'):
             envelope, _ = self._authority()
-            record = self.feedback.inspect()['requests'][request_id]
+            feedback_state = self.feedback.inspect()
+            record = feedback_state['requests'][request_id]
+            from ssdlc_feedback_delegation import require_capacity
+            require_capacity(feedback_state, record, envelope['policy'])
             raw = _regular(self.limits.root, '03-dev/tasks/task-journal.jsonl').read_bytes()
             if not raw.endswith(b'\n'):
                 raise FeedbackError('Incomplete task history before consultation')

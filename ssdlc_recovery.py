@@ -14,6 +14,15 @@ STOPS = {
 }
 
 
+def validate_feedback_profile(policy):
+    if 'feedback_delegation' in policy:
+        from ssdlc_feedback_delegation import validate_grant
+        validate_grant(policy['feedback_delegation'])
+        if ('feedback' not in policy['phase_invocations']
+                or not {'feedback-planner', 'feedback-reviewer'} <= policy['role_invocations'].keys()):
+            raise TaskError('Scope delegation requires explicit funded feedback allowances')
+
+
 class RecoveryStop(DevelopmentBlocked):
     def __init__(self, category, message):
         if category not in STOPS:
@@ -76,6 +85,7 @@ class LimitsStore:
 
     def authorize(self, policy, binding):
         validate_document('recovery-limits', policy)
+        validate_feedback_profile(policy)
         if not all(math.isfinite(policy[k]) for k in ('metered_usd', 'cli_estimate_usd')):
             raise ValueError('Nonfinite limit')
         envelope = {'policy': policy, 'binding': binding}
@@ -131,6 +141,7 @@ class LimitsStore:
             raise DevelopmentBlocked('INTEGRITY', 'Frozen policy missing or unreadable; cannot reset limits') from None
         try:
             validate_document('recovery-limits', envelope['policy'])
+            validate_feedback_profile(envelope['policy'])
             state = self.journal.load() if repair else self.journal.peek()
         except (TaskError, KeyError, TypeError, ValueError):
             raise DevelopmentBlocked('INTEGRITY', 'Frozen limits policy/journal integrity failed') from None

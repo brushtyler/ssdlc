@@ -322,6 +322,9 @@ class FeedbackStore:
             # inheriting the old source's authority. Native reconciliation is
             # mandatory before any consultation/activation on that occurrence.
             unbound = digest(binding) != policy['source_binding_sha256']
+            if unbound and source.get('projection'):
+                from ssdlc_feedback_delegation import admitted
+                unbound = not admitted(state, source)
             counterpart = any(row.get('cause_id') == digest(cause) and row.get('origin') != binding['origin']
                 and row.get('source_root_sha256') == root_sha
                 and row['binding']['parent_selector'] == binding['parent_selector']
@@ -420,6 +423,8 @@ class FeedbackStore:
         state = self.inspect()
         row = state['requests'][identity]
         authority, _ = self._read()
+        if row['status'] == 'APPLIED':
+            return 'APPLIED'
         if row.get('source_reconciliation_required', True):
             return 'OPERATOR_DECISION'
         if row['request']['cause'] == 'REQUIREMENT_CONFLICT':

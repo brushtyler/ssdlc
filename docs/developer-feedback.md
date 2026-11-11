@@ -1,15 +1,15 @@
 # Developer feedback and scope diagnosis
 
 Issue #39 extends A6a. Its implementation is split into three increments. This
-document distinguishes the implemented recording/diagnostic contract from the
-future execution authority; a recorded approval never grants model dispatch.
+document distinguishes recording/diagnosis from separately granted native
+execution authority; a recorded approval never grants model dispatch.
 
 ## Implementation status
 
 | Increment | Contract | Status |
 | --- | --- | --- |
 | F1 | Typed requests, conservative diagnosis, persistent routing/role receipts, ownership and independence metadata | Implemented offline; native inspection commands below |
-| F2 | Funded role adapter, delegated native activation, technical fencing, lineage and cumulative amendment limits | In development: offline funded consultations, accounting bindings and live lock borrowing; delegated activation not enabled |
+| F2 | Funded role adapter, delegated native activation, technical fencing, lineage and cumulative amendment limits | Implemented as an opt-in host API, validated offline; production provider/supervisor wiring remains F3 |
 | F3 | Supervisor recovery integration, sanitized idempotent GitHub projections, prerequisite proposals/return, consultative PO routing | Pending; no new DAG node, product decision or GitHub ticket starts implicitly |
 
 This does not complete #39 or #38. It does not change a running controller or
@@ -172,8 +172,9 @@ tokens** and do not replace `LimitsStore` reservations. A restart encountering
 an intent must reconcile; it cannot launch another model. Returned structured
 responses are retained before interpretation, can be replayed exactly and
 remain capturable after deadline. Conflicting responses stop reconciliation.
-F2 must bind these receipts to real, funded invocations and validate native
-accounting advances before enabling an execution handler.
+The F2 host API binds these receipts to native funded reservations and validates
+the exact accounting advance before delegated activation. Offline tests inject
+role responses; a production provider adapter belongs to F3.
 
 For native sources the ledger retains an accounting anchor. A fresh source after
 consultation can match the original request only when the captured native role
@@ -194,7 +195,10 @@ with explicit named `feedback-*` role caps and the `feedback` phase. They requir
 a host guard and an injected read-only runner; there is no default SDK runner or
 dispatch CLI. A recording grant does not fund them. I2 admission includes the
 feedback phase only when that phase and named feedback roles are explicitly
-present in the exact authorized profile. Existing profiles remain unchanged.
+present in the exact authorized profile. Existing profiles remain unchanged. Consultations and response reconciliation
+resolve the selected native generation before touching accounting; adapters
+bound to an older generation or a pending transition cannot spend or mutate
+its historical ledger.
 
 `FundedFeedbackRoles` persists a recording intent, native reservation and binding
 before invoking the supplied runner. It captures the structured response before
@@ -208,8 +212,8 @@ the recorded consultation accounting advance. Only the native limits journal
 and snapshot may advance. Their prior journal prefix, all existing invocation
 rows, deadline, policy and other counters remain identical; each added invocation
 must match one captured funded response. A changed technical input, unrelated
-call or altered historical cost is refused. This relation still needs to be bound
-into the delegated activation contract; it is not itself activation authority.
+call or altered historical cost is refused. The delegated activation contract binds this relation and both raw funded
+decisions; an accounting advance alone is never activation authority.
 
 Native locks remain nonreentrant. `LockLease` records a live process/thread-owned
 file descriptor, and scope prepare/activate can explicitly borrow that exact
@@ -218,24 +222,96 @@ are refused. Borrowing additionally checks the actual exclusive Linux FLOCK in
 `/proc/self/fdinfo`; an open descriptor whose lock was released or downgraded is
 not ownership. Ordinary ticket locking retains its existing POSIX behavior.
 Borrowing does not attest complete writer fencing and does not
-replace the existing exact operator authorization. The future technical fencing
-contract must additionally prove quiescence and resolved dispatches.
+replace the existing exact operator authorization. The separate delegated contract below additionally observes quiescence and
+refuses unresolved dispatches.
 
-F2 must introduce an explicit execution-delegation contract, not synthesize
-`source_fenced: true` or reuse an unrelated exact operator approval. It must
-prove current ownership/quiescence, resolved dispatches, source/candidate
-freshness, remaining attempts, funded named roles, unchanged cumulative caps
-and a supported compatibility rule. Parent selector, seals, journal prefixes,
-captured patches and historical proofs remain bound as in #37. Role accounting
-advances must not make unrelated source changes look authorized.
+## Explicit native delegation (F2 host API)
 
-Crash/replay must preserve response receipts and match native invocation IDs;
-lost or uncertain outcomes stop before another inference. Ticket/task amendment
-and cumulative file counts are reserved before activation and reconciled with
-the selected generation, never reset on resume. Baseline-test escalation and
-completed-owner revalidation are enforced at actual candidate acceptance, not
-only from the requested filename. Stage changes and alternatives need a bounded
-progress rule, not unconstrained role ping-pong.
+`ssdlc_feedback_delegation.py` reuses native scope preparation/activation and the
+existing scheduler. It does not implement another development engine, a CLI
+that implicitly grants delegation, or an automatic supervisor handler.
+A frozen `recovery-limits` profile may explicitly contain:
+
+```json
+"feedback_delegation": {
+  "schema_version": 1,
+  "capability": "feedback-scope-delegation-v1",
+  "allowed_files": ["src/helper.py"],
+  "max_amendments": 2,
+  "max_amendments_per_task": 1,
+  "max_added_files": 2,
+  "require_strong_independence": true
+}
+```
+
+The profile must separately fund the `feedback` phase and the named
+`feedback-planner` and `feedback-reviewer` roles within its existing total caps.
+Without the explicit grant, funded recording/review still cannot execute an
+amendment. Adding or changing the grant requires the normal exact native profile
+admission; existing authorizations are unchanged. The recording policy remains
+separate and grants recording only. Initial I1-to-I2 admission accepts the
+explicit grant; upgrading an existing I2 profile is outside the scope-only API
+and requires a separate reviewed native profile transition. The recording ledger
+currently uses its separate exact F1 operator initialization. F3 must supply an
+explicit native bootstrap contract before deriving that recording authority
+automatically from the run grant. Delegation never manufactures a human
+`source_fenced` attestation or reinterprets a historical approval.
+
+The host opens `fenced(...)` with the current frozen controller snapshot and
+verification runtime, borrowing or acquiring the real canonical ticket and
+source scheduler locks. Every guard checks process/thread ownership and kernel
+exclusive flock, unchanged controller and Docker image/environment, and absence
+of running Docker writers with overlapping writable mounts. Native inspection
+requires all invocations resolved, a stopped captured failure, clean checkpoint,
+registered evidence, valid completed receipts and exact task/plan bindings.
+Controller/environment migration is deliberately outside this contract.
+These are observations at guard boundaries under the existing trusted-host
+model, not authentication or continuous containment against a hostile host.
+
+`prepare(session, repo, plan, request_id)` requires an eligible independent
+recorded approval, the exact captured funded planner and reviewer responses,
+unchanged technical inputs, and an exact allowed accounting advance. Only target
+additions to the failed task are supported; checks, obligations, DAG, order and
+all other task manifests are unchanged. Only new files or unowned production paths can
+proceed. Baseline/completed tests and completed ownership retain their operator
+or #38 dispositions. Existing candidate confinement and verification remain
+mandatory. Eligible requests exceeding delegation paths/quotas are refused
+before another funded consultation.
+
+The staged proof binds the frozen native grant, recording authority/state,
+original proposal/review, technical subject, captured role accounting and host
+fencing observations. Raw model decisions are not rewritten to accommodate
+their own costs. Activation reobserves live ownership/quiescence, validates the
+same source and prepared runtime, and atomically selects a native generation.
+The semantic proof and distinct authorization contract are validated on replay;
+no generic JSON flag grants dispatch authority.
+
+A selected generation remains fenced at native runtime resolution until the
+canonical ledger durably marks its reserved quota `APPLIED` and admits that
+exact descendant. A crash after selector publication can finish reconciliation
+without a second amendment or provider call, including after expiry; subsequent
+execution still obeys the original deadline. Replays use `fenced(...,
+preparation=...)` to own the original source locks and the sealed preparation.
+Unchanged responses and allowances survive; modified or uncertain state needs
+reconciliation rather than inference. Unselected failed preparations use the
+existing native discard protocol, retaining their history and reserved quota.
+
+A later failed task source can use the recording policy only through a natively
+published, reconciled descendant with the exact admitted profile/envelope and
+projection. Ticket/task amendment counts, file additions, role receipts and
+request ceilings stay canonical across generations; no automatic refunds or
+counter resets occur. Returned costs remain observed usage or null. An accepted
+amendment consumes no developer attempt; a subsequent implementation consumes
+the next normal native attempt and verification gates.
+
+Offline acceptance covers funded activation and repair; six publication/quota
+crash boundaries; lost prepare response; two native descendant generations;
+missing execution grant or funded proof; controller/environment and writer/lock
+guards; prepared candidate and historical-cost/response mutation. External
+controller/Docker observations and model responses are simulated in contract
+tests; journals, Git worktrees, locks, selectors and native scheduler are real.
+The genuine-production-defect fixture separately proves rejection without
+weakening the independent test or redispatching an identical developer attempt.
 
 F3 must connect this handler to the persistent supervisor with the same native
 scheduler, expose precise reasons/next actions, include decision provenance and
