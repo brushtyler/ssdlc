@@ -140,6 +140,7 @@ def _bounded_entrypoint(fn):
         from ssdlc_recovery import LimitsStore
         previous = getattr(_dispatch_local, 'limits', None)
         if previous is not None and previous.root == self.ssdlc_root:
+            previous.guard_entrypoint(fn.__name__)
             return fn(self, *args, **kwargs)
         if ((self.ssdlc_root / 'limits/policy.json').exists()
                 or (self.ssdlc_root / 'limits/policy.json').is_symlink()
@@ -148,11 +149,12 @@ def _bounded_entrypoint(fn):
             with ticket_lock(self.ssdlc_root / 'limits/limits.lock'):
                 envelope, _ = store._load()
             assert_controller(Path(__file__).resolve().parent, envelope['binding']['controller'])
+            store.guard_entrypoint(fn.__name__)
             if envelope['binding']['ticket'] != self.ticket_id:
                 raise TaskError('Limit policy belongs to another ticket')
             if os.environ.get('SSDLC_AUTONOMOUS', '').lower() == 'true':
                 from ssdlc_recovery import validate_launch_caps
-                validate_launch_caps(envelope['policy'], fn.__name__)
+                validate_launch_caps(envelope['policy'], fn.__name__, envelope['binding'].get('allowed_phases'))
             _dispatch_local.limits = store
         elif os.environ.get('SSDLC_AUTONOMOUS', '').lower() == 'true':
             from ssdlc_recovery import RecoveryStop
@@ -206,8 +208,10 @@ def _supervised_dispatch(fn):
         except BaseException as exc:
             _supervision_event('dispatch_finished', dispatch_id=dispatch_id, outcome='raised', exc_type=type(exc).__name__)
             if limits is not None:
-                from ssdlc_recovery import QuiescentTimeout
-                limits.finish(reservation, 'terminated' if isinstance(exc, QuiescentTimeout) else 'uncertain')
+                from ssdlc_recovery import NotDispatched, QuiescentTimeout
+                outcome = ('not_dispatched' if isinstance(exc, NotDispatched) else
+                           'terminated' if isinstance(exc, QuiescentTimeout) else 'uncertain')
+                limits.finish(reservation, outcome)
             raise
         else:
             if limits is not None:
@@ -257,6 +261,7 @@ def _supervised_preflight():
               launch['generation'] == int(env['SSDLC_SUPERVISED_GEN']) and
               launch['state'] == 'published' and not d['launch_revoked'] and not d['cancel'])
         if ok:
+            sup.pinned_root(env['SSDLC_SUPERVISED_REPO'], env['SSDLC_SUPERVISED_TICKET'], d)
             return True
     except (OSError, ValueError, KeyError, TypeError, TaskError, subprocess.SubprocessError, sup.SupervisorIntegrityError):
         pass
@@ -326,8 +331,12 @@ def resume_compatibility(repo_root, ticket, entrypoint, from_phase=None, env=Non
     repo = Path(repo_root).resolve()
     root = repo / '.ssdlc' / ticket
     try:
-        if runtime_root(root) != root:
-            raise TaskError('Continuation is verification-only until I2 authorization')
+        resolved = runtime_root(root)
+        if resolved != root:
+            from ssdlc_reconciliation import authorized
+            if not authorized(root, resolved) or entrypoint != 'run' or from_phase != '03-dev':
+                raise TaskError('Continuation execution requires exact run-from-03 authorization')
+            root = resolved
         path = root / 'state.json'
         state = json.loads(path.read_text()) if path.is_file() else {}
         task_mode = bool(state.get('task_breakdown')) or (os.environ if env is None else env).get('SSDLC_ENABLE_TASK_BREAKDOWN', 'false').lower() == 'true'
@@ -1138,7 +1147,11 @@ class EngineRunner:
         """Execute once; preserve resource evidence even for zero-exit PID failures."""
         limits = getattr(_dispatch_local, 'limits', None)
         if limits is not None:
-            timeout = min(timeout, limits.remaining(), limits._load(repair=False)[0]['policy']['invocation_timeout_seconds'])
+            from ssdlc_recovery import RecoveryStop, NotDispatched
+            try:
+                timeout = min(timeout, limits.remaining(), limits._load(repair=False)[0]['policy']['invocation_timeout_seconds'])
+            except RecoveryStop as exc:
+                raise NotDispatched(exc.category, 'Role command was not launched: ' + str(exc)) from None
         cwd = Path(cwd)
         resource_root = EngineRunner._find_repo_root(cwd)
         docker = cmd[:2] == ["docker", "run"] and "--name" in cmd
@@ -1266,7 +1279,8 @@ class EngineRunner:
         trace_user = f"{project_id}:{ticket_id}:{phase}"
         if not api_key:
             if getattr(_dispatch_local, 'limits', None) is not None:
-                raise DevelopmentBlocked('AUTH_MISSING', 'Bounded API route cannot silently fall back to another provider')
+                from ssdlc_recovery import NotDispatched
+                raise NotDispatched('AUTH_MISSING', 'Bounded API route cannot silently fall back to another provider')
             out, c, ti, to = EngineRunner.call_cli_fallback(
                 model, system_prompt, user_prompt, reasoning_effort=reasoning_effort
             )
@@ -1294,9 +1308,14 @@ class EngineRunner:
 
         limits = getattr(_dispatch_local, 'limits', None)
         if limits is not None and not os.environ.get('SSDLC_SUPERVISED_RUN_ID'):
-            from ssdlc_recovery import RecoveryStop
-            raise RecoveryStop('LIMIT_REACHED', 'Bounded HTTP inference requires the detached supervisor hard deadline')
-        http_timeout = min(300, limits.remaining()) if limits is not None else 300
+            from ssdlc_recovery import NotDispatched
+            raise NotDispatched('LIMIT_REACHED', 'Bounded HTTP inference requires the detached supervisor hard deadline')
+        from ssdlc_recovery import RecoveryStop, NotDispatched
+        try:
+            http_timeout = min(300, limits.remaining()) if limits is not None else 300
+        except RecoveryStop as exc:
+            from ssdlc_recovery import NotDispatched
+            raise NotDispatched(exc.category, 'HTTP inference was not launched: ' + str(exc)) from None
         req = urllib.request.Request(url, data=req_bytes, headers=headers, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=http_timeout) as resp:
@@ -1397,7 +1416,8 @@ class EngineRunner:
     ) -> Tuple[str, int]:
         use_container = EngineRunner._should_spawn_role_container()
         if require_container and not use_container:
-            raise DevelopmentBlocked('ENVIRONMENT_BLOCKED', 'Developer Docker runtime is unavailable; local fallback is refused')
+            from ssdlc_recovery import NotDispatched
+            raise NotDispatched('ENVIRONMENT_BLOCKED', 'Developer Docker runtime is unavailable; local fallback is refused')
         effective_sandbox = "danger-full-access" if (use_container or Path("/.dockerenv").exists()) else sandbox
         cmd = [
             "codex",
@@ -1470,7 +1490,8 @@ class EngineRunner:
 
         use_container = EngineRunner._should_spawn_role_container()
         if require_container and not use_container:
-            raise DevelopmentBlocked('ENVIRONMENT_BLOCKED', 'Developer Docker runtime is unavailable; local fallback is refused')
+            from ssdlc_recovery import NotDispatched
+            raise NotDispatched('ENVIRONMENT_BLOCKED', 'Developer Docker runtime is unavailable; local fallback is refused')
         if use_container:
             cmd = EngineRunner._wrap_in_role_container(
                 cmd,
@@ -1779,8 +1800,13 @@ class SSDLCOrchestrator:
         self.ticket_id = ticket_id
 
         self.ssdlc_root = runtime_root(self.repo_root / ".ssdlc" / ticket_id)
+        self.ticket_lock_path = self.repo_root / '.ssdlc' / ticket_id / 'ticket.lock'
         if self.ssdlc_root != self.repo_root / '.ssdlc' / ticket_id:
-            raise TaskError('I1 continuation permits verification only; use continuation-verify. Model dispatch needs I2 authorization.')
+            from ssdlc_reconciliation import authorized
+            if not authorized(self.repo_root / '.ssdlc' / ticket_id, self.ssdlc_root):
+                raise TaskError('I1 continuation permits verification only; use continuation-verify. Model dispatch needs I2 authorization.')
+            if not (self.ssdlc_root / 'state.json').is_file():
+                raise DevelopmentBlocked('INTEGRITY', 'Authorized execution state is missing; initialization is forbidden')
         self.dir_recon = self.ssdlc_root / "00-recon"
         self.dir_po = self.ssdlc_root / "01-po"
         self.dir_design = self.ssdlc_root / "02-design"
@@ -1823,7 +1849,7 @@ class SSDLCOrchestrator:
                 raise bounce.BounceError('malformed_record')
             # Acquire before loading. Do not initialize or migrate legacy state.
             bounce._safe_path(self.ssdlc_root, 'ticket.lock')
-            with ticket_lock(self.ssdlc_root / 'ticket.lock'):
+            with ticket_lock(getattr(self, 'ticket_lock_path', self.ssdlc_root / 'ticket.lock')):
                 self.state = json.loads(bounce._safe_path(self.ssdlc_root, 'state.json').read_text())
                 initial = bounce.read_evidence(root=self.ssdlc_root, state=self.state,
                     repo=self.repo_root, worktree=self.worktree_dir, phase=phase, attempt=attempt)
@@ -1985,6 +2011,21 @@ class SSDLCOrchestrator:
         self._save_state()
         quality = self._ensure_quality_contract()
         plan_path = self.dir_design / "plan.json"
+        if self.state.get('execution_reconciliation'):
+            from ssdlc_reconciliation import authorized
+            if not authorized(self.repo_root / '.ssdlc' / self.ticket_id, self.ssdlc_root):
+                raise PlanError('Execution reconciliation is not selected')
+            # Admission reviewed the amended plan and retained old design proofs
+            # as history. Do not demand/recreate an old global design gate.
+            meta = self.state.get('artifacts', {}).get('02-design/plan.json')
+            if not meta or not plan_path.is_file() or file_hash(plan_path) != meta['sha256']:
+                raise PlanError('Reconciled plan changed; regeneration is forbidden')
+            plan = json.loads(plan_path.read_text())
+            if plan['ticket_id'] != self.ticket_id or plan['base_commit'] != self.state['base_commit']:
+                raise PlanError('Reconciled plan identity changed')
+            TaskPlanValidator(self.repo_root, (self.dir_po / 'requirements.md').read_text(),
+                              quality, self.ssdlc_root).validate(plan)
+            return plan
         design_session = self.dir_design / 'design-session/session.json'
         if design_session.exists():
             name = '02-design/design-session/session.json'
@@ -2439,7 +2480,7 @@ class SSDLCOrchestrator:
     @_bounded_entrypoint
     def resume_task_planning(self, review_repairs=None, recover_review=False) -> Path:
         """Resume only planning against sealed upstream artifacts; never execute code."""
-        with ticket_lock(self.ssdlc_root / "ticket.lock"):
+        with ticket_lock(getattr(self, "ticket_lock_path", self.ssdlc_root / "ticket.lock")):
             self.state = self._load_or_init_state()
             _resume_plan_refusal(self.repo_root, self.ssdlc_root, self.state, self._task_mode())
             self.state.pop("failure", None)
@@ -2516,9 +2557,22 @@ class SSDLCOrchestrator:
             if not EngineRunner._should_spawn_role_container():
                 raise DevelopmentBlocked('ENVIRONMENT_BLOCKED', 'Candidate verification requires Docker role execution')
             return EngineRunner.run_sandboxed_cmd(argv, cwd, timeout, verification_worktree=workspace)
+        limits = getattr(_dispatch_local, 'limits', None)
+        def verification_budget():
+            if limits is None:
+                return self.check_budget_circuit_breaker()
+            envelope, counters = limits._load(repair=False)
+            limits.check(counters, envelope['policy'], for_dispatch=False)
+        def dispatch_budget():
+            if limits is None:
+                return self.check_budget_circuit_breaker()
+            limits.require_capacity('03-dev', '03-dev')
+        history_authority = limits._load(repair=False)[0]['binding'].get('historical_capture_bindings_sha256') if limits is not None else None
         scheduler = TaskScheduler(
             wt, self.dir_dev / "tasks", plan, quality, context, develop,
-            verify, guard, self.check_budget_circuit_breaker,
+            verify, guard, verification_budget, dispatch_budget=dispatch_budget,
+            historical_task_floors=(limits._load(repair=False)[0]['binding'].get('task_floors', {}) if limits else {}),
+            historical_capture_authority=history_authority,
             max_attempts=(getattr(_dispatch_local, "limits")._load(repair=False)[0]["policy"]["development_attempts"]
                           if getattr(_dispatch_local, "limits", None) is not None else int(os.environ.get("SSDLC_MAX_DEV_RETRIES", "3"))),
             isolate_candidates=True,
@@ -2860,7 +2914,7 @@ class SSDLCOrchestrator:
 
     def resume_po_validation(self) -> Path:
         """Repair/validate recorded PO syntax only; never call a provider."""
-        with ticket_lock(self.ssdlc_root / 'ticket.lock'):
+        with ticket_lock(getattr(self, 'ticket_lock_path', self.ssdlc_root / 'ticket.lock')):
             self.state = self._load_or_init_state()
             if (not self._task_mode() or self.state.get('current_phase') not in ('01-po', '02-design')
                     or self.worktree_dir.exists() or (self.dir_design / 'plan.json').exists()
@@ -3170,7 +3224,7 @@ class SSDLCOrchestrator:
     @_bounded_entrypoint
     def resume_pair_design(self, round_limit=None, import_legacy=None) -> Tuple[Path, Path]:
         """Resume design only against sealed upstream artifacts; never execute code."""
-        with ticket_lock(self.ssdlc_root / 'ticket.lock'):
+        with ticket_lock(getattr(self, 'ticket_lock_path', self.ssdlc_root / 'ticket.lock')):
             self.state = self._load_or_init_state()
             _resume_design_refusal(self.repo_root, self.ssdlc_root, self.state, self._task_mode(), read_git=git)
             self.state.update(status='IN_PROGRESS', current_phase='02-design', current_step='pair-design')
@@ -4596,7 +4650,9 @@ To **REJECT** and send feedback back to the team:
         tier: str = "auto",
         from_phase: str = "00-recon",
     ) -> Path:
-        with ticket_lock(self.ssdlc_root / "ticket.lock"):
+        if self.ssdlc_root != self.repo_root / '.ssdlc' / self.ticket_id and from_phase != '03-dev':
+            raise DevelopmentBlocked('SCOPE_REQUIRED', 'Reconciled execution must resume from 03-dev')
+        with ticket_lock(getattr(self, "ticket_lock_path", self.ssdlc_root / "ticket.lock")):
             # Reload state after acquiring the lock, not from a potentially stale constructor.
             self.state = self._load_or_init_state()
             if self._task_mode():
@@ -4738,7 +4794,7 @@ To **REJECT** and send feedback back to the team:
         return self.compile_evidence_pack(ready_for_signoff=passed_all)
 
     def approve_and_merge(self) -> None:
-        with ticket_lock(self.ssdlc_root / "ticket.lock"):
+        with ticket_lock(getattr(self, "ticket_lock_path", self.ssdlc_root / "ticket.lock")):
             self.state = self._load_or_init_state()
             self._approve_and_merge()
 
@@ -5116,6 +5172,9 @@ def _supervised_exit_code(value) -> int:
 
 def main(argv=None) -> int:
     words = sys.argv[1:] if argv is None else argv
+    if words and words[0].startswith('continuation-limits-'):
+        from ssdlc_reconciliation import main as reconciliation_main
+        return reconciliation_main(words)
     if words and words[0].startswith('continuation-'):
         from ssdlc_continuations import main as continuation_main
         return continuation_main(words)

@@ -320,3 +320,11 @@ Completion is demonstrated, not inferred from merged schemas or individual unit 
 - [ ] The C corpus meets its minimum with zero seeded escapes and passing known-good controls.
 - [ ] Issue #4 delivers a ready PR from the authorized profile without operator state repair; public evidence matches the actual candidate.
 - [ ] Existing task-routing milestones remain tracked separately; this plan's completion does not imply advisory, parallel execution or auto-merge is shipped.
+
+Issue #27 implementation and operator contract: `docs/historical-reconciliation.md`.
+Its offline admission/recovery replay runs in existing CI discovery. Review and
+merge precede the real #22 SSDLC rollout; that rollout requires a concrete
+reconciled candidate and separate exact limit authorization. Measure calls,
+attempts, duplicate work, model/check/elapsed/operator-wait time and required/
+avoidable interventions against the preserved historical baseline. New-run I2
+hardening remains separately tracked in issue #29.

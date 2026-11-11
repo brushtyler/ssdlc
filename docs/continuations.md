@@ -54,6 +54,9 @@ Keep all input/proposal/runtime files private; they can contain prompts and logs
 4. Obtain an independent review of that subject. Store an envelope with
    `subject_sha256`, a nonempty `reviewer` attribution and `report` containing the
    existing structured task-plan review. An `APPROVED` string alone is invalid.
+   Any host-calculated scope expansion must also be declared in the envelope's
+   `scope_diff`, and the exact diff digest must be explicitly authorized at
+   activation as `scope_diff_sha256`. Protected paths remain forbidden.
    Prior planning assessments remain review history. I1 consumes this supplied
    review without allocating a model call or a new review allowance.
 5. `continuation-prepare` takes the same arguments plus `--review review.json`.
@@ -126,7 +129,7 @@ single verified imported task does not grant ticket/global readiness.
 
 | Interruption | Result / recovery |
 | --- | --- |
-| Before preparation is complete | Original run recoverable; incomplete generation unselected, no models/attempts charged; prepare again with explicit inputs |
+| Before preparation is complete | Original run recoverable; incomplete generation unselected; use native `continuation-discard` to archive/remove tracked resources before preparing again |
 | After complete preparation | Private sealed inputs can be reviewed and activated by path; ordinary dispatch remains fenced |
 | During intent/payload staging | No selected partial generation; repeat the exact activation, validating existing staged bytes |
 | After atomic selection, before command returns | Exact activation retry returns the same projection, including after verification progresses |
@@ -137,7 +140,7 @@ The old supervisor record remains the history of its pinned old controller. I1
 verification is a dedicated foreground command; it does not resume the old
 supervisor process or silently redirect its evidence. Use the command output and
 new `runtime-generations/<id>/state.json` / `03-dev/tasks/task-journal.jsonl` for
-this verification. Further autonomous execution remains I2 work.
+this verification. Cumulative I2 admission is described in [historical reconciliation](historical-reconciliation.md); it starts a new pinned execution generation, never redirects the old supervisor.
 
 Issue #22's real run has only been inventoried read-only while implementing I1.
 Its preserved T01 source must still be reconciled with the latest merged base,
