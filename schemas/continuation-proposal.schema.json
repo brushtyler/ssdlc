@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "I1 pre-checkpoint import proposal", "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "compatibility", "transition_id", "old_controller_sha256", "new_controller_sha256", "projection_sha256", "source_files", "artifacts"],
+  "properties": {
+    "schema_version": {"const": 1}, "compatibility": {"const": "pre-checkpoint-import-v1"},
+    "transition_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+    "old_controller_sha256": {"$ref": "#/$defs/sha"}, "new_controller_sha256": {"$ref": "#/$defs/sha"},
+    "projection_sha256": {"$ref": "#/$defs/sha"},
+    "source_files": {"type": "object", "minProperties": 1, "additionalProperties": {"$ref": "#/$defs/sha"}},
+    "artifacts": {"type": "object", "additionalProperties": false, "required": ["recipe.json", "runtime-seal.json"],
+      "properties": {"recipe.json": {"$ref": "#/$defs/sha"}, "runtime-seal.json": {"$ref": "#/$defs/sha"}}}
+  },
+  "$defs": {"sha": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}
+}

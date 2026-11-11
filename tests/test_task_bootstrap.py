@@ -1053,6 +1053,11 @@ class OrchestratorBootstrapTests(RepositoryTests):
                     self.assertEqual(payload['plan'], planned)
                     self.assertIn('execution_contract', payload['context'])
                     self.assertEqual(payload['review_history'], [])
+                    impact = payload['fixture_impact']
+                    self.assertEqual(impact['changed_paths'], ['app.py'])
+                    self.assertFalse(impact['complete_dependency_proof'])
+                    ref = '02-design/task-planning/fixture-impact-' + digest(planned) + '.json'
+                    self.assertEqual(orch.state['artifacts'][ref]['sha256'], file_hash(orch.ssdlc_root / ref))
                     out = json.dumps({'verdict': 'APPROVED', 'findings': []})
                 return out, 0, 0, 0, 'test-trace'
             def dispatch(role, *args, **kwargs):

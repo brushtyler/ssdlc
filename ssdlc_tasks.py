@@ -1443,8 +1443,13 @@ class TaskScheduler:
             raise TaskError('Task exceeded approved manifest; scope reconciliation is required')
         for path in changed:
             confined(self.wt, path)
-        blocker = developer_blocker(result['output'])
-        if result['exit_code'] != 0:
+        imported = result.get('termination') == 'imported'
+        if imported and record.get('import_proposal_sha256') != result.get('origin_proposal_sha256'):
+            raise DevelopmentBlocked('INTEGRITY', 'Imported candidate has no bound transition authority')
+        blocker = None if imported else developer_blocker(result['output'])
+        if imported:
+            record['completion_confirmation'] = 'unconfirmed_import'
+        if not imported and result['exit_code'] != 0:
             blocker = blocker or 'DEVELOPER_INVOCATION'
         if not changed and not blocker:
             raise TaskError('No diff: independent evidence of an already-satisfied task is required')
@@ -1508,11 +1513,14 @@ class TaskScheduler:
             log_retry_reason('task-dev ' + category, diagnostic_excerpt(result['output'], 3000), path)
             raise DevelopmentBlocked(category, f'Task {task["task_id"]}; evidence: {attempt_dir}')
 
-    def run(self, ordered: list[dict], feedback: str = '', *, recover_protocol_task=None) -> dict:
+    def run(self, ordered: list[dict], feedback: str = '', *, recover_protocol_task=None,
+            verify_captured_only=False) -> dict:
         with ticket_lock(self.directory / 'scheduler.lock'):
-            return self._run(ordered, feedback, recover_protocol_task=recover_protocol_task)
+            return self._run(ordered, feedback, recover_protocol_task=recover_protocol_task,
+                             verify_captured_only=verify_captured_only)
 
-    def _run(self, ordered: list[dict], feedback: str, *, recover_protocol_task=None) -> dict:
+    def _run(self, ordered: list[dict], feedback: str, *, recover_protocol_task=None,
+             verify_captured_only=False) -> dict:
         if any(t['kind'] != 'task' or t['verification']['mode'] != 'automated' for t in ordered):
             raise TaskError('Bootstrap supports automated tasks only; subgoals/review_only require later increments')
         self.guard()
@@ -1548,12 +1556,22 @@ class TaskScheduler:
             if record['status'] == 'COMMIT_INTENT':
                 self._complete_intent(task, record)
             elif self.isolate_candidates and record['status'] == 'DISPATCH_RESERVED':
+                if verify_captured_only:
+                    raise DevelopmentBlocked('ENVIRONMENT_BLOCKED', 'Verification-only continuation cannot dispatch a reserved developer')
                 self._resume_reserved(task, record)
             elif self.isolate_candidates and record['status'] in ('RUNNING', 'CANDIDATE_CAPTURED', 'VERIFYING'):
                 self._resume_capture(task, record)
             elif self.isolate_candidates and record['status'] == 'FAILED' and self._changed():
                 self._reconcile_failed_capture(task, record)
         self._assert_clean()
+        if verify_captured_only:
+            if feedback or recover_protocol_task is not None:
+                raise TaskError('Verification-only continuation cannot change execution scope')
+            for task in ordered:
+                record = state['tasks'][task['task_id']]
+                if record['status'] == 'COMPLETED' and not self._evidence_valid(record, task['task_id']):
+                    raise TaskError('Completed continuation evidence changed')
+            return copy.deepcopy(state)
         if feedback:
             # Targeted bounce belongs to Step 3. Never silently skip rejected completed tasks.
             raise TaskError('Review feedback requires explicit invalidation, unavailable in the bootstrap scheduler')

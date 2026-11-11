@@ -1008,3 +1008,6 @@ larger orchestration epic; #4 GitHub intake, publishing and delivery; #14 comple
 provider accounting and quotas. Auto-merge, automatic roadmap advancement and
 unsupported recovery are unavailable. The $10 accounting cap and budget circuit
 breaker remain enforced.
+
+Stopped pre-capture task runs can use the explicit [I1 continuation workflow](docs/continuations.md).
+It imports reviewed source for fresh verification and keeps model dispatch disabled until I2.
