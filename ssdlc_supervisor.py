@@ -784,6 +784,8 @@ def public(d, status=None, reason=None):
 def exit_code(result):
     if result.get('status_reason') == 'legacy_not_executable':
         return 23
+    if result.get('status_reason') == 'bootstrap_ineligible':
+        return 24
     return {'operator_wait': 10, 'blocked': 11, 'reconcile': 11, 'failed': 12,
             'already_running': 13, 'locked': 13, 'unsupported': 14}.get(result['status'], 0)
 
@@ -960,7 +962,7 @@ def start(args, clock=None, fault=None):
                 return public(existing, 'already_running', 'already_running')
     check = compatibility(a, build_project_env(a['repo'], os.environ))
     if not check['ok']:
-        if check['code'] in {'legacy_not_executable', 'no_such_run'}:
+        if check['code'] in {'legacy_not_executable', 'no_such_run', 'bootstrap_ineligible'}:
             return public({}, 'unsupported', check['code'])
         return refusal(store)
     store.fault.hit('lock.before_acquire')
@@ -1062,7 +1064,7 @@ def resume(args, clock=None, fault=None):
     store = RunStore(a['repo'], a['ticket'], a.get('run_id'), clock, fault)
     check = compatibility(a, build_project_env(a['repo'], os.environ))
     if not check['ok']:
-        if check['code'] in {'legacy_not_executable', 'no_such_run'}:
+        if check['code'] in {'legacy_not_executable', 'no_such_run', 'bootstrap_ineligible'}:
             return public({}, 'unsupported', check['code'])
         return refusal(store)
     old = store.read() if store.run_id else store.current()

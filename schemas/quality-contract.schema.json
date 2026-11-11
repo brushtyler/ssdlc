@@ -211,6 +211,50 @@
       },
       "minItems": 0,
       "uniqueItems": true
+    },
+    "bootstrap": {
+      "type": "object",
+      "properties": {
+        "profile_id": {
+          "enum": [
+            "python-unittest",
+            "python-pytest"
+          ]
+        },
+        "profile_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "policy_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "initial_commit": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40,64}$"
+        },
+        "initial_tree": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40,64}$"
+        },
+        "window_tasks": {
+          "type": "integer",
+          "const": 1
+        },
+        "baseline_status": {
+          "const": "absent"
+        }
+      },
+      "required": [
+        "profile_id",
+        "profile_sha256",
+        "policy_sha256",
+        "initial_commit",
+        "initial_tree",
+        "window_tasks",
+        "baseline_status"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [

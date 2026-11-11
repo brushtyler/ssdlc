@@ -44,6 +44,7 @@ import ssdlc_gate_reports as candidate_reports
 
 OPS_DOCS_TEXT_CAP = 60000
 OPS_DOCS_COVERAGE_NOTE = "When full_audit_coverage_permitted is false, you must not claim complete audit coverage."
+import ssdlc_bootstrap as bootstrap
 import ssdlc_bounce as bounce
 from ssdlc_bounce import request_identity
 from ssdlc_catalogues import CatalogueError, requirement_catalogue
@@ -393,11 +394,48 @@ def execution_compatibility(repo_root, ticket, command):
     return result
 
 
+def _discover_checks(repo):
+    repo = Path(repo)
+    checks = []
+    test_files = list((repo / "tests").rglob("test_*.py"))
+    if test_files:
+        pytest_style = any(re.search(r"^def test_|^import pytest|^from pytest", p.read_text(), re.M) for p in test_files)
+        argv = ["python3", "-m", "pytest", "tests"] if pytest_style else ["python3", "-m", "unittest", "discover", "-s", "tests"]
+        checks.append({"check_id": "CHECK-TESTS", "argv": argv, "cwd": ".", "timeout_sec": 300, "kind": "test", "required": True})
+    package = repo / "package.json"
+    if package.exists():
+        scripts = json.loads(package.read_text()).get("scripts", {})
+        for script, kind in (("test", "test"), ("lint", "lint"), ("typecheck", "types")):
+            if script in scripts:
+                checks.append({"check_id": f"CHECK-NPM-{script.upper()}", "argv": ["npm", "run", script], "cwd": ".", "timeout_sec": 300, "kind": kind, "required": True})
+    pyproject = ((repo / "pyproject.toml").read_text() if (repo / "pyproject.toml").exists() else "")
+    for marker, name, argv, kind in (
+        ("[tool.ruff", "RUFF", ["python3", "-m", "ruff", "check", "."], "lint"),
+        ("[tool.mypy", "MYPY", ["python3", "-m", "mypy", "."], "types"),
+    ):
+        if marker in pyproject:
+            checks.append({"check_id": f"CHECK-{name}", "argv": argv, "cwd": ".", "timeout_sec": 300, "kind": kind, "required": True})
+    return checks
+
+
 def startup_preflight(repo_root, ticket, command, args=None):
     result = execution_compatibility(repo_root, ticket, command)
     phase = args.get('from_phase') if isinstance(args, dict) else getattr(args, 'from_phase', None)
     if result['cls'] == 'pre_execution' and command in {'run', 'start'} and phase not in {None, '00-recon'}:
         result = dict(ok=False, cls='legacy', code='legacy_not_executable', reason='execution_not_started')
+    if result['ok'] and result['cls'] in {'new_run', 'pre_execution'}:
+        sealed = Path(repo_root) / '.ssdlc' / str(ticket) / '00-recon/quality-contract.json'
+        if not sealed.exists():
+            try:
+                profile = bootstrap.load_profile(Path(repo_root))
+                if profile is not None:
+                    base = git(Path(repo_root), 'rev-parse', 'HEAD')
+                    state_path = Path(repo_root) / '.ssdlc' / str(ticket) / 'state.json'
+                    if state_path.exists():
+                        base = json.loads(state_path.read_text())['base_commit']
+                    result['bootstrap'] = bootstrap.decide(Path(repo_root), base, profile)
+            except bootstrap.BootstrapError as exc:
+                return dict(ok=False, cls=result['cls'], code='bootstrap_ineligible', reason=exc.code)
     return result
 
 
@@ -2041,6 +2079,8 @@ class SSDLCOrchestrator:
             return json.loads(target.read_text())
         if "00-recon/quality-contract.json" in self.state.get("artifacts", {}):
             raise PlanError("Registered quality contract disappeared; refusing regeneration")
+        profile = bootstrap.load_profile(self.repo_root)
+        binding = bootstrap.decide(self.repo_root, self.state['base_commit'], profile) if profile is not None else None
         if (git(self.repo_root, "rev-parse", "HEAD") != self.state["base_commit"]
                 or git(self.repo_root, "status", "--porcelain")):
             raise PlanError("Create a clean, committed baseline before capturing the quality contract")
@@ -2061,30 +2101,16 @@ class SSDLCOrchestrator:
                 sources.append({"source_id": source_id, "path": relative, "sha256": sha256_file(path)})
                 standards.append({"standard_id": f"STD-{index + 1}", "description": path.read_text(),
                                   "source_refs": [source_id], "scope": ["*"]})
-            checks = []
-            test_files = list((self.repo_root / "tests").rglob("test_*.py"))
-            if test_files:
-                pytest_style = any(re.search(r"^def test_|^import pytest|^from pytest", p.read_text(), re.M) for p in test_files)
-                argv = ["python3", "-m", "pytest", "tests"] if pytest_style else ["python3", "-m", "unittest", "discover", "-s", "tests"]
-                checks.append({"check_id": "CHECK-TESTS", "argv": argv, "cwd": ".", "timeout_sec": 300, "kind": "test", "required": True})
-            package = self.repo_root / "package.json"
-            if package.exists():
-                scripts = json.loads(package.read_text()).get("scripts", {})
-                for script, kind in (("test", "test"), ("lint", "lint"), ("typecheck", "types")):
-                    if script in scripts:
-                        checks.append({"check_id": f"CHECK-NPM-{script.upper()}", "argv": ["npm", "run", script], "cwd": ".", "timeout_sec": 300, "kind": kind, "required": True})
-            pyproject = self._read_optional(self.repo_root / "pyproject.toml", "")
-            for marker, name, argv, kind in (
-                ("[tool.ruff", "RUFF", ["python3", "-m", "ruff", "check", "."], "lint"),
-                ("[tool.mypy", "MYPY", ["python3", "-m", "mypy", "."], "types"),
-            ):
-                if marker in pyproject:
-                    checks.append({"check_id": f"CHECK-{name}", "argv": argv, "cwd": ".", "timeout_sec": 300, "kind": kind, "required": True})
+            checks = _discover_checks(self.repo_root)
+            if binding:
+                checks = bootstrap.profile_checks(binding["profile_id"])
             if not checks:
                 raise PlanError("No project checks discovered. Configure .ssdlc/quality-contract.json before starting task execution")
             contract = {"schema_version": "1.0", "contract_revision": 1, "base_commit": self.state["base_commit"],
                         "sources": sources, "standards": standards, "checks": checks, "baseline": [],
                         "limitations": ["Automatic discovery covers Python tests, configured Ruff/Mypy and npm test/lint/typecheck; provide an explicit contract for other tools."], "exceptions": []}
+        if binding:
+            contract['bootstrap'] = binding
         for check in contract["checks"]:
             if check.get("required"):
                 check["candidate_proof"] = True
@@ -2093,6 +2119,10 @@ class SSDLCOrchestrator:
         contract.setdefault("limitations", []).append(
             "QA shell commands are recorded separately and are not typed-check equivalents")
         validate_document("quality-contract", contract)
+        if binding:
+            atomic_json(target, contract)
+            self.record_artifact("00-recon/quality-contract.json", target)
+            return contract
         baseline_dir = self.dir_recon / "baseline"
         baseline_dir.mkdir(exist_ok=True)
         print(f"[baseline] Running {len(contract['checks'])} initial check(s) before 00-recon; "
@@ -4753,7 +4783,7 @@ def _foreground_main(argv=None) -> int:
                 print(legacy_message(args.ticket), file=sys.stderr)
             else:
                 print(check['code'], file=sys.stderr)
-            return 23
+            return 24 if check['code'] == 'bootstrap_ineligible' else 23
     repo_path = Path(getattr(args, 'repo', '.')).resolve()
     if args.subcommand in {"run", "start", "plan", "design"} and getattr(args, "limits_profile", None):
         from ssdlc_recovery import LimitsStore
@@ -4885,7 +4915,7 @@ def main(argv=None) -> int:
             LEGACY_COUNTERS['legacy_refusals'] += 1
             logging.getLogger(__name__).warning('legacy-refusal ticket=%s command=%s', word_value('--ticket'), words[0])
             print(legacy_message(word_value('--ticket')), file=sys.stderr)
-        return 23
+        return 24 if check['code'] == 'bootstrap_ineligible' else 23
     code, exc_type = 1, None
     try:
         if not _supervised_preflight():

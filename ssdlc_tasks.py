@@ -431,7 +431,11 @@ class TaskPlanValidator:
         for check in self.quality['checks']:
             self._check_command(check)
         baseline_ids = [b['check_id'] for b in self.quality['baseline']]
-        if set(baseline_ids) != {c['check_id'] for c in self.quality['checks']} or len(baseline_ids) != len(set(baseline_ids)):
+        bootstrap = self.quality.get('bootstrap')
+        absent = (not baseline_ids and bootstrap is not None
+                  and bootstrap.get('initial_commit') == self.quality['base_commit']
+                  and bootstrap.get('baseline_status') == 'absent')
+        if not absent and (set(baseline_ids) != {c['check_id'] for c in self.quality['checks']} or len(baseline_ids) != len(set(baseline_ids))):
             raise PlanError('Baseline must cover every quality check once')
         if any(b['exit_code'] != 0 for b in self.quality['baseline']):
             raise PlanError('Bootstrap requires a passing baseline; regression baselines need Step 3 policy')
