@@ -43,6 +43,19 @@ def source_binding(root, refs):
 def validate_authorization(authorization, proposal):
     expected = {'schema_version', 'transition_id', 'proposal_sha256', 'authorized',
                 'source_fenced', 'old_controller_sha256', 'new_controller_sha256'}
+    if not isinstance(authorization, dict):
+        raise TransitionError('Transition requires exact, fenced operator authorization')
+    if proposal.get('authorization_contract') == 'cumulative-limits-v1':
+        expected |= {'profile_sha256', 'decisions_sha256', 'accept_unknown_history', 'authorize_extensions'}
+        if authorization.get('profile_sha256') != proposal.get('profile_sha256'):
+            raise TransitionError('Authorization does not bind the effective profile')
+        from ssdlc_historical import validate_decisions
+        validate_decisions(authorization, proposal)
+    scope = proposal.get('scope_diff', {})
+    if any(item.get('added') for item in scope.values()):
+        expected = expected | {'scope_diff_sha256'}
+        if authorization.get('scope_diff_sha256') != digest(scope):
+            raise TransitionError('Scope expansion requires its exact explicit authorization')
     if (not isinstance(authorization, dict) or set(authorization) != expected
             or type(authorization['schema_version']) is not int or authorization['schema_version'] != 1
             or authorization['authorized'] is not True or authorization['source_fenced'] is not True
@@ -207,11 +220,18 @@ class TransitionStore:
 def runtime_root(ticket_root):
     """Resolve only an explicitly published generation; legacy paths stay put."""
     ticket_root = Path(ticket_root)
+    if (ticket_root / 'execution/active.json').exists():
+        from ssdlc_reconciliation import resolve_execution
+        return resolve_execution(ticket_root)
+    if (ticket_root / 'execution/pending.json').exists():
+        raise TransitionError('Execution reconciliation is pending; dispatch and verification are fenced')
     store = ticket_root / 'continuations'
     if not store.exists():
         return ticket_root
     if not (store / 'active.json').exists():
-        raise TransitionError('Continuation preparation is pending; execution is fenced')
+        if (store / 'pending.json').exists():
+            raise TransitionError('Continuation preparation is pending; execution is fenced')
+        return ticket_root
     projection = TransitionStore(store).load()
     identity = projection.get('transition_id', '')
     if not re.fullmatch(r'[a-f0-9]{32}', identity):

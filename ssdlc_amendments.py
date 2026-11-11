@@ -28,7 +28,21 @@ def ancestors(plan):
     return result
 
 
-def validate_amendment(old, new, report, validator, requirements, quality, *, lineage=None, history=()):
+
+def scope_diff(old, new, lineage=None):
+    """Host-owned literal path changes; a reviewer digest is not a scope diff."""
+    before = {t['task_id']: set(t.get('target_files', [])) for t in old['tasks']}
+    after = {t['task_id']: set(t.get('target_files', [])) for t in new['tasks']}
+    mapping = lineage or {tid: [tid] for tid in before}
+    inherited = {tid: set() for tid in after}
+    for tid, targets in mapping.items():
+        for target in targets:
+            if target in inherited:
+                inherited[target].update(before.get(tid, set()))
+    return {tid: {'added': sorted(paths - inherited[tid]), 'removed': sorted(inherited[tid] - paths)}
+            for tid, paths in sorted(after.items()) if paths != inherited[tid]}
+
+def validate_amendment(old, new, report, validator, requirements, quality, *, lineage=None, history=(), declared_scope=None):
     """Require reviewed obligations and preserve ordering through merges/splits.
 
     Lineage maps each old node to its replacement nodes. This validates DAG
@@ -55,11 +69,16 @@ def validate_amendment(old, new, report, validator, requirements, quality, *, li
                 for prerequisite in lineage[parent]:
                     if prerequisite != replacement and prerequisite not in after[replacement]:
                         raise PlanError('Amendment lost required transitive ordering')
+    changes = scope_diff(old, new, lineage)
+    if any(change['added'] for change in changes.values()) and declared_scope != changes:
+        raise PlanError('Scope expansion must be explicitly declared with the exact host scope diff')
+    if declared_scope is not None and declared_scope != changes:
+        raise PlanError('Declared scope differs from the host scope diff')
     assessment = validate_plan_review(report, new, requirements, list(history), quality)
     if assessment['verdict'] != 'APPROVED':
         raise PlanError('Amendment has unresolved independent review findings')
     return {'old_plan_sha256': digest(old), 'new_plan_sha256': digest(new),
-            'assessment': assessment, 'lineage': lineage,
+            'assessment': assessment, 'lineage': lineage, 'scope_diff': changes,
             'ordered_task_ids': [t['task_id'] for t in ordered]}
 
 

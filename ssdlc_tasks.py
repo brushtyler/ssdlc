@@ -545,7 +545,8 @@ class TaskScheduler:
                  context: dict[str, str], developer: Callable, verifier: Callable,
                  guard: Callable = lambda: None, budget: Callable = lambda: None,
                  max_attempts: int = 3, isolate_candidates: bool = False,
-                 runtime_identity: dict | None = None, recover_timeouts: bool = False):
+                 runtime_identity: dict | None = None, recover_timeouts: bool = False,
+                 historical_capture_authority=None, dispatch_budget=None, historical_task_floors=None):
         self.wt = worktree
         self.directory = directory
         self.plan = plan
@@ -558,6 +559,9 @@ class TaskScheduler:
         self.max_attempts = max_attempts
         self.isolate_candidates = isolate_candidates
         self.recover_timeouts = recover_timeouts
+        self.historical_task_floors = copy.deepcopy(historical_task_floors or {})
+        self.historical_capture_authority = historical_capture_authority
+        self.dispatch_budget = dispatch_budget or budget
         self.runtime_identity = copy.deepcopy(runtime_identity or {})
         if max_attempts < 1:
             raise PlanError('max_attempts must be positive')
@@ -568,6 +572,17 @@ class TaskScheduler:
         self.journal.append(event, self.state)
 
     def _assert_candidate_runtime(self, state):
+        for tid, floor in self.historical_task_floors.items():
+            record = state['tasks'][tid]
+            if record['attempts'] < floor['attempts']:
+                raise DevelopmentBlocked('INTEGRITY', 'Historical development attempts reset')
+            for key in ('failed_attempts', 'capture_verifications', 'reconciliation_required'):
+                prefix = floor.get(key, [])
+                if record.get(key, [])[:len(prefix)] != prefix:
+                    raise DevelopmentBlocked('INTEGRITY', 'Historical scheduler recovery allowance reset')
+        historical = state.get('historical_capture_bindings')
+        if historical and (self.historical_capture_authority is None or digest(historical) != self.historical_capture_authority):
+            raise DevelopmentBlocked('INTEGRITY', 'Historical capture bindings have no transition authority')
         if state.get('bounded_recovery', 0) != int(self.recover_timeouts):
             raise DevelopmentBlocked('INTEGRITY', 'Bounded recovery mode changed; explicit migration required')
         mode = state.get('candidate_isolation', 0)
@@ -1297,6 +1312,13 @@ class TaskScheduler:
                   + ('\nPREVIOUS FAILURE:\n' + record.get('failure', '') if repair is None else ''))
 
     def _capture_binding(self, task, record):
+        historical = self.state.get('historical_capture_bindings', {}).get(task['task_id'], {}).get(str(record['attempts']))
+        if historical is not None:
+            if self.historical_capture_authority is None or digest(self.state['historical_capture_bindings']) != self.historical_capture_authority:
+                raise DevelopmentBlocked('INTEGRITY', 'Unbound historical capture provenance')
+            if record['start_commit'] != historical['base'] or record['invocation_id'] != historical['invocation_id']:
+                raise DevelopmentBlocked('INTEGRITY', 'Historical capture reservation identity changed')
+            return copy.deepcopy(historical)
         return {'task_id': task['task_id'], 'attempt': record['attempts'],
                 'base': record['start_commit'], 'inputs_sha256': self.state['inputs_sha256'],
                 'protected_sha256': digest(record['protected_snapshot']), 'runtime_version': 1,
@@ -1324,7 +1346,7 @@ class TaskScheduler:
         """A reserved invocation has never crossed TASK_STARTED/provider dispatch."""
         self._assert_tree()
         self.guard()
-        self.budget()
+        self.dispatch_budget()
         if self._ignored() != self.state['ignored_paths']:
             raise TaskError('Ignored source changed before reserved dispatch')
         if self._changed():
@@ -1349,6 +1371,7 @@ class TaskScheduler:
 
     def _capture_developer(self, task, record, prompt, attempt_dir):
         from ssdlc_candidates import CandidateStore, CandidateError, checkout, git_identity, inventory, overlay
+        from ssdlc_recovery import NotDispatched
         workspace = attempt_dir / 'developer-workspace'
         try:
             baseline = checkout(self.wt, workspace, record['start_commit'])
@@ -1360,6 +1383,10 @@ class TaskScheduler:
             try:
                 result = self.developer(task, record['attempts'], prompt, workspace)
                 result = dict(result, termination='returned')
+            except NotDispatched:
+                record['status'] = 'DISPATCH_RESERVED'
+                self._save('DISPATCH_PROVEN_NOT_STARTED')
+                raise
             except subprocess.TimeoutExpired as exc:
                 from ssdlc_recovery import QuiescentTimeout
                 if not self.recover_timeouts or not isinstance(exc, QuiescentTimeout):
@@ -1522,6 +1549,7 @@ class TaskScheduler:
         prior = record.setdefault('failed_attempts', [])
         outcomes = lambda checks: [(c['check_id'], c['exit_code'], c['empty_suite']) for c in checks]
         if (category == 'CHECK_FAILURE' and prior and prior[-1]['category'] == 'CHECK_FAILURE'
+                and prior[-1]['attempt'] < attempt
                 and prior[-1]['tree'] == tree and outcomes(prior[-1]['checks']) == outcomes(results)):
             candidate['category'] = category = 'REPAIR_STALLED'
         prior.append(candidate)
@@ -1608,6 +1636,8 @@ class TaskScheduler:
             raise TaskError('Unknown task for protocol recovery')
         for task in pending:
             record = state['tasks'][task['task_id']]
+            if record.get('reconciliation_required'):
+                raise DevelopmentBlocked(record['reconciliation_required'][-1], 'Historical attempt needs explicit reconciliation')
             recovering = task['task_id'] == recover_protocol_task
             if record.get('failed_attempts') and record['failed_attempts'][-1]['category'] != 'CHECK_FAILURE' and not recovering:
                 raise DevelopmentBlocked(record['failed_attempts'][-1]['category'], 'Previous attempt needs explicit reconciliation')
@@ -1631,7 +1661,7 @@ class TaskScheduler:
             while record['attempts'] < self.max_attempts:
                 self._assert_tree()
                 self.guard()
-                self.budget()
+                self.dispatch_budget()
                 repair = self._repair_context(record)
                 self._restore_candidate(task, record)
                 record['attempts'] += 1

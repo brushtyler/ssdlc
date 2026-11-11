@@ -21,6 +21,11 @@ class RecoveryStop(DevelopmentBlocked):
         super().__init__(category, message)
 
 
+class NotDispatched(DevelopmentBlocked):
+    """Trusted adapter proof raised strictly before an inference launch boundary."""
+    pass
+
+
 class LimitsStore:
     """Reservations survive loss of a response. Unknown outcomes block redispatch.
 
@@ -71,6 +76,15 @@ class LimitsStore:
         if (state is None or state['policy_sha256'] != digest(envelope)
                 or expected is not None and envelope != expected):
             raise DevelopmentBlocked('INTEGRITY', 'Frozen limits/binding changed; explicit transition required')
+        binding = envelope.get('binding', {})
+        if binding.get('historical_sha256'):
+            anchor = binding['accounting_anchor']
+            if any(state.get(key) != value for key, value in anchor.items()):
+                raise DevelopmentBlocked('INTEGRITY', 'Historical deadline/budget/diagnosis anchor changed')
+            if digest(state.get('historical')) != binding['historical_sha256']:
+                raise DevelopmentBlocked('INTEGRITY', 'Historical accounting facts changed')
+            if any(state['invocations'].get(identity) != row for identity, row in binding['historical_invocations'].items()):
+                raise DevelopmentBlocked('INTEGRITY', 'Historical invocation counters changed')
         return envelope, state
 
     def remaining(self):
@@ -80,24 +94,50 @@ class LimitsStore:
             raise RecoveryStop('LIMIT_REACHED', 'Frozen ticket wall-time exhausted')
         return remaining
 
-    def check(self, state, policy):
+    def check(self, state, policy, *, for_dispatch=True):
         if self.clock() < state['started_at']:
             raise RecoveryStop('OUTCOME_UNCERTAIN', 'Clock moved behind authorization; deadline cannot be extended')
         if self.clock() >= state['deadline_at']:
             raise RecoveryStop('LIMIT_REACHED', 'Frozen ticket wall-time exhausted')
         if any(v['status'] in ('reserved', 'uncertain') for v in state['invocations'].values()):
             raise RecoveryStop('OUTCOME_UNCERTAIN', 'Prior invocation has no confirmed outcome; no redispatch')
+        if not for_dispatch:
+            return
+        combined = state.get('combined_reported_usd_cap')
+        if combined is not None and sum(value for row in state['invocations'].values() for value in row.get('usage', {}).values() if value is not None) >= combined:
+            raise RecoveryStop('LIMIT_REACHED', 'Legacy combined reported-cost cap exhausted')
         for kind, cap in [('metered_usd', 'metered_usd'), ('cli_estimate_usd', 'cli_estimate_usd')]:
             known = [v.get('usage', {}).get(kind) for v in state['invocations'].values()]
             total = sum(x for x in known if x is not None)
             if total >= policy[cap]:
                 raise RecoveryStop('LIMIT_REACHED', 'Frozen ' + kind + ' cap exhausted')
 
+    def guard_entrypoint(self, name):
+        envelope, _ = self._load(repair=False)
+        allowed = envelope['binding'].get('allowed_entrypoints')
+        if allowed is not None and name not in allowed:
+            raise DevelopmentBlocked('SCOPE_REQUIRED', 'Reconciled continuation cannot restart earlier planning/design phases')
+
+    def require_capacity(self, role, phase):
+        envelope, state = self._load(repair=False)
+        p = envelope['policy']
+        self.check(state, p)
+        allowed = envelope['binding'].get('allowed_phases')
+        if allowed is not None and phase not in allowed:
+            raise DevelopmentBlocked('SCOPE_REQUIRED', 'Continuation phase is outside the authorized execution scope')
+        if role not in p['role_invocations'] or phase not in p['phase_invocations']:
+            raise RecoveryStop('LIMIT_REACHED', 'Missing explicit role/phase invocation cap')
+        rows = state['invocations'].values()
+        if (len(state['invocations']) >= p['invocations']
+                or sum(row['role'] == role for row in rows) >= p['role_invocations'][role]
+                or sum(row['phase'] == phase for row in rows) >= p['phase_invocations'][phase]):
+            raise RecoveryStop('LIMIT_REACHED', 'Frozen invocation allowance exhausted')
+
     def reserve(self, role, phase, engine):
         with ticket_lock(self.root / 'limits/limits.lock'):
             envelope, state = self._load()
             p = envelope['policy']
-            self.check(state, p)
+            self.require_capacity(role, phase)
             invocations = list(state['invocations'].values())
             if role not in p['role_invocations'] or phase not in p['phase_invocations']:
                 raise RecoveryStop('LIMIT_REACHED', 'Missing explicit role/phase invocation cap')
@@ -231,7 +271,7 @@ def inspect_design_sources(repo, names):
             'files': files, 'not_correctness_proof': True}
 
 
-def validate_launch_caps(policy, entrypoint):
+def validate_launch_caps(policy, entrypoint, allowed_phases=None):
     """Check required role/phase caps before autonomous launch spends any call."""
     roles = {
         'run_pipeline': {'00-recon', '01-po', '02-design-arch', '02-design-sec',
@@ -242,6 +282,8 @@ def validate_launch_caps(policy, entrypoint):
     }.get(entrypoint, set())
     if policy['design_diagnoses'] and entrypoint in ('run_pipeline', 'resume_pair_design'):
         roles = roles | {'02-design-diagnosis'}
+    if allowed_phases is not None:
+        roles = {r for r in roles if ('02-design' if r.startswith('02-design-') else r) in allowed_phases}
     phases = {'02-design' if r.startswith('02-design-') else r for r in roles}
     if not roles <= policy['role_invocations'].keys() or not phases <= policy['phase_invocations'].keys():
         raise RecoveryStop('LIMIT_REACHED', 'Autonomous launch is missing required role/phase caps; no model dispatch')

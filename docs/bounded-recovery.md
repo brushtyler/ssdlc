@@ -153,3 +153,10 @@ policy stops, with zero avoidable interventions. It does not claim ready-PR
 completion, the ten independently verified C-gate defects, or production latency
 and cost guarantees. See `docs/evidence/i2-offline-validation.json` for sanitized
 provenance. Raw transcripts, authorizations and run journals stay private.
+
+## Historical I1 admission
+
+[Issue #27 admission](historical-reconciliation.md) provides a separate exact-hash
+transition from a stopped I1 generation into cumulative native I2 enforcement.
+It never installs a fresh profile over historical consumption. Other new-run I2
+hardening remains in issue #29.

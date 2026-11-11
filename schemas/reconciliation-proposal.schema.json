@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "compatibility",
+    "transition_id",
+    "old_controller_sha256",
+    "new_controller_sha256",
+    "controller_identity_scheme",
+    "historical_controller_artifact_sha256",
+    "source_files",
+    "projection_sha256",
+    "profile_sha256",
+    "decisions",
+    "artifacts",
+    "authorization_contract",
+    "scope_diff"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "compatibility": {
+      "const": "i1-cumulative-limits-v1"
+    },
+    "authorization_contract": {
+      "const": "cumulative-limits-v1"
+    },
+    "transition_id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{32}$"
+    },
+    "old_controller_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "new_controller_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "controller_identity_scheme": {
+      "const": "execution-contract-json-sha256"
+    },
+    "historical_controller_artifact_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "source_files": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{64}$"
+      }
+    },
+    "projection_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "profile_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "decisions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unknown_limits",
+        "extensions",
+        "attributions",
+        "opaque_counters"
+      ],
+      "properties": {
+        "unknown_limits": {
+          "type": "array"
+        },
+        "extensions": {
+          "type": "array"
+        },
+        "attributions": {
+          "type": "array"
+        },
+        "opaque_counters": {
+          "type": "array"
+        }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recipe.json",
+        "runtime-seal.json"
+      ],
+      "properties": {
+        "recipe.json": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "runtime-seal.json": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "scope_diff": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "added",
+          "removed"
+        ],
+        "properties": {
+          "added": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string"
+            }
+          },
+          "removed": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

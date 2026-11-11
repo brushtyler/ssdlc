@@ -127,8 +127,11 @@ def import_projection(source, *, plan, quality, context, runtime_identity, task_
     result['historical_preflights'] = result.pop('preflights', [])
     result['preflights'] = []
     for tid, t in result['tasks'].items():
-        result['tasks'][tid] = {'status': 'PENDING', 'attempts': t['attempts'],
-                                'origin_record': t}
+        result['tasks'][tid] = copy.deepcopy(t)
+        result['tasks'][tid].update(status='PENDING', attempts=t['attempts'], origin_record=copy.deepcopy(t))
+        blockers = [f['category'] for f in t.get('failed_attempts', []) if f['category'] != 'CHECK_FAILURE']
+        if blockers:
+            result['tasks'][tid]['reconciliation_required'] = blockers
     result['tasks'][task_id].update(status='CANDIDATE_CAPTURED', start_commit=plan['base_commit'],
                                     invocation_id=uuid.uuid4().hex, checks=[])
     return result
@@ -146,9 +149,11 @@ def impact_report(repo, snapshot_root, manifest):
 
 
 def amendment_subject(source, plan, quality, context, manifest, impact):
+    from ssdlc_amendments import scope_diff
     return {'schema_version': 1, 'old_plan_sha256': digest(source['plan']),
             'new_plan': plan, 'quality_policy': {k: v for k, v in quality.items() if k != 'baseline'},
-            'context_sha256': digest(context), 'snapshot': manifest, 'fixture_impact': impact}
+            'context_sha256': digest(context), 'snapshot': manifest, 'fixture_impact': impact,
+            'scope_diff': scope_diff(source['plan'], plan)}
 
 
 def prepare_generation(source_root, ticket_root, repo, **kwargs):
@@ -161,7 +166,18 @@ def prepare_generation(source_root, ticket_root, repo, **kwargs):
             stack.enter_context(ticket_lock(lock))
         if (ticket_root / 'continuations/active.json').exists():
             raise TransitionError('A continuation is already selected')
-        return _prepare_generation(source_root, ticket_root, repo, **kwargs)
+        from ssdlc_preparations import unfinished, update, clear_pending
+        if unfinished(ticket_root):
+            raise TransitionError('An earlier preparation requires native discard before preparing again')
+        try:
+            return _prepare_generation(source_root, ticket_root, repo, **kwargs)
+        except BaseException as exc:
+            # A normal refusal must not leave the original run fenced. SIGKILL
+            # recovery uses the durable preparation receipt and native discard.
+            for identity in unfinished(ticket_root):
+                update(ticket_root, identity, status='REJECTED', error_type=type(exc).__name__)
+                clear_pending(ticket_root, identity)
+            raise
 
 
 def _prepare_generation(source_root, ticket_root, repo, *, task_id, plan, quality, context,
@@ -193,13 +209,22 @@ def _prepare_generation(source_root, ticket_root, repo, *, task_id, plan, qualit
         raise TransitionError('Resolved snapshot must explicitly name the new base commit')
     impact = impact_report(repo, snapshot_root, snapshot_manifest)
     subject = amendment_subject(source, plan, quality, context, snapshot_manifest, impact)
-    if (not isinstance(review, dict) or set(review) != {'subject_sha256', 'reviewer', 'report'}
+    if (not isinstance(review, dict) or set(review) not in ({'subject_sha256', 'reviewer', 'report'}, {'subject_sha256', 'reviewer', 'report', 'scope_diff'})
             or not isinstance(review['reviewer'], str) or not review['reviewer'].strip()
             or review['subject_sha256'] != digest(subject)):
         raise TransitionError('Independent amendment review does not bind the proposed inputs, snapshot and impact')
+    from ssdlc_amendments import scope_diff
+    scope = scope_diff(source['plan'], plan)
+    if any(v['added'] for v in scope.values()) and review.get('scope_diff') != scope:
+        raise TransitionError('Scope expansion requires an explicit scope_diff declaration in the review envelope')
+    if 'scope_diff' in review and review['scope_diff'] != scope:
+        raise TransitionError('Scope declaration differs from host-computed changes')
     identity = uuid.uuid4().hex
     store_root = ticket_root / 'continuations'
     store_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    from ssdlc_preparations import register, update
+    register(ticket_root, repo, source_root, identity, plan['base_commit'])
+    update(ticket_root, identity, branch=f"ssdlc/{plan['ticket_id']}/continuation-{identity}")
     preparation = store_root / ('prepared-' + identity)
     preparation.mkdir(mode=0o700)
     runtime = ticket_root / 'runtime-generations' / identity
@@ -229,6 +254,8 @@ def _prepare_generation(source_root, ticket_root, repo, *, task_id, plan, qualit
     worktree = runtime / 'worktree'
     branch = f"ssdlc/{plan['ticket_id']}/continuation-{identity}"
     git(repo, 'worktree', 'add', '-b', branch, str(worktree.resolve()), plan['base_commit'])
+    update(ticket_root, identity, worktree_created=True)
+    fault('worktree_created')
     validate_document('quality-contract', quality)
     validate_document('plan', plan)
     for check in quality['checks']:
@@ -258,12 +285,28 @@ def _prepare_generation(source_root, ticket_root, repo, *, task_id, plan, qualit
     validator = TaskPlanValidator(repo, context['01-po/requirements.md'], quality, runtime)
     amendment = validate_amendment(source['plan'], plan, json.dumps(review['report']), validator.validate,
                                    validator.requirement_catalogue['required_ids'], quality,
-                                   history=source['facts']['counters'].get('02-design/task-planning/session.json', {}).get('attempts', []))
+                                   history=source['facts']['counters'].get('02-design/task-planning/session.json', {}).get('attempts', []),
+                                   declared_scope=review.get('scope_diff'))
     scheduler = TaskScheduler(worktree, runtime / '03-dev/tasks', plan, quality, context,
                               lambda *a: (_ for _ in ()).throw(TransitionError('No model dispatch in I1')),
                               verifier, isolate_candidates=True, runtime_identity=runtime_identity)
     task_state = import_projection(source, plan=plan, quality=quality, context=context,
                                    runtime_identity=runtime_identity, task_id=task_id)
+    # Preserve failure context as active scheduler data, with confined copies of
+    # old evidence. origin_record alone is not consulted by recovery guards.
+    for record in task_state['tasks'].values():
+        for failure in record.get('failed_attempts', []):
+            refs = [(failure, 'diff_ref', 'diff_sha256')] + [(c, 'log_ref', 'sha256') for c in failure.get('checks', [])]
+            for item, ref_key, sha_key in refs:
+                original = item[ref_key]
+                source_path = _regular(source_root, '03-dev/tasks/' + original)
+                if file_hash(source_path) != item[sha_key]:
+                    raise TransitionError('Historical failure evidence changed')
+                relative = 'origin-history/' + original
+                target = confined(runtime / '03-dev/tasks', relative, protect=False)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(source_path.read_bytes())
+                item[ref_key] = relative
     task_state['ignored_paths'] = scheduler._ignored()
     scheduler.state = task_state
     record = task_state['tasks'][task_id]
@@ -298,7 +341,7 @@ def _prepare_generation(source_root, ticket_root, repo, *, task_id, plan, qualit
               'transition_id': identity, 'source_root': str(source_root.resolve()),
               'source_files': source['source_files'],
               'plan_sha256': digest(plan), 'quality_sha256': digest(quality),
-              'snapshot': snapshot_manifest, 'runtime_identity': runtime_identity}
+              'snapshot': snapshot_manifest, 'runtime_identity': runtime_identity, 'scope_diff': scope}
     recipe_sha = digest(recipe)
     record['import_proposal_sha256'] = recipe_sha
     producer = {'output': '', 'exit_code': None, 'engine': None, 'model': None,
@@ -340,7 +383,8 @@ def _prepare_generation(source_root, ticket_root, repo, *, task_id, plan, qualit
     proposal = {'schema_version': 1, 'compatibility': 'pre-checkpoint-import-v1', 'transition_id': identity, 'old_controller_sha256': source['old_controller_sha256'],
                 'new_controller_sha256': runtime_identity['controller_sha256'],
                 'projection_sha256': digest(new_facts), 'source_files': source['source_files'],
-                'artifacts': {}}
+                'artifacts': {}, 'scope_diff': scope,
+                'controller_identity_schemes': {'old': 'artifact-bytes-sha256', 'new': 'execution-contract-json-sha256'}}
     atomic_json(preparation / 'recipe.json', recipe)
     proposal['artifacts']['recipe.json'] = file_hash(preparation / 'recipe.json')
     # Prepared runtime bytes are sealed separately; active runtime bytes may
@@ -356,9 +400,50 @@ def _prepare_generation(source_root, ticket_root, repo, *, task_id, plan, qualit
     from ssdlc_transitions import sync_tree
     sync_tree(runtime)
     sync_tree(preparation)
+    from ssdlc_preparations import pending
+    pending(ticket_root, identity)
     fault('prepared')
     return {'preparation': str(preparation), 'proposal': proposal, 'execution_authorized': False}
 
+
+
+def validate_runtime_projection(source, runtime):
+    """Validate what readers execute, not a deepcopy of historical facts."""
+    runtime = Path(runtime)
+    outer = json.loads(_regular(runtime, 'state.json').read_text())
+    actual = TaskJournal(runtime / '03-dev/tasks').peek()
+    if not actual or set(actual['tasks']) != set(source['journal']['tasks']):
+        raise TransitionError('Runtime task identities differ from source')
+    if outer.get('ledger') != source['facts']['ledger'] or outer.get('frozen_limits') != source['facts']['limits']:
+        raise TransitionError('Runtime resets cumulative ledger/limits')
+    for ref, counter in source['facts']['counters'].items():
+        if json.loads(_regular(runtime / 'history', ref).read_text()) != counter:
+            raise TransitionError('Historical counter projection changed')
+    for tid, old in source['journal']['tasks'].items():
+        current = actual['tasks'][tid]
+        if type(current.get('attempts')) is not int or current['attempts'] != old['attempts']:
+            raise TransitionError('Runtime resets charged task attempts')
+        if current.get('origin_record') != old:
+            raise TransitionError('Runtime historical task attribution changed')
+        failures = current.get('failed_attempts', [])
+        if len(failures) < len(old.get('failed_attempts', [])):
+            raise TransitionError('Runtime drops active failure history')
+        for index, failure in enumerate(old.get('failed_attempts', [])):
+            expected = copy.deepcopy(failure)
+            expected['diff_ref'] = 'origin-history/' + expected['diff_ref']
+            for check in expected.get('checks', []):
+                check['log_ref'] = 'origin-history/' + check['log_ref']
+            if failures[index] != expected:
+                raise TransitionError('Runtime failure projection differs from source')
+        blockers = [f['category'] for f in old.get('failed_attempts', []) if f['category'] != 'CHECK_FAILURE']
+        if blockers and current.get('reconciliation_required') != blockers:
+            raise TransitionError('Runtime drops historical reconciliation guard')
+    plan = json.loads(_regular(runtime, '02-design/plan.json').read_text())
+    quality = json.loads(_regular(runtime, '00-recon/quality-contract.json').read_text())
+    context = {ref: _regular(runtime, ref).read_text() if (runtime / ref).exists() else '' for ref in source['context']}
+    if actual['inputs_sha256'] != digest({'plan': plan, 'quality': quality, 'context': context}):
+        raise TransitionError('Runtime journal has incompatible execution inputs')
+    return actual
 
 def activate_generation(ticket_root, preparation, authorization, *, fault=lambda point: None):
     """Select a fully staged generation under source/target cooperative locks."""
@@ -386,6 +471,10 @@ def activate_generation(ticket_root, preparation, authorization, *, fault=lambda
                 raise TransitionError('Another continuation is active')
             from ssdlc_transitions import validate_authorization
             validate_authorization(authorization, proposal)
+            from ssdlc_preparations import update, clear_pending, receipt_path
+            if receipt_path(ticket_root, proposal['transition_id']).exists():
+                update(ticket_root, proposal['transition_id'], status='ACTIVE')
+                clear_pending(ticket_root, proposal['transition_id'])
             return selected
         from ssdlc_transitions import validate_authorization
         validate_authorization(authorization, proposal)
@@ -396,8 +485,18 @@ def activate_generation(ticket_root, preparation, authorization, *, fault=lambda
         seal = json.loads(_regular(preparation, 'runtime-seal.json').read_text())
         if source_binding(runtime, seal) != seal:
             raise TransitionError('Prepared runtime changed before activation')
+        validate_runtime_projection(source, runtime)
         artifacts = {name: _regular(preparation, name).read_bytes() for name in proposal['artifacts']}
-        return store.publish(source_root, proposal, authorization, source['facts'], projection, artifacts)
+        from ssdlc_amendments import scope_diff
+        actual_scope = scope_diff(source['plan'], json.loads(_regular(runtime, '02-design/plan.json').read_text()))
+        if any(v['added'] for v in actual_scope.values()) and proposal.get('scope_diff') != actual_scope:
+            raise TransitionError('Unregistered scope expansion in prepared runtime')
+        result = store.publish(source_root, proposal, authorization, source['facts'], projection, artifacts)
+        from ssdlc_preparations import update, clear_pending
+        if (ticket_root / 'continuations/preparations' / (proposal['transition_id'] + '.json')).exists():
+            update(ticket_root, proposal['transition_id'], status='ACTIVE')
+            clear_pending(ticket_root, proposal['transition_id'])
+        return result
 
 
 def verify_import(repo, ticket, *, verifier, runtime_identity, controller_guard):
@@ -406,6 +505,8 @@ def verify_import(repo, ticket, *, verifier, runtime_identity, controller_guard)
     root = runtime_root(repo / '.ssdlc' / ticket)
     if root == repo / '.ssdlc' / ticket:
         raise TransitionError('No activated continuation')
+    if (repo / '.ssdlc' / ticket / 'execution/active.json').exists():
+        raise TransitionError('Execution generation selected; resume with run --from-phase 03-dev')
     with ticket_lock(repo / '.ssdlc' / ticket / 'ticket.lock'):
         state = json.loads(_regular(root, 'state.json').read_text())
         plan = json.loads(_regular(root, '02-design/plan.json').read_text())
@@ -449,7 +550,7 @@ def main(argv=None):
     from ssdlc_controller import assert_controller, controller_snapshot, execution_contract
     parser = argparse.ArgumentParser(description='Prepare/activate/verify a stopped pre-checkpoint continuation')
     sub = parser.add_subparsers(dest='command', required=True)
-    for command in ('inspect', 'preview', 'prepare', 'activate', 'verify'):
+    for command in ('inspect', 'preview', 'prepare', 'activate', 'verify', 'discard'):
         p = sub.add_parser('continuation-' + command)
         p.add_argument('--repo', '-r', default='.')
         p.add_argument('--ticket', required=True)
@@ -463,8 +564,9 @@ def main(argv=None):
             p.add_argument('--manifest', required=True)
             if command == 'prepare':
                 p.add_argument('--review', required=True, help='Independent review envelope bound to the preview subject')
-        if command == 'activate':
+        if command in ('activate', 'discard'):
             p.add_argument('--preparation', required=True)
+        if command == 'activate':
             p.add_argument('--authorization', required=True)
     a = parser.parse_args(argv)
     import re
@@ -481,6 +583,14 @@ def main(argv=None):
             # Do not print prompts, ledger contents or private evidence.
             result = {k: source[k] for k in ('journal_sequence', 'journal_last_sha256', 'old_controller_sha256', 'execution_authorized')}
             result['source_sha256'] = digest(source['source_files'])
+        elif a.command == 'continuation-discard':
+            from ssdlc_preparations import discard, docker_quiescent
+            identity = Path(a.preparation).name.removeprefix('prepared-')
+            expected = ticket_root / 'continuations' / ('prepared-' + identity)
+            if Path(a.preparation).resolve() != expected.resolve():
+                raise TransitionError('Discard requires the recorded preparation path')
+            value = discard(ticket_root, identity, writers_quiescent=docker_quiescent)
+            result = {'status': value['status'], 'transition_id': identity, 'model_dispatches': 0}
         elif a.command == 'continuation-preview':
             source = inspect_stopped_source(a.source)
             manifest = read(a.manifest)

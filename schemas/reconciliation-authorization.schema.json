@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "proposal_sha256",
+    "profile_sha256",
+    "decisions_sha256",
+    "old_controller_sha256",
+    "new_controller_sha256",
+    "schema_version",
+    "transition_id",
+    "authorized",
+    "source_fenced",
+    "accept_unknown_history",
+    "authorize_extensions"
+  ],
+  "properties": {
+    "proposal_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "profile_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "decisions_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "old_controller_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "new_controller_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "scope_diff_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "transition_id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{32}$"
+    },
+    "authorized": {
+      "const": true
+    },
+    "source_fenced": {
+      "const": true
+    },
+    "accept_unknown_history": {
+      "type": "boolean"
+    },
+    "authorize_extensions": {
+      "type": "boolean"
+    }
+  }
+}

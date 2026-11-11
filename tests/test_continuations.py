@@ -71,13 +71,18 @@ class ContinuationTests(RepositoryTests):
                 args['context'], args['snapshot_manifest'], impact_report(self.repo, self.snapshot, self.manifest))
             args['review'] = {'subject_sha256': digest(subject), 'reviewer': 'independent offline fixture',
                               'report': {'verdict': 'APPROVED', 'findings': []}}
+            if subject['scope_diff']:
+                args['review']['scope_diff'] = subject['scope_diff']
         return prepare_generation(self.artifacts, self.target, self.repo, **args)
 
     def authorize(self, prepared):
         p = prepared['proposal']
-        return {'schema_version': 1, 'transition_id': p['transition_id'], 'proposal_sha256': digest(p),
+        result = {'schema_version': 1, 'transition_id': p['transition_id'], 'proposal_sha256': digest(p),
                 'authorized': True, 'source_fenced': True,
                 'old_controller_sha256': p['old_controller_sha256'], 'new_controller_sha256': p['new_controller_sha256']}
+        if any(v['added'] for v in p.get('scope_diff', {}).values()):
+            result['scope_diff_sha256'] = digest(p['scope_diff'])
+        return result
 
     def activate(self, prepared):
         return activate_generation(self.target, prepared['preparation'], self.authorize(prepared))

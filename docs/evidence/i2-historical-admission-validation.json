@@ -1,0 +1,170 @@
+{
+  "schema_version": 1,
+  "increment": "I2 historical cumulative admission / issue #27",
+  "base_commit": "c78f65f956da53de38ea52aef9d0e1dc6e01487f",
+  "created_at": "2026-11-11T11:19:47.231467+00:00",
+  "provenance": "Direct offline bootstrap. Native CLI/orchestrator/provider-wrapper replay with semantic engines, real Git and journals; network-disabled credential-free Docker Python 3.12 test execution. No live provider or autonomous delivery claim.",
+  "source_files": [
+    {
+      "path": "PLAN_AUTONOMY_WORKSTREAMS.md",
+      "sha256": "2bc0ceb6ee359b7119d5202ab0ed982669ee61ec567580a89c7f0247465f3d5c"
+    },
+    {
+      "path": "docs/bounded-recovery.md",
+      "sha256": "9120bb9269a55c5029d4e2651677bc019c076abc94aaf97c66b97681bedac2d9"
+    },
+    {
+      "path": "docs/continuations.md",
+      "sha256": "d3a6eb88db774fbd3a552f6e59f2a6940b77c94348e64fd068420c056a266b9c"
+    },
+    {
+      "path": "docs/historical-reconciliation.md",
+      "sha256": "dd59d05ad9d20cb91ca9a84d0f05be3c7cab62911c94d5acb750cbb08f3f8da2"
+    },
+    {
+      "path": "orchestrator.py",
+      "sha256": "bcf8b5b1250cffdbc2e89599eaa24e1318b4bd86245045bb85bf7780f5192df1"
+    },
+    {
+      "path": "schemas/continuation-proposal.schema.json",
+      "sha256": "0d7d7f9756245a78419406de86dd0fabe97d364de98c1f0b9683b9a9ebdfe98f"
+    },
+    {
+      "path": "schemas/reconciliation-authorization.schema.json",
+      "sha256": "980f1c9b159c57b6423a241453ef6ae26518aff05aeb4b1fe469b4a913a22ccb"
+    },
+    {
+      "path": "schemas/reconciliation-proposal.schema.json",
+      "sha256": "e0436e05a5ab4edc45e72f0977831d3012f3027973f857c922588a63a312b4a3"
+    },
+    {
+      "path": "schemas/reconciliation-request.schema.json",
+      "sha256": "bd41a09cb3506a607169f8a76018631b1e860625fd7cb9f345e872e1532dffc0"
+    },
+    {
+      "path": "ssdlc_amendments.py",
+      "sha256": "6b81c739deab28b02849936f81f41656f9a57799bb3fc36f223a23b0a73cd5fa"
+    },
+    {
+      "path": "ssdlc_continuations.py",
+      "sha256": "724f863d84a799eaa4ae32f055120293e1adab65506ed2d54d88f141a5907ef1"
+    },
+    {
+      "path": "ssdlc_historical.py",
+      "sha256": "7f2487322df773145e4faac158ce58abf0fff8d9c9e93ad0fc369042dae79bb4"
+    },
+    {
+      "path": "ssdlc_preparations.py",
+      "sha256": "7e566d8bedee0c8fc76eb8540bcb1024d606ea6d58095b015b881b9eeedc5161"
+    },
+    {
+      "path": "ssdlc_reconciliation.py",
+      "sha256": "24a46353121d3ba6ec98cd01e134009e0c647fcbecccd2d0025b27d48a1f2d18"
+    },
+    {
+      "path": "ssdlc_recovery.py",
+      "sha256": "0d8dbd484ba966084a78b86fb75a790739ea5713e206bc230f9ca523b53ed5a4"
+    },
+    {
+      "path": "ssdlc_supervisor.py",
+      "sha256": "e1b84ee49bf59b7078641b70dfad8003c12b3647e8086a124935d64912142bce"
+    },
+    {
+      "path": "ssdlc_tasks.py",
+      "sha256": "dbd499f02405102cb3c9d889e12441a23f288fe6cfdd5a7f3160f59abc3692f4"
+    },
+    {
+      "path": "ssdlc_transitions.py",
+      "sha256": "15c94cf6007c36b431243949ad7ded39f745b9d963a625260d68a8cdcdccde1c"
+    },
+    {
+      "path": "tests/test_continuation_hardening.py",
+      "sha256": "f28f1a7b1079a8d589d0bf77c31bc7d6b222fa57ce996c8e605356d93beb978a"
+    },
+    {
+      "path": "tests/test_continuations.py",
+      "sha256": "428d278261f9beabef2389671d99d5f4b68dabc28c451e06bb901f2af8a8c56f"
+    },
+    {
+      "path": "tests/test_historical_accounting.py",
+      "sha256": "1b09b7026864bdd6642ea81e9ee98d1855f6812ff467fa7562c2c9b3ba48e20d"
+    },
+    {
+      "path": "tests/test_not_dispatched.py",
+      "sha256": "e76de77c168c208a3d4dc8eea679fe19d7699be5721c51fb035cac55e9b47a2a"
+    },
+    {
+      "path": "tests/test_reconciliation.py",
+      "sha256": "84f665bda64d69b477f63639e2a0b2bb5bad75573857a829c036df4676f1c9f4"
+    }
+  ],
+  "execution": {
+    "live_model_calls": 0,
+    "historical_issue22_resumed": false,
+    "historical_state_mutated": false,
+    "ready_for_signoff": false,
+    "auto_merge": false
+  },
+  "coverage": {
+    "reviewable_binding": "test_reconciliation: native_cli_inspect_prepare_activate_keeps_controller_offline; staged_candidate_source_change_invalidates_authorization; authorization_requires_unknown_and_extension_decisions",
+    "cumulative_accounting": "test_historical_accounting: issue22_shape_all_consumed_rounds_and_unknown_usage_survive; duplicate_row_and_duplicate_origin_and_missing_row_refused; external_provenance_is_hashed_parsed_as_data_and_conflicts_refused",
+    "explicit_cap_time_decisions": "test_historical_accounting: unknown_caps_and_extensions_need_separate_explicit_decisions; budget_cannot_disappear_or_silently_change; old_time_and_waits_cannot_reset",
+    "effective_limits": "test_reconciliation: exhausted_caps_refuse_dispatch_and_explicit_extension_works; known_extension_must_be_explicit_and_native_caps_still_apply; effective_limit_anchor_cannot_be_reset_after_activation",
+    "atomicity_and_writers": "test_reconciliation: all_publication_crash_boundaries_replay_without_reset; sigkill_after_atomic_selection_does_not_repeat_developer_or_accounting; source_change_and_concurrent_writer_block_activation",
+    "native_readers": "test_reconciliation: native_constructor_dispatch_compatibility_and_supervisor_read_same_generation; supervisor_is_pinned_and_routes_only_authorized_phases; planning_entrypoints_and_phases_cannot_reset_sessions",
+    "checkpoint_and_repair": "test_reconciliation: already_verified_i1_checkpoint_gets_fresh_checks_without_new_commit; cumulative_activation_preserves_source_and_skips_verified_developer; failed_partial_candidate_repairs_next_attempt_and_stagnation_remains_active",
+    "old_failure_history": "test_reconciliation: old_i1_lost_failure_prefix_is_restored_and_checked; native_admission_refuses_unresolved_historical_gate; effective_scheduler_floor_cannot_be_reset_by_valid_append",
+    "preparation_recovery": "test_continuation_hardening: failed_in_place_baseline_does_not_fence_original_and_discard_is_native; sigkill_preparation_leaves_tracked_resources_and_native_discard_recovers; discard_refuses_active_generation_and_live_writers",
+    "scope": "test_continuation_hardening: scope_addition_requires_declaration_and_exact_scope_authorization; declared_scope_is_registered_but_missing_explicit_authorization_refuses",
+    "non_dispatch_proof": "test_not_dispatched: real_http_missing_auth_and_unsupervised_refusal_have_no_unknown_outcome; same_error_category_after_launch_does_not_prove_non_dispatch; deadline_before_subprocess_is_trusted_non_dispatch; prelaunch_refusal_reuses_task_attempt_and_nonce"
+  },
+  "compatibility_limits": [
+    "Only stopped I1 single-captured-root topology; no existing I2 profile extension or task identity changes.",
+    "Unknown legacy transport consumption requires transport retries disabled; historical usage remains null where unavailable.",
+    "Unresolved historical non-code gates and ambiguous/partial history refuse admission rather than reset safeguards.",
+    "Fresh failure of an already committed checkpoint requires the separate corrective-loop work.",
+    "Hashes bind host-owned reference files; arbitrary same-user/external writers require explicit fencing attestation. Full containment remains I3.",
+    "The sanitized #22-shaped fixture is not a replay of private transcripts or the actual historical development run."
+  ],
+  "public_artifact_policy": "Source, schemas, operator documentation, synthetic fixtures and this aggregate evidence only. Raw logs, source snapshots, historical journals, cap-source files, authorization/runtime directories, host paths and credentials remain private.",
+  "validation": {
+    "repository_suite": {
+      "tests": 880,
+      "elapsed_seconds": 329.054,
+      "status": "passed",
+      "command": "PATH=/usr/bin:/bin:/usr/local/bin python3 -m unittest discover -s tests -q",
+      "scope": "Full repository pass before the final two historical accounting provenance regressions; the final module and all admission cases are covered by the final Docker replay below. Exact-commit full verification runs in PR CI."
+    },
+    "final_accounting": {
+      "tests": 11,
+      "elapsed_seconds": 0.115,
+      "status": "passed",
+      "command": "PYTHONPATH=tests python3 -m unittest test_historical_accounting -q"
+    },
+    "final_docker_replay": {
+      "tests": 45,
+      "elapsed_seconds": 44.424,
+      "status": "passed",
+      "command": "PYTHONPATH=tests python3 -m unittest test_reconciliation test_historical_accounting test_not_dispatched test_continuation_hardening -q",
+      "source": "Read-only standalone Git export; all changed source files match source_files hashes",
+      "image": "ssdlc-runner:bootstrap-test",
+      "image_id": "sha256:67d6aa23250928dba124ad4ee4edb7b6c4aa33fef37c0ff1a7a6ddc078356665",
+      "network": "none",
+      "credentials_mounted": false
+    },
+    "gitleaks": {
+      "status": "passed",
+      "mode": "no-git, redacted scan of selected public source export",
+      "findings": 0
+    },
+    "diff_check": {
+      "status": "passed"
+    },
+    "ci": {
+      "workflow": ".github/workflows/test.yml",
+      "gate": "python3 -m unittest discover -s tests -v",
+      "expected_tests": 882,
+      "authority": "The PR check attached to the exact pushed commit is authoritative; no workflow permissions or gate exclusions were added."
+    }
+  }
+}

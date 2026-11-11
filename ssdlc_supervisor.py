@@ -261,6 +261,15 @@ class Ident:
     uid: int
 
 
+
+def canonical_root(repo, ticket):
+    from ssdlc_transitions import runtime_root
+    try:
+        return runtime_root(Path(repo) / '.ssdlc' / ticket)
+    except (OSError, ValueError, KeyError, RuntimeError):
+        raise SupervisorIntegrityError('filesystem_integrity') from None
+
+
 class Proc:
     def stat(self, pid):
         p = Path('/proc') / str(pid)
@@ -392,6 +401,10 @@ def validate_record(d):
                   d['fingerprints']['supervisor_py_sha256'], d['fingerprints']['inputs_sha256']]:
         if not isinstance(value, str) or not re.fullmatch(r'[a-f0-9]{64}', value):
             raise SupervisorIntegrityError('metadata_corrupt')
+    runtime = d['authorized'].get('runtime_root')
+    if runtime is not None and (not isinstance(runtime, str) or runtime not in {'.ssdlc/' + d['ticket']} and
+            not re.fullmatch(r'\.ssdlc/' + re.escape(d['ticket']) + r'/execution-runtimes/[a-f0-9]{32}', runtime)):
+        raise SupervisorIntegrityError('metadata_corrupt')
     value = d['authorized']['test_cmd_sha256']
     if value is not None and (not isinstance(value, str) or not re.fullmatch(r'[a-f0-9]{64}', value)):
         raise SupervisorIntegrityError('metadata_corrupt')
@@ -411,7 +424,7 @@ def validate_record(d):
         raise SupervisorIntegrityError('metadata_corrupt')
     if set(d) - (set(RUN_SHAPE) | required | {'in_flight'}):
         raise SupervisorIntegrityError('metadata_corrupt')
-    for key, allowed in [('authorized', set(RUN_SHAPE['authorized']) | {'test_cmd_sha256', 'argv_id', 'compatibility_approved', 'review_repairs', 'rounds', 'containers_possible', 'task_mode'}),
+    for key, allowed in [('authorized', set(RUN_SHAPE['authorized']) | {'test_cmd_sha256', 'argv_id', 'compatibility_approved', 'review_repairs', 'rounds', 'containers_possible', 'task_mode', 'runtime_root'}),
                          ('fingerprints', set(RUN_SHAPE['fingerprints'])),
                          ('processes', {'worker', 'controller', 'descendants'}),
                          ('handoff', {'outcome', 'at'})]:
@@ -686,6 +699,14 @@ def refusal(store, reason='unsupported_transition'):
     return result
 
 
+def pinned_root(repo, ticket, record):
+    root = canonical_root(repo, ticket)
+    expected = record['authorized'].get('runtime_root', '.ssdlc/' + ticket)
+    if str(root.relative_to(Path(repo))) != expected:
+        raise SupervisorIntegrityError('fingerprint_mismatch')
+    return root
+
+
 def new_record(a, store):
     project_env = build_project_env(a['repo'], os.environ)
     controller = Path(a.get('controller', Path(__file__).with_name('orchestrator.py'))).resolve()
@@ -695,7 +716,8 @@ def new_record(a, store):
                       test_cmd_authority='operator_flag', reauthorization=a.get('_reauthorization', []), argv_id='orchestrator.' + a['entrypoint'],
                       review_repairs=a.get('review_repairs'), rounds=a.get('rounds'), compatibility_approved=True,
                       containers_possible=project_env.get('SSDLC_EXECUTION_MODE', 'docker') != 'native',
-                      task_mode=bool(read_document(Path(a['repo']) / '.ssdlc' / a['ticket'] / 'state.json').get('task_breakdown')) or project_env.get('SSDLC_ENABLE_TASK_BREAKDOWN', 'false').lower() == 'true')
+                      runtime_root=str(canonical_root(a['repo'], a['ticket']).relative_to(Path(a['repo']))),
+                      task_mode=bool(read_document(canonical_root(a['repo'], a['ticket']) / 'state.json').get('task_breakdown')) or project_env.get('SSDLC_ENABLE_TASK_BREAKDOWN', 'false').lower() == 'true')
     return dict(schema_version=1, revision=0, worker_generation=1, run_id=store.run_id, nonce=uuid.uuid4().hex,
         resumes=a.get('_resumes'), project=dict(key=digest(a['repo'])[:16], name='project'), ticket=a['ticket'],
         created_at=float(store.clock.time()), authorized=authorized,
@@ -709,7 +731,8 @@ def new_record(a, store):
         recovery=dict(allowance_total=a['recovery_allowance'], used=0, next_retry_at=None, backoff_sec=0, history=[]),
         counters=dict(heartbeats=0, retries=0, classifications={}), heartbeat=None, preflight=None, classification=None,
         journal_baseline=dict(failed_attempts={}, attempts={}, taken_at_launch=False), cancel=None,
-        evidence_links=dict(state_json=f".ssdlc/{a['ticket']}/state.json", task_journal=f".ssdlc/{a['ticket']}/03-dev/tasks/task-journal.jsonl"), pending_events=[])
+        evidence_links=dict(state_json=str((canonical_root(a['repo'], a['ticket']) / 'state.json').relative_to(Path(a['repo']))),
+                            task_journal=str((canonical_root(a['repo'], a['ticket']) / '03-dev/tasks/task-journal.jsonl').relative_to(Path(a['repo'])))), pending_events=[])
 
 
 def markers(d, role, gen, intent):
@@ -1004,7 +1027,7 @@ def start(args, clock=None, fault=None):
 
 def fingerprint_changes(old, new):
     changes = []
-    for section, fields in [('authorized', ('goal_sha256', 'tier', 'test_cmd_sha256')),
+    for section, fields in [('authorized', ('goal_sha256', 'tier', 'test_cmd_sha256', 'runtime_root')),
                             ('fingerprints', ('config_sha256', 'controller'))]:
         for field in fields:
             a, b = old[section].get(field), new[section].get(field)
@@ -1474,14 +1497,20 @@ def git_read(repo, *args):
 def route_child(repo, entrypoint, tier, ticket=''):
     """Read-only child. Real HOME, uid and PATH preserve Codex's predicate."""
     from orchestrator import SquadDispatcher, resolve_review_entry
-    state = read_document(Path(repo) / '.ssdlc' / ticket / 'state.json') if ticket else {}
-    plan = read_document(Path(repo) / '.ssdlc' / ticket / '02-design/plan.json') if ticket else {}
+    state = read_document(canonical_root(repo, ticket) / 'state.json') if ticket else {}
+    plan = read_document(canonical_root(repo, ticket) / '02-design/plan.json') if ticket else {}
+    allowed = None
+    if ticket and (canonical_root(repo, ticket) / 'limits/policy.json').is_file():
+        from ssdlc_recovery import LimitsStore
+        allowed = LimitsStore(canonical_root(repo, ticket))._load(repair=False)[0]['binding'].get('allowed_phases')
     profiles = sorted({t.get('profile', 'ALGORITHMIC') for t in plan.get('tasks', [])}) if plan.get('tasks') else (
         PROFILES if state.get('task_breakdown') or os.environ.get('SSDLC_ENABLE_TASK_BREAKDOWN') == 'true'
         else (state.get('dev_profile', 'ALGORITHMIC'),))
     routes, panel = {}, []
     for t in ('S', 'M', 'L') if tier == 'auto' else (tier,):
         for role in ROLE_KEYS_BY_ENTRYPOINT[entrypoint]:
+            if allowed is not None and ('02-design' if role.startswith('02-design') else role) not in allowed:
+                continue
             if entrypoint == 'run' and role.startswith('02-design') and t == 'S':
                 continue
             if role == '05b-appsec' and t != 'L' and 'APPSEC_SUPPLY_CHAIN_REDTEAM' not in state.get('specialists_triggered', []):
@@ -1569,7 +1598,7 @@ def credential_present(engine, env):
 
 def quality_dependencies(repo, ticket):
     root = Path(repo)
-    for path in (root / '.ssdlc' / ticket / '00-recon/quality-contract.json', root / '.ssdlc/quality-contract.json'):
+    for path in (canonical_root(root, ticket) / '00-recon/quality-contract.json', root / '.ssdlc/quality-contract.json'):
         if path.is_file():
             contract = json.loads(path.read_text())
             checks = contract['checks']
@@ -1662,8 +1691,8 @@ def preflight(repo, ticket, env, entrypoint='run', tier='auto', probes=None, ref
                 code=failure['code'] if failure else 'preflight_failed' if any(c['code'] == 'engine_unsupported' for c in checks) else 'preflight_ok')
 
 
-def peek_journal(repo, ticket):
-    directory = Path(repo) / '.ssdlc' / ticket / '03-dev/tasks'
+def peek_journal(repo, ticket, record=None):
+    directory = (pinned_root(repo, ticket, record) if record else canonical_root(repo, ticket)) / '03-dev/tasks'
     if not directory.is_dir() or not (directory / 'task-journal.jsonl').is_file():
         return None, False
     from ssdlc_tasks import TaskJournal, TaskError
@@ -1690,7 +1719,7 @@ CATEGORIES = {'INTEGRITY', 'ENVIRONMENT_RESOURCE', 'SCOPE_REQUIRED', 'ENVIRONMEN
               'LIMIT_REACHED', 'OUTCOME_UNCERTAIN', 'GIT_LOCK_UNOWNED', 'DESIGN_STALLED', 'ENVIRONMENT_DIAGNOSIS'}
 EXC_TYPES = {'TaskError', 'DevelopmentBlocked', 'ResourceLimitError', 'PlanError', 'RuntimeError', 'TimeoutError',
              'TimeoutExpired', 'ConnectionError', 'OSError', 'ValueError', 'SystemExit', 'KeyboardInterrupt',
-             'SupervisorIntegrityError', 'FencedOut', 'Exception', 'RecoveryStop', 'QuiescentTimeout'}
+             'SupervisorIntegrityError', 'FencedOut', 'Exception', 'RecoveryStop', 'QuiescentTimeout', 'NotDispatched'}
 CONTROLLER_TYPES = {'shim_released', 'phase_started', 'phase_finished', 'failure', 'progress',
                     'dispatch_started', 'dispatch_finished', 'run_ended'}
 PHASES = {'00-recon', '01-po', '02-design', '02-design-arch', '02-design-sec', '03-dev', '04-review',
@@ -1789,7 +1818,7 @@ def terminal_outcome(events):
 
 def ticket_hard_deadline(repo, ticket, env, now):
     deadline = configured_hard_deadline(env, now)
-    root = Path(repo) / '.ssdlc' / ticket
+    root = canonical_root(repo, ticket)
     if (root / 'limits/policy.json').exists():
         from ssdlc_recovery import LimitsStore
         _, state = LimitsStore(root)._load(repair=False)
@@ -1876,8 +1905,9 @@ def classify(evidence):
     final = terminal_outcome(e.get('events', [])).final_failure or {}
     checks = e.get('preflight', {}).get('checks', [])
     auth = next((c for c in checks if c.get('status') == 'failed' and c.get('code') in {'auth_missing', 'auth_expired'}), None)
-    if auth:
-        cls, code, row = 'authentication', auth['code'], '1'
+    if auth or final.get('category') in {'AUTH_MISSING', 'AUTH_EXPIRED', 'AUTHENTICATION'}:
+        code = auth['code'] if auth else {'AUTH_MISSING': 'auth_missing', 'AUTH_EXPIRED': 'auth_expired', 'AUTHENTICATION': 'auth_unverified'}[final['category']]
+        cls, row = 'authentication', '1'
     elif e.get('integrity') or e.get('journal_corrupt') or final.get('category') == 'INTEGRITY':
         cls, code, row = 'integrity', 'integrity_failure', '2'
     elif final.get('category') in {'LIMIT_REACHED', 'OUTCOME_UNCERTAIN', 'GIT_LOCK_UNOWNED', 'DESIGN_STALLED', 'ENVIRONMENT_DIAGNOSIS'}:
@@ -1913,10 +1943,10 @@ def evidence_for(store, d, env, events=None, malformed=0):
     env = dict(env)
     for key, value in d['deadlines'].get('frozen_limits', {}).items():
         env[key] = str(value)
-    journal, corrupt = peek_journal(repo, store.ticket)
+    journal, corrupt = peek_journal(repo, store.ticket, d)
     if events is None:
         events, malformed = controller_events(store, d)
-    return dict(state=read_document(repo / '.ssdlc' / store.ticket / 'state.json'), journal=journal,
+    return dict(state=read_document(pinned_root(repo, store.ticket, d) / 'state.json'), journal=journal,
         journal_corrupt=corrupt, events=events, malformed=malformed, baseline=d['journal_baseline'], env=env,
         preflight=d.get('preflight') or {}, controller_launched=any(x['role'] == 'controller' for x in d['launches']),
         exit_code=d['exit_evidence'].get('code'), entrypoint=d['authorized']['entrypoint'],
@@ -1939,7 +1969,7 @@ def completion(store, d, state):
         task_mode = d['authorized'].get('task_mode', True) or bool(state.get('task_breakdown')) or bool(state.get('task_verified_head'))
         if not task_mode:
             return True
-        worktree = repo / '.ssdlc' / store.ticket / 'worktree'
+        worktree = pinned_root(repo, store.ticket, d) / 'worktree'
         return (worktree.is_dir() and bool(state.get('task_verified_head')) and
                 git_read(worktree, 'rev-parse', 'HEAD') == state['task_verified_head'] and
                 git_read(worktree, 'status', '--porcelain') == '')
@@ -1948,7 +1978,7 @@ def completion(store, d, state):
     paths = ['02-design/plan.json'] if kind == 'plan' else ['02-design/adr.md'] + (
         [] if state.get('risk_tier', d['authorized']['tier']) == 'S' else ['02-design/threat-model.md'])
     for rel in paths:
-        path = repo / '.ssdlc' / store.ticket / rel
+        path = pinned_root(repo, store.ticket, d) / rel
         if not path.is_file() or digest(path.read_bytes()) != state.get('artifacts', {}).get(rel, {}).get('sha256'):
             return False
     return True
@@ -2110,9 +2140,9 @@ def monitor_tick(store, env, proc=None, docker=None, generation=None):
                     labels={'ssdlc.run_id': d['run_id'], 'ssdlc.project': d['project']['key']},
                     state=c.get('state') if c.get('state') in {'running', 'exited', 'paused', 'created', 'dead', 'restarting'} else 'unknown'))
     tokens['containers'] = digest(json.dumps(containers, sort_keys=True))
-    state_path = repo / '.ssdlc' / store.ticket / 'state.json'
+    state_path = pinned_root(repo, store.ticket, d) / 'state.json'
     state = read_document(state_path)
-    for name, path in [('state', state_path), ('journal', repo / '.ssdlc' / store.ticket / '03-dev/tasks/task-journal.jsonl')]:
+    for name, path in [('state', state_path), ('journal', pinned_root(repo, store.ticket, d) / '03-dev/tasks/task-journal.jsonl')]:
         try:
             st = path.stat()
             if name != 'state' or state:
