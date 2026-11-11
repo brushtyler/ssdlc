@@ -438,6 +438,14 @@ def resolve_execution(ticket):
     ticket = Path(ticket)
     store = TransitionStore(ticket / 'execution')
     projection = store.load()
+    pending = ticket / 'execution/pending.json'
+    if pending.exists() and _read(ticket / 'execution', 'pending.json')['transition_id'] != projection['transition_id']:
+        raise TransitionError('Execution amendment pending; dispatch is fenced')
+    return _selected_execution_root(ticket, projection)
+
+
+def _selected_execution_root(ticket, projection):
+    """Validate an immutable selected projection; preparation holds its own locks."""
     identity = projection['transition_id']
     root = ticket / 'execution-runtimes' / identity
     marker = _read(root, 'generation.json')

@@ -14,6 +14,10 @@ separate compatibility rules and are refused. The DAG amendment validator can
 check merge/split ordering, but this execution compatibility rule deliberately
 preserves task IDs and all charged attempts.
 
+For an already admitted I2 run stopped on `SCOPE_REQUIRED` after a completed
+checkpoint, use the separate [scope-only amendment](scope-amendments.md) rule.
+This does not broaden I1's pre-checkpoint import compatibility.
+
 The operator must stop and fence every old controller, supervisor and external
 writer before activation. Cooperative ticket/scheduler locks and repeated source
 hash checks detect cooperating writers and changed inputs; they do not prove
