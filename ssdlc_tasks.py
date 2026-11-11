@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -543,7 +544,8 @@ class TaskScheduler:
     def __init__(self, worktree: Path, directory: Path, plan: dict, quality: dict,
                  context: dict[str, str], developer: Callable, verifier: Callable,
                  guard: Callable = lambda: None, budget: Callable = lambda: None,
-                 max_attempts: int = 3):
+                 max_attempts: int = 3, isolate_candidates: bool = False,
+                 runtime_identity: dict | None = None):
         self.wt = worktree
         self.directory = directory
         self.plan = plan
@@ -554,6 +556,8 @@ class TaskScheduler:
         self.guard = guard
         self.budget = budget
         self.max_attempts = max_attempts
+        self.isolate_candidates = isolate_candidates
+        self.runtime_identity = copy.deepcopy(runtime_identity or {})
         if max_attempts < 1:
             raise PlanError('max_attempts must be positive')
         self.journal = TaskJournal(directory)
@@ -561,6 +565,13 @@ class TaskScheduler:
 
     def _save(self, event: str) -> None:
         self.journal.append(event, self.state)
+
+    def _assert_candidate_runtime(self, state):
+        mode = state.get('candidate_isolation', 0)
+        if type(mode) is not int or mode != int(self.isolate_candidates):
+            raise TaskError('Candidate isolation mode changed; explicit controller migration is required')
+        if self.isolate_candidates and state.get('candidate_runtime') != self.runtime_identity:
+            raise TaskError('Candidate runtime identity changed; explicit controller migration is required')
 
     def _plan_index(self) -> dict[str, dict]:
         """Index the upstream-validated plan with consistent malformed-plan errors."""
@@ -631,6 +642,7 @@ class TaskScheduler:
             peeked = self.journal.peek()
             if peeked is None:
                 raise TaskError('No scheduler state to invalidate')
+            self._assert_candidate_runtime(peeked)
             inputs = digest({'plan': self.plan, 'quality': self.quality, 'context': self.context})
             if peeked['inputs_sha256'] != inputs:
                 raise TaskError('Inputs changed: explicit plan migration/invalidation is required')
@@ -652,6 +664,7 @@ class TaskScheduler:
         return closure
 
     def _require_revalidatable(self, state):
+        self._assert_candidate_runtime(state)
         tasks = self._plan_index()
         if set(tasks) != set(state['tasks']):
             raise TaskError('Cannot revalidate: plan and state task sets differ')
@@ -927,7 +940,10 @@ class TaskScheduler:
             if before_check is not None:
                 before_check(index, check['check_id'])
             try:
-                out, err, rc = self.verifier(check['argv'], cwd, check['timeout_sec'])
+                if self.isolate_candidates:
+                    out, err, rc = self._isolated_check(check, cwd)
+                else:
+                    out, err, rc = self.verifier(check['argv'], cwd, check['timeout_sec'])
             except subprocess.TimeoutExpired as exc:
                 out, err, rc = '', f'Verification timeout: {exc}', 124
             log = attempt_dir / f'check-{index}.log'
@@ -1013,10 +1029,28 @@ class TaskScheduler:
                 if not isinstance(check, dict):
                     raise TypeError
                 inspect(check)
+            if record.get('capture_sha256'):
+                from ssdlc_candidates import CandidateStore, CandidateError
+                try:
+                    directory = self.directory / task_id / f"attempt-{record['attempts']}"
+                    CandidateStore(directory).load(self._capture_binding(self._plan_index()[task_id], record),
+                                                   record['capture_sha256'])
+                except (CandidateError, OSError, ValueError, KeyError, TypeError):
+                    problem('capture_changed')
             for attempt in record.get('failed_attempts', []):
                 for check in attempt['checks']:
                     inspect(check)
                 inspect(attempt, 'diff_ref', 'diff_sha256')
+                if attempt.get('capture_sha256'):
+                    from ssdlc_candidates import CandidateStore, CandidateError
+                    try:
+                        directory = self.directory / task_id / f"attempt-{attempt['attempt']}"
+                        binding_record = dict(record, attempts=attempt['attempt'], start_commit=attempt['base_commit'],
+                                              invocation_id=attempt['invocation_id'])
+                        CandidateStore(directory).load(self._capture_binding(self._plan_index()[task_id], binding_record),
+                                                       attempt['capture_sha256'])
+                    except (CandidateError, OSError, ValueError, KeyError, TypeError):
+                        problem('capture_changed')
             numbers, directories = set(), set()
             attempts = record.get('revalidations', [])
             for attempt in attempts:
@@ -1228,7 +1262,10 @@ class TaskScheduler:
             if (git(self.wt, 'write-tree') != tree or git(self.wt, 'diff', '--name-only')
                     or set(self._changed()) != set(record['changed_files'])):
                 raise TaskError('Interrupted checkpoint has unexpected working tree changes')
-            git(self.wt, 'commit', '-m', record['commit_message'])
+            if self.isolate_candidates:
+                git(self.wt, '-c', 'core.hooksPath=/dev/null', 'commit', '-m', record['commit_message'])
+            else:
+                git(self.wt, 'commit', '-m', record['commit_message'])
             head = git(self.wt, 'rev-parse', 'HEAD')
         if (git(self.wt, 'rev-parse', 'HEAD^') != parent or git(self.wt, 'rev-parse', 'HEAD^{tree}') != tree
                 or record['commit_message'] != git(self.wt, 'log', '-1', '--format=%B') or self._changed()):
@@ -1236,6 +1273,240 @@ class TaskScheduler:
         record.update(status='COMPLETED', commit=head)
         self.state['expected_head'] = head
         self._save('TASK_COMPLETED')
+
+    def _developer_prompt(self, task, record):
+        repair = self._repair_context(record)
+        return ('Implement only this task, reusing project conventions. Do not commit, change Git metadata, '
+                  'or modify protected SSDLC artifacts. Stay within target_files. '
+                  'Finish all source and test edits before starting verification. Do not edit files while '
+                  'a test command is running; the suite checks controller integrity and concurrent edits invalidate it. '
+                  'If repair context is supplied, the previous failed candidate is already restored: repair it in place. '
+                  'When ready for independent verification, end with TASK_DEV_STATUS: COMPLETE. '
+                  'If completion requires changes outside target_files, end with TASK_DEV_STATUS: SCOPE_REQUIRED. '
+                  'For a missing environment prerequisite, end with TASK_DEV_STATUS: ENVIRONMENT_BLOCKED. '
+                  'Explain the blocker and do not bypass it, weaken checks or expand scope.\n'
+                  + json.dumps(task, indent=2) + '\nPROJECT QUALITY CONTRACT:\n'
+                  + json.dumps(self.quality, indent=2) + '\nAPPROVED CONTEXT:\n'
+                  + json.dumps(self.context, indent=2) + '\nDEPENDENCY CHECKPOINTS:\n'
+                  + json.dumps({dep: self.state['tasks'][dep]['commit'] for dep in task['depends_on']})
+                  + '\nREPAIR CONTEXT:\n' + json.dumps(repair, indent=2)
+                  + ('\nPREVIOUS FAILURE:\n' + record.get('failure', '') if repair is None else ''))
+
+    def _capture_binding(self, task, record):
+        return {'task_id': task['task_id'], 'attempt': record['attempts'],
+                'base': record['start_commit'], 'inputs_sha256': self.state['inputs_sha256'],
+                'protected_sha256': digest(record['protected_snapshot']), 'runtime_version': 1,
+                'invocation_id': record['invocation_id'], 'plan_sha256': digest(self.plan),
+                'quality_contract_sha256': digest(self.quality),
+                'controller_sha256': self.runtime_identity.get('controller_sha256', digest(self.runtime_identity)),
+                'runtime_identity': self.runtime_identity}
+
+    def _attempt_directory(self, task, record):
+        directory = self.directory / task['task_id'] / f"attempt-{record['attempts']}"
+        directory.mkdir(parents=True, exist_ok=True)
+        manifest = {'schema_version': '1.0', 'task_id': task['task_id'], 'plan_revision': self.plan['plan_revision'],
+                    'manifest_revision': 1, 'target_files': task['target_files'], 'reason': 'Approved plan'}
+        manifest['sha256'] = digest(manifest)
+        validate_document('task-manifest', manifest)
+        path = directory / 'manifest.json'
+        if path.exists() and self.isolate_candidates:
+            if path.is_symlink() or json.loads(path.read_text()) != manifest:
+                raise TaskError('Reserved task manifest changed')
+        else:
+            atomic_json(path, manifest)
+        return directory
+
+    def _resume_reserved(self, task, record):
+        """A reserved invocation has never crossed TASK_STARTED/provider dispatch."""
+        self._assert_tree()
+        self.guard()
+        self.budget()
+        if self._ignored() != self.state['ignored_paths']:
+            raise TaskError('Ignored source changed before reserved dispatch')
+        if self._changed():
+            previous = record.get('failed_attempts', [])
+            if (not previous or git(self.wt, 'write-tree') != previous[-1]['tree']
+                    or git(self.wt, 'diff', '--name-only')
+                    or sorted(self._changed()) != sorted(previous[-1]['changed_files'])):
+                raise TaskError('Reserved dispatch source needs explicit reconciliation')
+        else:
+            self._restore_candidate(task, record)
+        attempt_dir = self._attempt_directory(task, record)
+        if (attempt_dir / 'capture').exists():
+            return self._resume_capture(task, record)
+        workspace = attempt_dir / 'developer-workspace'
+        if os.path.lexists(workspace):
+            if workspace.is_symlink() or not workspace.is_dir():
+                raise TaskError('Reserved workspace is unsafe')
+            # Preserve interrupted host preparation, never silently delete it.
+            os.rename(workspace, attempt_dir / ('interrupted-preparation-' + uuid.uuid4().hex))
+        result = self._capture_developer(task, record, self._developer_prompt(task, record), attempt_dir)
+        self._finish_attempt(task, record, result, attempt_dir)
+
+    def _capture_developer(self, task, record, prompt, attempt_dir):
+        from ssdlc_candidates import CandidateStore, CandidateError, checkout, git_identity, inventory, overlay
+        workspace = attempt_dir / 'developer-workspace'
+        try:
+            baseline = checkout(self.wt, workspace, record['start_commit'])
+            overlay(self.wt, workspace, self._changed())
+            initial = inventory(workspace)
+            metadata = git_identity(workspace)
+            record['status'] = 'RUNNING'
+            self._save('TASK_STARTED')
+            result = self.developer(task, record['attempts'], prompt, workspace)
+            result = dict(result, termination='returned')
+            if result.get('quiescent') is not True:
+                raise DevelopmentBlocked('DEVELOPER_INVOCATION', 'Developer writers are not confirmed quiescent; no redispatch')
+            store = CandidateStore(attempt_dir)
+            store.capture(workspace, baseline, initial, metadata, self._capture_binding(task, record),
+                          result, set(task['target_files']), PROTECTED)
+            return self._load_capture(task, record, store)
+        except CandidateError as exc:
+            raise DevelopmentBlocked('INTEGRITY', str(exc)) from exc
+
+    def _load_capture(self, task, record, store):
+        from ssdlc_candidates import signature
+        receipt, result = store.load(self._capture_binding(task, record), record.get('capture_sha256'))
+        record.update(status='CANDIDATE_CAPTURED', capture_sha256=signature(receipt),
+                      producer=receipt['producer'])
+        self._save('CANDIDATE_CAPTURED')
+        # The immutable receipt precedes every secondary guard and source import.
+        self.guard()
+        self._assert_tree()
+        if self._protected() != record['protected_snapshot'] or self._ignored() != self.state['ignored_paths']:
+            raise TaskError('Authoritative source metadata changed before candidate adoption')
+        if receipt['issues'] == ['scope_required']:
+            raise DevelopmentBlocked('SCOPE_REQUIRED', 'scope_required: captured candidate exceeds the approved manifest')
+        store.adopt(self.wt, receipt, self._changed())
+        return result
+
+    def _resume_capture(self, task, record):
+        from ssdlc_candidates import CandidateStore, CandidateError
+        attempt_dir = self.directory / task['task_id'] / f"attempt-{record['attempts']}"
+        try:
+            result = self._load_capture(task, record, CandidateStore(attempt_dir))
+        except CandidateError as exc:
+            category = ('DEVELOPER_INVOCATION' if record['status'] == 'RUNNING'
+                        and not record.get('capture_sha256') and not (attempt_dir / 'capture').exists()
+                        else 'INTEGRITY')
+            raise DevelopmentBlocked(category, str(exc)) from exc
+        print(f"[task-dev] Resuming captured {task['task_id']} attempt {record['attempts']}; no developer dispatch.", flush=True)
+        self._finish_attempt(task, record, result, attempt_dir)
+
+    def _reconcile_failed_capture(self, task, record):
+        """Finish a recorded rollback only from known, preserved source states."""
+        from ssdlc_candidates import CandidateStore, CandidateError
+        self._assert_tree()
+        attempt_dir = self.directory / task['task_id'] / f"attempt-{record['attempts']}"
+        try:
+            store = CandidateStore(attempt_dir)
+            receipt, _ = store.load(self._capture_binding(task, record), record['capture_sha256'])
+            store.adopt(self.wt, receipt, self._changed())
+        except CandidateError as exc:
+            raise DevelopmentBlocked('INTEGRITY', str(exc)) from exc
+        self._rollback_attempt(record, record['changed_files'])
+
+    def _isolated_check(self, check, cwd):
+        from ssdlc_candidates import CandidateError, checkout, git_identity, git_metadata, inventory, overlay
+        parent = self.directory / '.verification'
+        parent.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='check-', dir=parent) as name:
+            workspace = Path(name) / 'source'
+            try:
+                checkout(self.wt, workspace, self.state['expected_head'])
+                overlay(self.wt, workspace, self._changed())
+                before = inventory(workspace)
+                metadata = git_identity(workspace)
+                result = self.verifier(check['argv'], workspace / cwd.relative_to(self.wt),
+                                       check['timeout_sec'], workspace)
+                after = inventory(workspace)
+                if (any(after.get(path) != entry for path, entry in before.items())
+                        or git_metadata(workspace) != metadata['metadata']
+                        or git_identity(workspace) != metadata):
+                    raise _VerifierMutation('Verification changed source in disposable workspace')
+                return result
+            except CandidateError as exc:
+                raise DevelopmentBlocked('INTEGRITY', str(exc)) from exc
+
+    def _finish_attempt(self, task, record, result, attempt_dir):
+        attempt = record['attempts']
+        (attempt_dir / 'developer.log').write_text(result['output'])
+        record['producer'] = {k: v for k, v in result.items() if k != 'output'}
+        self.guard()
+        self._assert_tree()
+        if self._protected() != record['protected_snapshot']:
+            raise TaskError('Developer modified protected paths; preserving attempt')
+        if self._ignored() != self.state['ignored_paths']:
+            raise TaskError('Developer added or removed ignored files outside the verified source manifest')
+        changed = self._changed()
+        if not set(changed) <= set(task['target_files']):
+            raise TaskError('Task exceeded approved manifest; scope reconciliation is required')
+        for path in changed:
+            confined(self.wt, path)
+        blocker = developer_blocker(result['output'])
+        if result['exit_code'] != 0:
+            blocker = blocker or 'DEVELOPER_INVOCATION'
+        if not changed and not blocker:
+            raise TaskError('No diff: independent evidence of an already-satisfied task is required')
+        record.update(status='VERIFYING', changed_files=changed)
+        self._save('VERIFYING')
+        source_signature = self._source_signature(changed)
+        verification_dir = attempt_dir
+        if self.isolate_candidates and not blocker:
+            runs = record.setdefault('capture_verifications', [])
+            current_runs = [r for r in runs if r['attempt'] == attempt]
+            if len(current_runs) >= 3:
+                raise DevelopmentBlocked('ENVIRONMENT_BLOCKED', 'Captured candidate verification allowance exhausted')
+            verification_dir = attempt_dir / f'verification-{len(current_runs) + 1}'
+            runs.append({'attempt': attempt, 'dir': str(verification_dir.relative_to(self.directory))})
+            self._save('CAPTURE_VERIFICATION_STARTED')
+            verification_dir.mkdir(exist_ok=False)
+        results = self._verify(task, record, verification_dir) if not blocker else []
+        self._assert_tree()
+        if (self._protected() != record['protected_snapshot'] or self._changed() != changed
+                or self._source_signature(changed) != source_signature
+                or self._ignored() != self.state['ignored_paths']):
+            raise TaskError('Verification changed source or metadata')
+        # Capture all changes, including new files, without staging unknown paths.
+        if changed:
+            indexed = set(git(self.wt, 'ls-files', '-z').split('\x00'))
+            stage = [name for name in changed if os.path.lexists(self.wt / name) or name in indexed]
+            if stage:
+                git(self.wt, 'add', '--', *stage)
+        tree = git(self.wt, 'write-tree')
+        diff = git(self.wt, 'diff', '--cached', '--binary')
+        (attempt_dir / 'implementation.diff').write_text(diff)
+        if not blocker and all(r['exit_code'] == 0 and not r['empty_suite'] for r in results):
+            record.update(status='COMMIT_INTENT', candidate_tree=tree,
+                          commit_message=f'feat({self.plan["ticket_id"]}/{task["task_id"]}): {task["title"]}\n\nSSDLC-Attempt: {attempt}')
+            self._save('COMMIT_INTENT')
+            self._complete_intent(task, record)
+            return
+        # Preserve failed attempt before restoring only its declared paths.
+        record['failure'] = json.dumps(results) + '\n' + result['output']
+        category = blocker or 'CHECK_FAILURE'
+        candidate = {'attempt': attempt, 'category': category, 'base_commit': record['start_commit'],
+                     'tree': tree, 'changed_files': changed,
+                     'diff_ref': str((attempt_dir / 'implementation.diff').relative_to(self.directory)),
+                     'diff_sha256': file_hash(attempt_dir / 'implementation.diff'), 'checks': copy.deepcopy(results),
+                     'developer_output': result['output'][-8000:]}
+        if self.isolate_candidates:
+            candidate['capture_sha256'] = record['capture_sha256']
+            candidate['invocation_id'] = record['invocation_id']
+        prior = record.setdefault('failed_attempts', [])
+        outcomes = lambda checks: [(c['check_id'], c['exit_code'], c['empty_suite']) for c in checks]
+        if (category == 'CHECK_FAILURE' and prior and prior[-1]['category'] == 'CHECK_FAILURE'
+                and prior[-1]['tree'] == tree and outcomes(prior[-1]['checks']) == outcomes(results)):
+            candidate['category'] = category = 'REPAIR_STALLED'
+        prior.append(candidate)
+        record['status'] = 'FAILED'
+        self._save('ATTEMPT_FAILED')
+        self._rollback_attempt(record, changed)
+        self._log_failed_checks(results)
+        if category != 'CHECK_FAILURE':
+            path = attempt_dir / 'developer.log'
+            log_retry_reason('task-dev ' + category, diagnostic_excerpt(result['output'], 3000), path)
+            raise DevelopmentBlocked(category, f'Task {task["task_id"]}; evidence: {attempt_dir}')
 
     def run(self, ordered: list[dict], feedback: str = '', *, recover_protocol_task=None) -> dict:
         with ticket_lock(self.directory / 'scheduler.lock'):
@@ -1259,17 +1530,29 @@ class TaskScheduler:
             state = {'schema_version': '1.0', 'inputs_sha256': inputs, 'expected_head': self.plan['base_commit'],
                      'ignored_paths': self._ignored(),
                      'tasks': {t['task_id']: {'status': 'PENDING', 'attempts': 0} for t in ordered}}
+            if self.isolate_candidates:
+                if self.wt.stat().st_dev != self.directory.stat().st_dev:
+                    raise PlanError('Candidate worktree and evidence must share a filesystem for atomic adoption')
+                state['candidate_isolation'] = 1
+                state['candidate_runtime'] = self.runtime_identity
             self.state = state
             self._save('INITIALIZED')
         self.state = state
         if state['inputs_sha256'] != inputs:
             raise TaskError('Inputs changed: explicit plan migration/invalidation is required')
+        self._assert_candidate_runtime(state)
         for task in ordered:
             record = state['tasks'][task['task_id']]
             if 'protected_snapshot' in record and self._protected() != record['protected_snapshot']:
                 raise TaskError('Protected worktree paths changed; reconciliation required')
             if record['status'] == 'COMMIT_INTENT':
                 self._complete_intent(task, record)
+            elif self.isolate_candidates and record['status'] == 'DISPATCH_RESERVED':
+                self._resume_reserved(task, record)
+            elif self.isolate_candidates and record['status'] in ('RUNNING', 'CANDIDATE_CAPTURED', 'VERIFYING'):
+                self._resume_capture(task, record)
+            elif self.isolate_candidates and record['status'] == 'FAILED' and self._changed():
+                self._reconcile_failed_capture(task, record)
         self._assert_clean()
         if feedback:
             # Targeted bounce belongs to Step 3. Never silently skip rejected completed tasks.
@@ -1309,94 +1592,25 @@ class TaskScheduler:
                 attempt = record['attempts']
                 record.update(status='RUNNING', start_commit=state['expected_head'], checks=[],
                               protected_snapshot=self._protected())
-                self._save('TASK_STARTED')
-                attempt_dir = self.directory / task['task_id'] / f'attempt-{attempt}'
-                attempt_dir.mkdir(parents=True, exist_ok=True)
-                manifest = {'schema_version': '1.0', 'task_id': task['task_id'], 'plan_revision': self.plan['plan_revision'],
-                            'manifest_revision': 1, 'target_files': task['target_files'], 'reason': 'Approved plan'}
-                manifest['sha256'] = digest(manifest)
-                validate_document('task-manifest', manifest)
-                atomic_json(attempt_dir / 'manifest.json', manifest)
-                protected = self._protected()
-                prompt = ('Implement only this task, reusing project conventions. Do not commit, change Git metadata, '
-                          'or modify protected SSDLC artifacts. Stay within target_files. '
-                          'Finish all source and test edits before starting verification. Do not edit files while '
-                          'a test command is running; the suite checks controller integrity and concurrent edits invalidate it. '
-                          'If repair context is supplied, the previous failed candidate is already restored: repair it in place. '
-                          'When ready for independent verification, end with TASK_DEV_STATUS: COMPLETE. '
-                          'If completion requires changes outside target_files, end with TASK_DEV_STATUS: SCOPE_REQUIRED. '
-                          'For a missing environment prerequisite, end with TASK_DEV_STATUS: ENVIRONMENT_BLOCKED. '
-                          'Explain the blocker and do not bypass it, weaken checks or expand scope.\n'
-                          + json.dumps(task, indent=2) + '\nPROJECT QUALITY CONTRACT:\n'
-                          + json.dumps(self.quality, indent=2) + '\nAPPROVED CONTEXT:\n'
-                          + json.dumps(self.context, indent=2) + '\nDEPENDENCY CHECKPOINTS:\n'
-                          + json.dumps({dep: state['tasks'][dep]['commit'] for dep in task['depends_on']})
-                          + '\nREPAIR CONTEXT:\n' + json.dumps(repair, indent=2)
-                          + ('\nPREVIOUS FAILURE:\n' + record.get('failure', '') if repair is None else ''))
+                if self.isolate_candidates:
+                    record.pop('capture_sha256', None)
+                if self.isolate_candidates:
+                    record.update(status='DISPATCH_RESERVED', invocation_id=uuid.uuid4().hex)
+                    record.pop('producer', None)
+                    self._save('DISPATCH_RESERVED')
+                else:
+                    self._save('TASK_STARTED')
+                attempt_dir = self._attempt_directory(task, record)
+                prompt = self._developer_prompt(task, record)
                 print(f"[task-dev] {task['task_id']} attempt {attempt}/{self.max_attempts}: "
                       + (f"repairing archived attempt {repair['attempt']}" if repair else 'implementing from verified checkpoint'), flush=True)
-                result = self.developer(task, attempt, prompt)
-                (attempt_dir / 'developer.log').write_text(result['output'])
-                record['producer'] = {k: v for k, v in result.items() if k != 'output'}
-                self.guard()
-                self._assert_tree()
-                if self._protected() != protected:
-                    raise TaskError('Developer modified protected paths; preserving attempt')
-                if self._ignored() != state['ignored_paths']:
-                    raise TaskError('Developer added or removed ignored files outside the verified source manifest')
-                changed = self._changed()
-                if not set(changed) <= set(task['target_files']):
-                    raise TaskError('Task exceeded approved manifest; scope reconciliation is required')
-                for path in changed:
-                    confined(self.wt, path)
-                blocker = developer_blocker(result['output'])
-                if result['exit_code'] != 0:
-                    blocker = blocker or 'DEVELOPER_INVOCATION'
-                if not changed and not blocker:
-                    raise TaskError('No diff: independent evidence of an already-satisfied task is required')
-                record.update(status='VERIFYING', changed_files=changed)
-                self._save('VERIFYING')
-                source_signature = self._source_signature(changed)
-                results = self._verify(task, record, attempt_dir) if not blocker else []
-                self._assert_tree()
-                if (self._protected() != protected or self._changed() != changed
-                        or self._source_signature(changed) != source_signature
-                        or self._ignored() != state['ignored_paths']):
-                    raise TaskError('Verification changed source or metadata')
-                # Capture all changes, including new files, without staging unknown paths.
-                if changed:
-                    git(self.wt, 'add', '--', *changed)
-                tree = git(self.wt, 'write-tree')
-                diff = git(self.wt, 'diff', '--cached', '--binary')
-                (attempt_dir / 'implementation.diff').write_text(diff)
-                if not blocker and all(r['exit_code'] == 0 and not r['empty_suite'] for r in results):
-                    record.update(status='COMMIT_INTENT', candidate_tree=tree,
-                                  commit_message=f'feat({self.plan["ticket_id"]}/{task["task_id"]}): {task["title"]}\n\nSSDLC-Attempt: {attempt}')
-                    self._save('COMMIT_INTENT')
-                    self._complete_intent(task, record)
+                if self.isolate_candidates:
+                    result = self._capture_developer(task, record, prompt, attempt_dir)
+                else:
+                    result = self.developer(task, attempt, prompt)
+                self._finish_attempt(task, record, result, attempt_dir)
+                if record['status'] == 'COMPLETED':
                     break
-                # Preserve failed attempt before restoring only its declared paths.
-                record['failure'] = json.dumps(results) + '\n' + result['output']
-                category = blocker or 'CHECK_FAILURE'
-                candidate = {'attempt': attempt, 'category': category, 'base_commit': record['start_commit'],
-                             'tree': tree, 'changed_files': changed,
-                             'diff_ref': str((attempt_dir / 'implementation.diff').relative_to(self.directory)),
-                             'diff_sha256': file_hash(attempt_dir / 'implementation.diff'), 'checks': copy.deepcopy(results),
-                             'developer_output': result['output'][-8000:]}
-                prior = record.setdefault('failed_attempts', [])
-                outcomes = lambda checks: [(c['check_id'], c['exit_code'], c['empty_suite']) for c in checks]
-                if (category == 'CHECK_FAILURE' and prior and prior[-1]['category'] == 'CHECK_FAILURE'
-                        and prior[-1]['tree'] == tree and outcomes(prior[-1]['checks']) == outcomes(results)):
-                    candidate['category'] = category = 'REPAIR_STALLED'
-                prior.append(candidate)
-                record['status'] = 'FAILED'
-                self._save('ATTEMPT_FAILED')
-                self._rollback_attempt(record, changed)
-                self._log_failed_checks(results)
-                if category != 'CHECK_FAILURE':
-                    path = attempt_dir / 'developer.log'
-                    log_retry_reason('task-dev ' + category, diagnostic_excerpt(result['output'], 3000), path)
-                    raise DevelopmentBlocked(category, f'Task {task["task_id"]}; evidence: {attempt_dir}')
             if record['status'] != 'COMPLETED':
                 raise TaskError(f'Task {task["task_id"]} exhausted its persistent attempt limit')
         self.guard()

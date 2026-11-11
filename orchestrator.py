@@ -51,8 +51,8 @@ from ssdlc_requirements import prepare_requirements
 from ssdlc_controller import assert_controller, controller_snapshot
 
 from ssdlc_tasks import (
-    PlanError, TaskError, ResourceLimitError, TaskPlanValidator, TaskScheduler, atomic_json,
-    confined, file_hash, git, ticket_lock, validate_document, log_retry_reason, diagnostic_excerpt, test_suite_is_empty, parse_plan_output,
+    PlanError, TaskError, DevelopmentBlocked, ResourceLimitError, TaskPlanValidator, TaskScheduler, atomic_json,
+    confined, digest, file_hash, git, ticket_lock, validate_document, log_retry_reason, diagnostic_excerpt, test_suite_is_empty, parse_plan_output,
 )
 
 
@@ -927,7 +927,7 @@ class EngineRunner:
             "-w",
             str(cwd.resolve()),
             "-v",
-            f"{repo_root}:{repo_root}:ro",
+            f"{repo_root}:{repo_root}:" + ("rw" if writable_worktree is not None and writable_worktree.resolve() == repo_root else "ro"),
             "-v",
             f"{ssdlc_home}:/opt/ssdlc:ro",
         ]
@@ -971,7 +971,8 @@ class EngineRunner:
             # Docker cannot create a nested mountpoint inside that bind mount.
             if (ssdlc_home / ".ssdlc").exists():
                 docker_cmd.extend(["--tmpfs", "/opt/ssdlc/.ssdlc:rw,size=16m"])
-            if cwd.resolve() != repo_root:
+            if (cwd.resolve() != repo_root and
+                    (writable_worktree is None or not cwd.resolve().is_relative_to(writable_worktree.resolve()))):
                 docker_cmd.extend(["-v", f"{cwd.resolve()}:{cwd.resolve()}:ro"])
             if verification_scratch is not None:
                 docker_cmd.extend(["-v", f"{verification_scratch}:{verification_scratch}:rw"])
@@ -1037,7 +1038,8 @@ class EngineRunner:
 
         if writable_worktree is not None:
             wt_resolved = writable_worktree.resolve()
-            docker_cmd.extend(["-v", f"{wt_resolved}:{wt_resolved}:rw"])
+            if wt_resolved != repo_root:
+                docker_cmd.extend(["-v", f"{wt_resolved}:{wt_resolved}:rw"])
             # Mount ONLY .git/worktrees/<wt_name> :rw so git status/diff inside the worktree works
             # while .git/hooks, .git/config, and .git/refs remain kernel-enforced :ro!
             wt_git_meta = repo_root / ".git" / "worktrees" / wt_resolved.name
@@ -1138,6 +1140,7 @@ class EngineRunner:
         cwd: Path,
         timeout: int = 300,
         _resource_retry: bool = True,
+        verification_worktree: Optional[Path] = None,
     ) -> Tuple[str, str, int]:
         """
         Executes a deterministic test or scanner command inside the read-only role container
@@ -1158,9 +1161,12 @@ class EngineRunner:
                 exec_cmd = EngineRunner._wrap_in_role_container(
                     cmd, cwd=cwd, pass_ai_keys=False,
                     verification_scratch=scratch, verification_env=settings,
+                    writable_worktree=verification_worktree,
                 )
                 env = None
             else:
+                if verification_worktree is not None:
+                    raise DevelopmentBlocked('ENVIRONMENT_BLOCKED', 'Disposable verification requires Docker; local fallback is refused')
                 # Local mode has isolated cache/env but no kernel-enforced read-only mount.
                 exec_cmd = cmd
                 hidden = {"OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
@@ -1174,7 +1180,8 @@ class EngineRunner:
                 remaining = int(timeout - (time.monotonic() - started))
                 if _resource_retry and remaining > 0:
                     print(f"[resources] Verification hit a container limit; retrying once in a fresh container. Evidence: {proc.resource_evidence}", flush=True)
-                    out, err, rc = EngineRunner.run_sandboxed_cmd(cmd, cwd, remaining, _resource_retry=False)
+                    out, err, rc = EngineRunner.run_sandboxed_cmd(
+                        cmd, cwd, remaining, _resource_retry=False, verification_worktree=verification_worktree)
                     return out, f"Environment resource retry; first-attempt evidence: {proc.resource_evidence}\n" + err, rc
                 return proc.stdout or "", (proc.stderr or "") + f"\nENVIRONMENT_RESOURCE: {proc.resource_evidence}", 125
         return proc.stdout or "", proc.stderr or "", proc.returncode
@@ -1331,8 +1338,11 @@ class EngineRunner:
         reasoning_effort: str = "medium",
         use_openrouter: bool = False,
         writable_worktree: Optional[Path] = None,
+        require_container: bool = False,
     ) -> Tuple[str, int]:
         use_container = EngineRunner._should_spawn_role_container()
+        if require_container and not use_container:
+            raise DevelopmentBlocked('ENVIRONMENT_BLOCKED', 'Developer Docker runtime is unavailable; local fallback is refused')
         effective_sandbox = "danger-full-access" if (use_container or Path("/.dockerenv").exists()) else sandbox
         cmd = [
             "codex",
@@ -1377,6 +1387,7 @@ class EngineRunner:
         model: str = "",
         reasoning_effort: str = "medium",
         max_budget_usd: float = 0.0,
+        require_container: bool = False,
     ) -> Tuple[str, int, float, int, int]:
         env = os.environ.copy()
         env["IS_SANDBOX"] = "1"
@@ -1402,7 +1413,10 @@ class EngineRunner:
         if max_budget_usd > 0:
             cmd.extend(["--max-budget-usd", f"{max_budget_usd:.2f}"])
 
-        if EngineRunner._should_spawn_role_container():
+        use_container = EngineRunner._should_spawn_role_container()
+        if require_container and not use_container:
+            raise DevelopmentBlocked('ENVIRONMENT_BLOCKED', 'Developer Docker runtime is unavailable; local fallback is refused')
+        if use_container:
             cmd = EngineRunner._wrap_in_role_container(
                 cmd,
                 cwd=cwd,
@@ -2392,16 +2406,21 @@ class SSDLCOrchestrator:
         )}
         validator = TaskPlanValidator(self.repo_root, context["01-po/requirements.md"], quality, self.ssdlc_root)
         ordered = validator.validate(plan)
+        runtime_environment = self._verification_environment(quality['checks'][0]['argv'])
         protected = {name: dict(meta) for name, meta in self.state.get("artifacts", {}).items()
                      if name.startswith(("00-recon/", "01-po/", "02-design/"))}
         def guard():
             assert_controller(Path(__file__).resolve().parent, controller['snapshot'])
+            if self._verification_environment(quality['checks'][0]['argv']) != runtime_environment:
+                raise DevelopmentBlocked('ENVIRONMENT_BLOCKED', 'Candidate execution environment changed; explicit reconciliation required')
             validator.validate(plan)
             for name, meta in protected.items():
                 path = self.ssdlc_root / meta["path"]
                 if not path.is_file() or sha256_file(path) != meta["sha256"]:
                     raise TaskError(f"Protected artifact changed or disappeared: {name}")
-        def develop(task, attempt, prompt):
+        def develop(task, attempt, prompt, workspace):
+            if not EngineRunner._should_spawn_role_container():
+                raise DevelopmentBlocked('ENVIRONMENT_BLOCKED', 'Candidate isolation requires Docker role execution')
             engine, model, effort, reason = SquadDispatcher.dispatch_role(
                 "03-dev", self.state.get("risk_tier", "M"), task["profile"], attempt=attempt,
             )
@@ -2413,14 +2432,16 @@ class SSDLCOrchestrator:
                     tier_budget = {"S": 1.0, "M": 2.5, "L": 8.0}.get(self.state.get("risk_tier", "M"), 2.5)
                     dev_budget = float(os.environ.get("SSDLC_DEV_BUDGET_USD") or tier_budget)
                     out, rc, cost, tin, tout = EngineRunner.run_claude(
-                        prompt, cwd=wt, read_only=False, use_openrouter=use_or,
-                        writable_worktree=wt, model=model, reasoning_effort=effort,
+                        prompt, cwd=workspace, read_only=False, use_openrouter=use_or,
+                        writable_worktree=workspace, model=model, reasoning_effort=effort,
                         max_budget_usd=dev_budget,
+                        require_container=True,
                     )
                 elif engine == "codex":
                     out, rc = EngineRunner.run_codex(
-                        prompt, cwd=wt, sandbox="workspace-write", model=model,
-                        reasoning_effort=effort, use_openrouter=use_or, writable_worktree=wt,
+                        prompt, cwd=workspace, sandbox="workspace-write", model=model,
+                        reasoning_effort=effort, use_openrouter=use_or, writable_worktree=workspace,
+                        require_container=True,
                     )
                 else:
                     raise TaskError(f"Unsupported bootstrap developer engine: {engine}")
@@ -2429,11 +2450,19 @@ class SSDLCOrchestrator:
                 "GENERATED" if rc == 0 else f"RC_{rc}", time.time() - t0, cost, tin, tout,
                 f"{self.project_id}:{self.ticket_id}:{task['task_id']}", effort,
             ))
-            return {"output": out, "exit_code": rc, "engine": engine, "model": model, "effort": effort, "reason": reason}
+            return {"output": out, "exit_code": rc, "engine": engine, "model": model,
+                    "effort": effort, "reason": reason, "quiescent": True}
+        def verify(argv, cwd, timeout, workspace):
+            if not EngineRunner._should_spawn_role_container():
+                raise DevelopmentBlocked('ENVIRONMENT_BLOCKED', 'Candidate verification requires Docker role execution')
+            return EngineRunner.run_sandboxed_cmd(argv, cwd, timeout, verification_worktree=workspace)
         scheduler = TaskScheduler(
             wt, self.dir_dev / "tasks", plan, quality, context, develop,
-            EngineRunner.run_sandboxed_cmd, guard, self.check_budget_circuit_breaker,
+            verify, guard, self.check_budget_circuit_breaker,
             max_attempts=int(os.environ.get("SSDLC_MAX_DEV_RETRIES", "3")),
+            isolate_candidates=True,
+            runtime_identity={'controller_sha256': digest(controller),
+                              'environment': runtime_environment},
         )
         self.state["current_phase"] = "03-dev"
         self.state["current_step"] = "task-development"

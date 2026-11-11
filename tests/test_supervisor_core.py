@@ -573,13 +573,18 @@ class TestNoSecretsAndCanonicalBoundary(CoreCase):
             (root / 'nested').mkdir(parents=True)
             (root / 'nested/evidence').write_text('canonical fixture')
         before = [self.snapshot(p) for p in [ticket, runtime]]
-        self.controller('import sys, time\nprint(' + repr(sentinel) + ', flush=True)\n'
-                        'print(' + repr(sentinel) + ', file=sys.stderr, flush=True)\ntime.sleep(30)\n')
+        ready = self.repo / 'controller-ready'
+        self.controller('import sys, time\nfrom pathlib import Path\nprint(' + repr(sentinel) + ', flush=True)\n'
+                        'print(' + repr(sentinel) + ', file=sys.stderr, flush=True)\n'
+                        'Path(' + repr(str(ready)) + ').write_text("ready")\ntime.sleep(30)\n')
         self.args.update(goal=sentinel, test_cmd='echo ' + sentinel)
         self.addCleanup(self.cleanup_run)
         with patch.dict(os.environ, {'PROVIDER_TOKEN': sentinel}), contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
             result = sup.start(self.args)
             self.assertEqual(result['handoff']['outcome'], 'launched')
+            # Handoff can precede controller exec. Prove the sentinel was
+            # actually emitted before testing cancellation and non-disclosure.
+            self.wait_for(ready.is_file)
             store = sup.RunStore(self.repo, 'T-1')
             d = store.current()
             self.assertEqual(d['authorized']['test_cmd_sha256'], sup.digest('echo ' + sentinel))
@@ -588,7 +593,7 @@ class TestNoSecretsAndCanonicalBoundary(CoreCase):
             with self.assertRaises(ValueError):
                 store.append(store.path('events.jsonl'), dict(type='failure', provider_text=sentinel))
             result = sup.cancel(self.repo, 'T-1', grace=0)
-            self.assertEqual(result['status'], 'cancelled')
+            self.assertEqual(result['status'], 'cancelled', result.get('status_reason'))
         self.assertNotIn(sentinel, out.getvalue() + err.getvalue() + json.dumps(result))
         for p in store.root.rglob('*'):
             self.assertEqual(p.stat().st_mode & 0o777, 0o700 if p.is_dir() else 0o600)

@@ -1842,7 +1842,9 @@ def classification_predicates(evidence):
     if e.get('released') and not final and not ended and not canonical_failure:
         guards.append('U6')
     row3 = state.get('status') == 'HALTED_BUDGET_EXCEEDED' or final.get('category') == 'ENVIRONMENT_RESOURCE' or e.get('hard_deadline', False)
-    row3c = (not row3 and final.get('exc_type') == 'TaskError' and outcome.dispatch_count == 0 and any(
+    capture_uncertain = journal.get('candidate_isolation') == 1 and any(
+        t.get('status') == 'RUNNING' and not t.get('capture_sha256') for t in tasks.values())
+    row3c = (not row3 and not capture_uncertain and final.get('exc_type') == 'TaskError' and outcome.dispatch_count == 0 and any(
         t.get('attempts', 0) >= limit and t.get('status') != 'COMPLETED' and k not in new for k, t in tasks.items()))
     consistent = ((category == 'CHECK_FAILURE' and final.get('exc_type') == 'TaskError' and
                    next(iter(failed.values())).get('attempts', 0) >= limit) if failed else False) or (
@@ -1850,7 +1852,8 @@ def classification_predicates(evidence):
     row6 = bool(not row3 and not row3c and not guards and binding and consistent and
                 final.get('seq', 0) > (last.get('finished_seq') or 0))
     row4 = state.get('status') == 'ESCALATED_TO_SUPERVISOR' or (binding and final.get('category') in {'SCOPE_REQUIRED', 'ENVIRONMENT_BLOCKED'})
-    return dict(row3=bool(row3), row3c=bool(row3c), row4=bool(row4), row6=row6, guards=sorted(set(guards)),
+    return dict(row3=bool(row3), row3c=bool(row3c), row4=bool(row4), row6=row6,
+                capture_uncertain=capture_uncertain, guards=sorted(set(guards)),
                 diagnostics=[dict(code='earlier_task_failure') for _ in new])
 
 
@@ -1872,6 +1875,8 @@ def classify(evidence):
         cls, code, row = 'transient_environment_provider', 'preflight_failed', '3b'
     elif p['row3c']:
         cls, code, row = 'limits', 'attempt_allowance_exhausted', '3c'
+    elif p['capture_uncertain']:
+        cls, code, row = 'uncertain_outcome', 'terminal_unbound', '5'
     elif p['row4']:
         cls, code, row = 'operator_decision', 'operator_decision', '4'
     elif p['guards']:

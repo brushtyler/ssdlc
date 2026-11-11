@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "issue": 23,
+  "base_commit": "df3191786fad6d3302ba558623802fec047b5a6d",
+  "created_at": "2026-11-11T02:20:43.568132+00:00",
+  "provenance": "Direct bootstrap implementation; offline runtime validation, not autonomous delivery",
+  "source_files": [
+    {
+      "path": "orchestrator.py",
+      "sha256": "bb5852f0101c454c1f2dee8d2c48739d837fcc646df91f01c98732ee74cb6f70"
+    },
+    {
+      "path": "ssdlc_tasks.py",
+      "sha256": "21e28cc1ed4b5c338c99c261a4be2322e2e1fda99f6880898b100b4692b5e78b"
+    },
+    {
+      "path": "ssdlc_supervisor.py",
+      "sha256": "dbf3599cd63ae9882156f70431ceb0bfd30808a3ce5b5ae51419e5f7c7d40392"
+    },
+    {
+      "path": "ssdlc_candidates.py",
+      "sha256": "a9542cdc58cd7d2ffb3d030bb81e31395e50ff780b6efa34b3a05dff81d74be3"
+    },
+    {
+      "path": "schemas/candidate-capture.schema.json",
+      "sha256": "ac9b5cc8508bbb4b457647585776189a4901e30a47bb8ce152e6c1fe65b7d201"
+    },
+    {
+      "path": "tests/replay/test_candidate_capture.py",
+      "sha256": "ae483e044b4e92e8eeb06029d657ac977f479d70144322c8eb32b47f6140404e"
+    },
+    {
+      "path": "tests/replay/fixtures/issue22-cache.json",
+      "sha256": "93e75e2ad6cfc61c2192f101376001912d1cf3993ae16726af481ba7a8967494"
+    },
+    {
+      "path": "tests/replay/__init__.py",
+      "sha256": "8159993444bfd088fff3d1eb62e9550e4db9ac9d3eed449e1e4c7748e861249e"
+    },
+    {
+      "path": "tests/test_supervisor_dispatch.py",
+      "sha256": "733440fc053aeac8296e2478a89c7d26a6f0ae11b36af20881ad82dbad2731fa"
+    },
+    {
+      "path": "tests/test_task_bootstrap.py",
+      "sha256": "dbeefcc7e67b8bedeeadcaad3a44341fdfd4963b7dfe654a686f5dcb8343ec08"
+    },
+    {
+      "path": "tests/test_supervisor_core.py",
+      "sha256": "92f645fb45090b2090637f7b00f892b3abbd07320a3c3c3c4b9af44429a3c3d0"
+    }
+  ],
+  "targeted_suite": {
+    "result": "PASS",
+    "tests": 64,
+    "duration_seconds": 29.363,
+    "python": "3.14.4",
+    "environment": "Host with standard PATH; semantic adapters and real Git/Python subprocesses",
+    "command": "PYTHONPATH=tests python3 -m unittest replay.test_candidate_capture test_supervisor_dispatch.TestRealDevelopmentAndParity test_supervisor_dispatch.TestRouteDispatchParity test_task_bootstrap.OrchestratorBootstrapTests test_supervisor_core.TestNoSecretsAndCanonicalBoundary.test_sentinel_all_channels_and_canonical_runtime_unchanged"
+  },
+  "docker_smoke": {
+    "case": "issue22-cache-and-post-capture-interruption",
+    "result": "PASS",
+    "image_id": "sha256:67d6aa23250928dba124ad4ee4edb7b6c4aa33fef37c0ff1a7a6ddc078356665",
+    "network": "none",
+    "role_credentials": false,
+    "live_model_calls": 0,
+    "developer_dispatches": 1,
+    "development_attempts": 1,
+    "checkpoint_completed": true,
+    "authoritative_bytecode_files": 0,
+    "original_issue22_run_touched": false
+  },
+  "historical_candidate_check": {
+    "source_files_checked": 16,
+    "all_match_preserved_manifest": true
+  },
+  "full_suite_authority": "Required GitHub Actions checks on the final PR head",
+  "known_preexisting_environment_limit": {
+    "description": "An inherited PATH longer than the candidate-evidence schema bound causes existing restart tests to fail on unmodified main as well.",
+    "base_reproduction_tests": 2,
+    "base_reproduction_subcase_errors": 12,
+    "standard_path_controls_passed": 2,
+    "changed_by_this_increment": false
+  },
+  "publication": "No raw prompts, developer output, host credential values or private runtime state included",
+  "ci_first_attempt": {
+    "url": "https://github.com/brushtyler/ssdlc/actions/runs/42944195089",
+    "tests": 762,
+    "failures": 1,
+    "failing_test": "test_sentinel_all_channels_and_canonical_runtime_unchanged",
+    "observed": "Cancellation returned blocked instead of cancelled; the original assertion did not include its reason.",
+    "baseline_reproduction": "15 isolated runs on unchanged main did not reproduce the failure.",
+    "test_correction": "Wait for controller entry and actual sentinel emission before cancellation; retain all ownership and non-disclosure assertions and report any refusal reason.",
+    "production_cancellation_guards_changed": false
+  }
+}

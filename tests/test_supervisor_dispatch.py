@@ -276,7 +276,9 @@ class DevelopmentCase(bootstrap.RepositoryTests):
             if rc == 0: (Path(kw['cwd']) / 'app.py').write_text('value = 1\n')
             output = json.dumps(dict(result='REVIEW_STATUS: APPROVED')) if engine == 'claude' else 'REVIEW_STATUS: APPROVED'
             return subprocess.CompletedProcess(argv, rc, output, '')
-        with patch.dict(os.environ, hook_environment(store)), patch.dict(os.environ, {'SSDLC_ENABLE_TASK_BREAKDOWN': str(task).lower(), 'SSDLC_DEV_ENGINE': engine, 'SSDLC_MAX_DEV_RETRIES': '1'}), patch.object(o.EngineRunner, '_should_spawn_role_container', return_value=False), patch.object(o.EngineRunner, '_run_role_command', side_effect=command), patch.object(o.EngineRunner, 'run_sandboxed_cmd', return_value=('Ran 1 test\nOK', '', 0)), contextlib.redirect_stdout(io.StringIO()):
+        # Task capture requires a container; this semantic adapter simulates its
+        # command boundary while preserving the real supervised dispatch hooks.
+        with patch.dict(os.environ, hook_environment(store)), patch.dict(os.environ, {'SSDLC_ENABLE_TASK_BREAKDOWN': str(task).lower(), 'SSDLC_DEV_ENGINE': engine, 'SSDLC_MAX_DEV_RETRIES': '1'}), patch.object(o.EngineRunner, '_should_spawn_role_container', return_value=task), patch.object(o.EngineRunner, '_run_role_command', side_effect=command), patch.object(o.EngineRunner, 'run_sandboxed_cmd', return_value=('Ran 1 test\nOK', '', 0)), contextlib.redirect_stdout(io.StringIO()):
             try:
                 orch.run_phase_dev()
             except (DevelopmentBlocked, subprocess.TimeoutExpired):
