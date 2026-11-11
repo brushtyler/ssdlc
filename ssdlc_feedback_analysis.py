@@ -24,7 +24,8 @@ def independence(*actors):
     distinct = (len({a['identity'] for a in values}) == len(values)
                 and len({a['context_id'] for a in values}) == len(values))
     models = [(a['engine'], a['model']) for a in values]
-    reduced = len(set(models)) != len(models) or any('unknown' in pair for pair in models)
+    unknown = {'unknown', 'unspecified', 'none', 'n/a'}
+    reduced = len(set(models)) != len(models) or any(v.casefold() in unknown for pair in models for v in pair)
     return dict(distinct_roles=distinct, reduced_independence=reduced)
 
 
@@ -66,7 +67,8 @@ def classify_failures(checks, read_log, known_files, target_files, protected):
     failed = [c for c in checks if c['exit_code'] != 0 or c['empty_suite']]
     for check in failed:
         text = read_log(check)
-        located = unittest_failures(text, known_files) if text is not None else None
+        located = (unittest_failures(text, known_files) if text is not None
+                   and not check['empty_suite'] and check['exit_code'] not in (124, 125, 126, 127) else None)
         if located is None:
             unresolved.append(check['check_id'])
         else:
@@ -111,9 +113,28 @@ def failure_hint(source, task):
                              protected_paths(wt, source['plan']['base_commit']))
 
 
+def repair_hint(scheduler, task, record):
+    """Read verified failed-check logs as a non-authorizing prompt annotation."""
+    from ssdlc_grader import protected_paths
+    from ssdlc_tasks import confined
+    def read_log(check):
+        path = confined(scheduler.directory, check['log_ref'], protect=False)
+        if not path.is_file() or file_hash(path) != check['sha256']:
+            raise TaskError('Repair scope-hint evidence changed')
+        return path.read_text(errors='replace')
+    known = git(scheduler.wt, '--no-optional-locks', 'ls-files', '-z').split('\0')
+    result = classify_failures(record['failed_attempts'][-1]['checks'], read_log, known,
+                               task['target_files'], protected_paths(scheduler.wt, scheduler.plan['base_commit']))
+    omitted = max(0, len(result['failures']) - 8) + max(0, len(result['unresolved_checks']) - 8)
+    result['failures'] = result['failures'][:8]
+    result['unresolved_checks'] = result['unresolved_checks'][:8]
+    return dict(result, origin='HOST_HINT', hypothesis_only=True, omitted_count=omitted)
+
+
 def path_classes(source, paths):
     """Baseline tests and completed ownership are explicit policy boundaries."""
     from ssdlc_grader import protected_paths
+    from ssdlc_tasks import PROTECTED
     wt, base = source['root'] / 'worktree', source['plan']['base_commit']
     baseline = set(git(wt, '--no-optional-locks', 'ls-tree', '-r', '--name-only', base).splitlines())
     protected = set(protected_paths(wt, base))
@@ -131,7 +152,8 @@ def path_classes(source, paths):
                         if row['status'] == 'COMPLETED' and path in row.get('changed_files', []))
         is_test = (any(p in {'tests', 'test'} for p in Path(path).parts)
                    or Path(path).name.startswith('test_') or Path(path).name.endswith('_test.py'))
-        kind = ('PROTECTED' if path in protected or path.startswith('tests/replay/') else
+        kind = ('PROTECTED' if path in protected or path.startswith('tests/replay/')
+                or any(part in PROTECTED for part in Path(path).parts) else
                 'COMPLETED_TEST' if owners and is_test else 'COMPLETED_SOURCE' if owners else
                 'BASELINE_TEST' if path in baseline and is_test else
                 'UNOWNED_SOURCE' if path in baseline else 'NEW_FILE')
@@ -151,6 +173,18 @@ def impact_attribution(report, report_sha256, paths):
     return dict(status='DETECTABLE' if detected else 'NOT_IN_REPORT', report_sha256=report_sha256,
                 detectable_files=detected, unmatched_files=sorted(set(paths) - references),
                 complete_dependency_proof=False)
+
+
+def historical_impact(source, paths):
+    import json
+    ref = '02-design/fixture-impact.json'
+    if ref not in source['files']:
+        return impact_attribution(None, None, paths)
+    path = _regular(source['root'], ref)
+    if file_hash(path) != source['files'][ref]:
+        raise TaskError('Historical impact evidence changed')
+    report = json.loads(path.read_text())
+    return impact_attribution(report, digest(report), paths)
 
 
 def native_preview(source, request):
@@ -193,17 +227,9 @@ def native_preview(source, request):
             roles[role] = True
     if not all(roles.values()):
         reasons.append('FEEDBACK_ALLOWANCE_UNAVAILABLE')
-    report, sha = None, None
-    ref = '02-design/fixture-impact.json'
-    if ref in source['files']:
-        path = _regular(source['root'], ref)
-        if file_hash(path) != source['files'][ref]:
-            raise TaskError('Historical impact evidence changed')
-        report = json.loads(path.read_text())
-        sha = digest(report)
     return dict(schema_version=1, source_binding=source_binding(source), task_id=tid,
                 attempts_remaining=remaining, path_classes=classes, role_capacity=roles,
                 stop_reasons=reasons, delegation_candidate=not reasons,
                 failure_hint=failure_hint(source, task),
-                planner_feedback=impact_attribution(report, sha, request['requested_files']),
+                planner_feedback=historical_impact(source, request['requested_files']),
                 execution_authorized=False, model_dispatches=0)

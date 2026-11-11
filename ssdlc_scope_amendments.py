@@ -18,6 +18,7 @@ from ssdlc_tasks import (TaskError, TaskJournal, TaskScheduler, TaskPlanValidato
                          atomic_json, digest, file_hash, git, ticket_lock, validate_document)
 from ssdlc_transitions import (TransitionError, TransitionStore, _regular,
                                source_binding, sync_tree, validate_authorization)
+from ssdlc_locks import transition_lock
 
 
 def _ticket(path):
@@ -31,7 +32,7 @@ def _git_read(root, *args):
     return git(root, '--no-optional-locks', '-c', 'core.fsmonitor=false', *args)
 
 
-def inspect(ticket):
+def inspect(ticket, *, allow_host_hints=False):
     """Inspect the selected stopped generation; no repairing loads or writers."""
     from ssdlc_candidates import CandidateStore, inventory
     ticket = _ticket(ticket)
@@ -69,7 +70,8 @@ def inspect(ticket):
     task_id = selected[0]
     failed = state['tasks'][task_id].get('failed_attempts', [])
     if not failed or failed[-1]['category'] != 'SCOPE_REQUIRED':
-        raise TransitionError('Only an explicit SCOPE_REQUIRED failure is supported')
+        if not (allow_host_hints and failed and failed[-1]['category'] == 'CHECK_FAILURE'):
+            raise TransitionError('Only an explicit SCOPE_REQUIRED failure is supported')
     if any(row['status'] not in {'FAILED', 'COMPLETED', 'PENDING'} for row in state['tasks'].values()):
         raise TransitionError('Active or invalidated work requires separate reconciliation')
     for tid, row in state['tasks'].items():
@@ -110,11 +112,16 @@ def inspect(ticket):
     task = next(t for t in plan['tasks'] if t['task_id'] == task_id)
     if not all(state['tasks'][dep]['status'] == 'COMPLETED' for dep in task['depends_on']):
         raise TransitionError('Failed task dependencies are incomplete')
-    return dict(root=root, projection=projection, state=outer, journal=state, plan=plan,
+    result = dict(root=root, projection=projection, state=outer, journal=state, plan=plan,
                 quality=quality, context=context, envelope=envelope, counters=counters,
                 task_id=task_id, capture_bindings=bindings, files=_files(root),
                 worktree_sha256=digest(inventory(worktree)),
                 parent_selector=_read(ticket / 'execution', 'active.json'))
+    if failed[-1]['category'] != 'SCOPE_REQUIRED':
+        from ssdlc_feedback_analysis import failure_hint
+        if failure_hint(result, task)['classification'] != 'ALL_OUTSIDE':
+            raise TransitionError('Host scope hypothesis requires all failed checks localized outside the task')
+    return result
 
 
 def subject(source, plan, reason):
@@ -157,7 +164,7 @@ def subject(source, plan, reason):
 
 
 def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_snapshot,
-            guard=lambda: None, clock=time.time, fault=lambda point: None):
+            guard=lambda: None, clock=time.time, fault=lambda point: None, held_locks=(), delegation=None):
     """Stage a reviewed amendment, retaining all prior generations and counters."""
     from ssdlc_preparations import unfinished, register, update, pending, clear_pending
     from ssdlc_candidates import inventory
@@ -165,22 +172,34 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
     ticket, repo = _ticket(ticket), Path(repo).resolve()
     if ticket != repo / '.ssdlc' / plan.get('ticket_id', ''):
         raise TransitionError('Scope target must be the canonical ticket of the target repository')
-    with ticket_lock(ticket / 'ticket.lock'):
+    with transition_lock(ticket / 'ticket.lock', held_locks):
         if unfinished(ticket, namespace='execution'):
             raise TransitionError('Earlier preparation requires native discard')
-        source = inspect(ticket)
-        with ticket_lock(source['root'] / '03-dev/tasks/scheduler.lock'):
+        source = inspect(ticket, allow_host_hints=delegation is not None)
+        with transition_lock(source['root'] / '03-dev/tasks/scheduler.lock', held_locks):
             guard()
+            if delegation is not None:
+                from ssdlc_feedback_delegation import build_proof, FencedSession
+                from ssdlc_feedback import FeedbackStore
+                session, request_id = delegation
+                if (not isinstance(session, FencedSession) or session.ticket != ticket
+                        or session.root != source['root'] or session.runtime != runtime_identity
+                        or session.snapshot != controller_snapshot):
+                    raise TransitionError('Delegation requires the live native owner session')
+                feedback = FeedbackStore(ticket)
+                reason = feedback.inspect()['requests'][request_id]['proposal']['reason_code']
+                review = build_proof(session, source, plan, reason, feedback, request_id)
             reviewed = subject(source, plan, reason)
-            if (not isinstance(review, dict) or set(review) != {'subject_sha256', 'reviewer', 'report', 'scope_diff'}
+            if delegation is None and (not isinstance(review, dict) or set(review) != {'subject_sha256', 'reviewer', 'report', 'scope_diff'}
                     or not isinstance(review['reviewer'], str) or not review['reviewer'].strip()
                     or review['subject_sha256'] != digest(reviewed)):
                 raise TransitionError('Independent review must bind the exact amendment subject')
             validator = TaskPlanValidator(source['root'] / 'worktree', source['context'][CONTEXT[0]],
                                           source['quality'], source['root'])
-            validate_amendment(source['plan'], plan, json.dumps(review['report']), validator.validate,
-                               validator.requirement_catalogue['required_ids'], source['quality'],
-                               declared_scope=review['scope_diff'])
+            if delegation is None:
+                validate_amendment(source['plan'], plan, json.dumps(review['report']), validator.validate,
+                                   validator.requirement_catalogue['required_ids'], source['quality'],
+                                   declared_scope=review['scope_diff'])
             if runtime_identity['environment'] != source['journal']['candidate_runtime']['environment']:
                 raise TransitionError('Scope-only recovery cannot change verification environment')
             if runtime_identity['controller_sha256'] != digest(execution_contract(controller_snapshot)):
@@ -266,6 +285,9 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                     new_controller_sha256=runtime_identity['controller_sha256'], scope_diff=reviewed['scope_diff'],
                     source_files=source['files'], projection_sha256=digest(projected),
                     artifacts={name: file_hash(prepared / name) for name in ('recipe.json', 'runtime-seal.json')})
+                if delegation is not None:
+                    from ssdlc_feedback_delegation import CONTRACT
+                    proposal.update(authorization_contract=CONTRACT, delegation_sha256=digest(review))
                 atomic_json(prepared / 'proposal.json', proposal)
                 guard(); sync_tree(runtime); sync_tree(prepared)
                 pending(ticket, identity, namespace='execution')
@@ -277,27 +299,48 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                 raise
 
 
-def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=time.time, fault=lambda point: None):
+def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=time.time, fault=lambda point: None,
+             held_locks=(), delegation=None):
     from ssdlc_candidates import inventory
     from ssdlc_preparations import update, clear_pending
     ticket, preparation = _ticket(ticket), _ticket(preparation)
     proposal, recipe = _read(preparation, 'proposal.json'), _read(preparation, 'recipe.json')
+    from ssdlc_feedback_delegation import CONTRACT, FencedSession, finalize
+    delegated = proposal.get('authorization_contract') == CONTRACT
     if (preparation != ticket / 'execution' / ('prepared-' + proposal['transition_id'])
-            or proposal.get('authorization_contract') != 'scope-amendment-v1'):
+            or proposal.get('authorization_contract') not in {'scope-amendment-v1', CONTRACT}
+            or delegated and (not isinstance(delegation, FencedSession) or delegation.ticket != ticket
+                              or delegation.root != Path(recipe['source_root']))
+            or not delegated and delegation is not None):
         raise TransitionError('Activation requires the recorded scope preparation')
     validate_authorization(authorization, proposal)
-    with ticket_lock(ticket / 'ticket.lock'):
+    with transition_lock(ticket / 'ticket.lock', held_locks):
         guard()
+        if delegated:
+            delegation.check()
         store = TransitionStore(ticket / 'execution', fault)
         selected, projected = store.load(), _read(preparation, 'projection.json')
         if selected['transition_id'] == proposal['transition_id']:
             if selected != projected: raise TransitionError('Activated projection changed')
             _selected_execution_root(ticket, selected)
+            if delegated:
+                finalize(delegation, proposal, recipe, selected, fault=fault)
             update(ticket, proposal['transition_id'], namespace='execution', status='ACTIVE')
             clear_pending(ticket, proposal['transition_id'], namespace='execution')
             return selected
-        source = inspect(ticket)
-        with ticket_lock(source['root'] / '03-dev/tasks/scheduler.lock'):
+        source = inspect(ticket, allow_host_hints=delegated)
+        with transition_lock(source['root'] / '03-dev/tasks/scheduler.lock', held_locks):
+            if delegated:
+                from ssdlc_feedback_delegation import build_proof
+                from ssdlc_feedback import FeedbackStore
+                # Persisted lock observations describe preparation. Reobserve
+                # liveness now without rewriting the sealed AI response/proof.
+                proof = build_proof(delegation, source, _read(ticket / 'execution-runtimes' / proposal['transition_id'],
+                    '02-design/plan.json'), recipe['subject']['reason'], FeedbackStore(ticket),
+                    recipe['review']['request_id'])
+                proof['fence'] = recipe['review']['fence']
+                if proof != recipe['review']:
+                    raise TransitionError('Delegated feedback changed after preparation')
             if (source['parent_selector'] != proposal['parent_selector'] or source['files'] != proposal['source_files']
                     or str(source['root']) != recipe['source_root'] or source['worktree_sha256'] != recipe['source_worktree_sha256']):
                 raise TransitionError('Parent generation changed after amendment review')
@@ -317,7 +360,11 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
             limits = LimitsStore(runtime, clock)
             limits.check(counters, envelope['policy']); limits.require_capacity('03-dev', '03-dev')
             artifacts = {name: _regular(preparation, name).read_bytes() for name in proposal['artifacts']}
+            if delegated:
+                delegation.check()
             result = store.publish(source['root'], proposal, authorization, source['projection'], projected, artifacts)
+            if delegated:
+                finalize(delegation, proposal, recipe, result, fault=fault)
             update(ticket, proposal['transition_id'], namespace='execution', status='ACTIVE')
             clear_pending(ticket, proposal['transition_id'], namespace='execution')
             return result

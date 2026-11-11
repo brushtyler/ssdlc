@@ -104,6 +104,57 @@
         "exclusive_cost_kind_v1"
       ],
       "description": "Opt-in: an unknown invocation belongs to one cost kind. Each kind cap reserves its full allowance; the combined cap reserves the maximum once, not their sum. Absent retains additive legacy semantics."
+    },
+    "feedback_delegation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "capability",
+        "allowed_files",
+        "max_amendments",
+        "max_amendments_per_task",
+        "max_added_files",
+        "require_strong_independence"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "capability": {
+          "const": "feedback-scope-delegation-v1"
+        },
+        "allowed_files": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9_./-]+$"
+          }
+        },
+        "require_strong_independence": {
+          "const": true
+        },
+        "max_amendments": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "max_amendments_per_task": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "max_added_files": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        }
+      }
     }
   },
   "$defs": {

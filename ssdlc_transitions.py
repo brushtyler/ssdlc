@@ -41,6 +41,9 @@ def source_binding(root, refs):
 
 
 def validate_authorization(authorization, proposal):
+    if proposal.get('authorization_contract') == 'feedback-scope-delegation-v1':
+        from ssdlc_feedback_delegation import validate_authorization as delegated
+        return delegated(authorization, proposal)
     expected = {'schema_version', 'transition_id', 'proposal_sha256', 'authorized',
                 'source_fenced', 'old_controller_sha256', 'new_controller_sha256'}
     if not isinstance(authorization, dict):
@@ -188,7 +191,7 @@ class TransitionStore:
                     'manifest_sha256': file_hash(_regular(generation, 'manifest.json'))}
         pointer = self.root / 'active.json'
         if pointer.exists() and self._read(self.root, 'active.json') != selected:
-            if (proposal.get('authorization_contract') != 'scope-amendment-v1'
+            if (proposal.get('authorization_contract') not in {'scope-amendment-v1', 'feedback-scope-delegation-v1'}
                     or proposal.get('parent_selector') != self._read(self.root, 'active.json')):
                 raise TransitionError('Another generation is already selected')
             self.load()  # Validate the exact parent, not merely its pointer bytes.

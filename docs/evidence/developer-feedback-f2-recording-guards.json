@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "issue": 39,
+  "increment": "Early F2: six F1 recording guards and funded offline adjudication",
+  "tested_base_commit": "33fcac1",
+  "validation_scope": "Working tree implementation and tests before this documentation-only evidence file was added",
+  "full_suite": {
+    "tests": 1014,
+    "test_seconds": 385.727,
+    "wall_seconds": 386.453,
+    "exit_code": 0
+  },
+  "focused_suite": {
+    "tests": 58,
+    "seconds": 28.962,
+    "exit_code": 0
+  },
+  "isolated_a5": {
+    "cases": 12,
+    "failed_cases": 0
+  },
+  "live_provider_calls": 0,
+  "coverage": [
+    "Host-bound file classes and baseline/completed test escalation",
+    "Persistent provisional amendment quotas and idempotent review replay",
+    "Independence checks for all consultation roles",
+    "Host-derived failed-test deduplication and historical impact attribution",
+    "Distinct non-authorizing host hints and developer requests",
+    "Requirement conflict escalation and prohibited amendment/advisory conversion",
+    "Real production defect, simulated funded rejection, preserved test and no identical redispatch",
+    "Exact consultation accounting advance, restart replay and worktree mutation refusal"
+  ],
+  "not_implemented": [
+    "Delegated native activation and complete technical fencing",
+    "Final activation/quota reconciliation and admitted descendant lineage",
+    "Production provider adapter",
+    "Automatic scheduler/supervisor interception",
+    "GitHub projections, prerequisite workflow and consultative PO routing"
+  ],
+  "historical_issue22_changed": false,
+  "omitted": [
+    "Private runtime paths and bindings",
+    "Raw provider/check logs",
+    "Credentials and local configuration"
+  ]
+}

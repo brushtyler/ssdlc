@@ -452,7 +452,9 @@ def ticket_lock(path: Path):
         except BlockingIOError as exc:
             raise TaskError('Another process is running this ticket') from exc
         try:
-            yield
+            from ssdlc_locks import record_lock
+            with record_lock(path, stream.fileno()) as lease:
+                yield lease
         finally:
             fcntl.flock(stream, fcntl.LOCK_UN)
 
@@ -1174,12 +1176,15 @@ class TaskScheduler:
                 print(f"[task-dev] Failed {check['check_id']}: exit={check['exit_code']}, empty_suite={check['empty_suite']}", flush=True)
                 log_retry_reason('task-dev', diagnostic_excerpt(path.read_text(), 3000), path)
 
-    def _repair_context(self, record: dict) -> dict | None:
+    def _repair_context(self, record: dict, task=None) -> dict | None:
         failures = record.get('failed_attempts', [])
         if not failures:
             return None
         latest = failures[-1]
         context = copy.deepcopy(latest)
+        if task is not None and latest['category'] == 'CHECK_FAILURE':
+            from ssdlc_feedback_analysis import repair_hint
+            context['scope_hint'] = repair_hint(self, task, record)
         if self._scope_reconciled(record):
             context['scope_amendment'] = copy.deepcopy(record['scope_reconciliation'])
         context['history'] = [{k: item[k] for k in ('attempt', 'category', 'checks', 'diff_ref', 'diff_sha256')}
@@ -1325,7 +1330,7 @@ class TaskScheduler:
         self._save('TASK_COMPLETED')
 
     def _developer_prompt(self, task, record):
-        repair = self._repair_context(record)
+        repair = self._repair_context(record, task=task)
         return ('Implement only this task, reusing project conventions. Do not commit, change Git metadata, '
                   'or modify protected SSDLC artifacts. Stay within target_files. '
                   'Finish all source and test edits before starting verification. Do not edit files while '

@@ -10,7 +10,7 @@ import test_scope_amendments as fixtures
 from ssdlc_feedback import main
 from ssdlc_feedback_analysis import native_preview, path_classes
 from ssdlc_reconciliation import _files
-from ssdlc_tasks import TaskError, digest
+from ssdlc_tasks import TaskError, ticket_lock
 
 
 class NativeFeedbackTests(unittest.TestCase):
@@ -87,6 +87,24 @@ class NativeFeedbackTests(unittest.TestCase):
             dispatch.assert_not_called()
         self.assertEqual(_files(self.source['root']), before)
         self.assertFalse((self.fixture.ticket / 'feedback').exists())
+
+    def test_scope_transition_borrows_owned_locks_without_fabricating_approval(self):
+        from ssdlc_scope_amendments import activate
+        self.initialize()
+        f = self.fixture
+        with ticket_lock(f.ticket / 'ticket.lock') as ticket_lease:
+            with ticket_lock(f.root / '03-dev/tasks/scheduler.lock') as scheduler_lease:
+                leases = (ticket_lease, scheduler_lease)
+                staged = f.stage(held_locks=leases)
+                # Borrowing does not authorize activation; the existing exact
+                # synthetic operator approval is still independently required.
+                with self.assertRaisesRegex(TaskError, 'authorization'):
+                    activate(f.ticket, staged['preparation'], {}, held_locks=leases)
+                selected = activate(f.ticket, staged['preparation'], f.auth(staged), held_locks=leases)
+                self.assertEqual(selected['transition_id'], staged['proposal']['transition_id'])
+                ticket_lease.validate(f.ticket / 'ticket.lock')
+                scheduler_lease.validate(f.root / '03-dev/tasks/scheduler.lock')
+        self.assertEqual(f.calls, [1, 2])
 
 
 if __name__ == '__main__':

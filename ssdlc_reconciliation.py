@@ -238,7 +238,9 @@ def _prepare(ticket, repo, request, *, runtime_identity, controller_snapshot, ve
                    'task_floors': {tid: {key: copy.deepcopy(row[key]) for key in
                         ('attempts', 'failed_attempts', 'reconciliation_required', 'capture_verifications') if key in row}
                         for tid, row in current['tasks'].items()},
-                   'allowed_entrypoints': ALLOWED_ENTRYPOINTS, 'allowed_phases': ALLOWED_PHASES}
+                   'allowed_entrypoints': ALLOWED_ENTRYPOINTS,
+                   'allowed_phases': ALLOWED_PHASES + (['feedback'] if 'feedback' in profile['phase_invocations']
+                       and any(r.startswith('feedback-') for r in profile['role_invocations']) else [])}
         envelope = {'policy': profile, 'binding': binding}
         initial['policy_sha256'] = digest(envelope)
         store = LimitsStore(runtime, clock)
@@ -438,6 +440,9 @@ def resolve_execution(ticket):
     ticket = Path(ticket)
     store = TransitionStore(ticket / 'execution')
     projection = store.load()
+    from ssdlc_feedback_delegation import ensure_reconciled
+    intent = _read(ticket / 'execution' / projection['transition_id'], 'intent.json')
+    ensure_reconciled(ticket, projection, intent['proposal'])
     pending = ticket / 'execution/pending.json'
     if pending.exists() and _read(ticket / 'execution', 'pending.json')['transition_id'] != projection['transition_id']:
         raise TransitionError('Execution amendment pending; dispatch is fenced')
