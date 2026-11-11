@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "case_id": "issue22-cache-and-post-capture-interruption",
+  "baseline": {
+    ".gitignore": ".ssdlc/\n__pycache__/\n*.pyc\n",
+    "app.py": "value = 0\n"
+  },
+  "developer_output": "TASK_DEV_STATUS: COMPLETE",
+  "fault": "secondary guard after durable candidate capture",
+  "expected": {
+    "developer_dispatches": 1,
+    "development_attempts": 1,
+    "checkpoint_completed": true,
+    "authoritative_bytecode_files": 0,
+    "live_model_calls": 0
+  }
+}

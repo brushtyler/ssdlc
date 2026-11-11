@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Private task candidate capture (not verification authority)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "binding", "producer", "output_sha256", "payload_sha256", "entries", "generated_artifacts", "issues"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "binding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["task_id", "attempt", "base", "inputs_sha256", "protected_sha256", "runtime_version", "runtime_identity", "invocation_id", "plan_sha256", "quality_contract_sha256", "controller_sha256"],
+      "properties": {
+        "task_id": {"type": "string", "minLength": 1},
+        "attempt": {"type": "integer", "minimum": 1},
+        "base": {"type": "string", "pattern": "^[a-f0-9]{40,64}$"},
+        "inputs_sha256": {"$ref": "#/$defs/sha"},
+        "protected_sha256": {"$ref": "#/$defs/sha"},
+        "runtime_version": {"const": 1},
+        "runtime_identity": {"type": "object"},
+        "invocation_id": {"type": "string", "pattern": "^[a-f0-9]{32}$"},
+        "plan_sha256": {"$ref": "#/$defs/sha"},
+        "quality_contract_sha256": {"$ref": "#/$defs/sha"},
+        "controller_sha256": {"$ref": "#/$defs/sha"}
+      }
+    },
+    "producer": {
+      "type": "object", "required": ["exit_code", "quiescent", "termination"],
+      "properties": {"exit_code": {"type": "integer"}, "quiescent": {"const": true}, "termination": {"const": "returned"}}
+    },
+    "output_sha256": {"$ref": "#/$defs/sha"},
+    "payload_sha256": {"$ref": "#/$defs/sha"},
+    "entries": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object", "additionalProperties": false,
+        "required": ["before", "starting", "after"],
+        "properties": {
+          "before": {"$ref": "#/$defs/entry"},
+          "starting": {"$ref": "#/$defs/entry"},
+          "after": {"$ref": "#/$defs/entry"}
+        }
+      }
+    },
+    "generated_artifacts": {"type": "object", "additionalProperties": {"$ref": "#/$defs/file"}},
+    "issues": {
+      "type": "array", "uniqueItems": true,
+      "items": {"enum": ["protected_metadata", "protected_path", "scope_required", "unsafe_entry"]}
+    }
+  },
+  "$defs": {
+    "sha": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "file": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "sha256", "executable"],
+      "properties": {"kind": {"const": "file"}, "sha256": {"$ref": "#/$defs/sha"}, "executable": {"type": "boolean"}}
+    },
+    "entry": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/file"},
+        {"type": "object", "additionalProperties": false, "required": ["kind", "target"],
+         "properties": {"kind": {"const": "symlink"}, "target": {"type": "string"}}},
+        {"type": "object", "additionalProperties": false, "required": ["kind"],
+         "properties": {"kind": {"const": "unsupported"}}}
+      ]
+    }
+  }
+}

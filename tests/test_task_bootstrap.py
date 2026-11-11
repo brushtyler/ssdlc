@@ -908,7 +908,8 @@ class OrchestratorBootstrapTests(RepositoryTests):
         for name, path in [('01-po/requirements.md', requirements), ('00-recon/quality-contract.json', quality_path), ('02-design/plan.json', plan_path)]:
             orch.record_artifact(name, path)
 
-    def test_task_path_uses_existing_routing_and_resumes_without_ai(self):
+    @patch('orchestrator.EngineRunner._should_spawn_role_container', return_value=True)
+    def test_task_path_uses_existing_routing_and_resumes_without_ai(self, _runtime):
         with patch.dict(os.environ, {'SSDLC_ENABLE_TASK_BREAKDOWN': 'true'}):
             orch = self.make_orchestrator()
             self.seed_inputs(orch)
@@ -925,6 +926,28 @@ class OrchestratorBootstrapTests(RepositoryTests):
                 orch.run_phase_dev()
                 self.assertEqual(engine.call_count, 1)
                 self.assertEqual(orch.state['tasks_status']['T1']['status'], 'COMPLETED')
+
+    @patch('orchestrator.EngineRunner._should_spawn_role_container', return_value=True)
+    def test_changed_environment_preserves_capture_before_refusing_verification(self, _runtime):
+        orch = self.make_orchestrator()
+        self.seed_inputs(orch)
+        environment = {'mode': 'role_container', 'platform': 'fixture', 'image_id': 'sha256:' + '1' * 64}
+        def generate(prompt, **kwargs):
+            (kwargs['cwd'] / 'app.py').write_text('value = 1\n')
+            environment['image_id'] = 'sha256:' + '2' * 64
+            return 'Done', 0
+        with patch.dict(os.environ, {'SSDLC_ENABLE_TASK_BREAKDOWN': 'true'}), \
+                patch.object(orch, '_verification_environment', side_effect=lambda *a: dict(environment)), \
+                patch('orchestrator.SquadDispatcher.dispatch_role', return_value=('codex', 'fake', 'low', 'test')), \
+                patch('orchestrator.EngineRunner.run_codex', side_effect=generate) as engine, \
+                patch('orchestrator.EngineRunner.run_sandboxed_cmd', return_value=('Ran 1 test\nOK', '', 0)):
+            with self.assertRaisesRegex(DevelopmentBlocked, 'environment changed'):
+                orch.run_phase_dev()
+            self.assertTrue((orch.dir_dev / 'tasks/T1/attempt-1/capture/receipt.json').is_file())
+            self.assertEqual((orch.worktree_dir / 'app.py').read_text(), 'value = 0\n')
+            environment['image_id'] = 'sha256:' + '1' * 64
+            orch.run_phase_dev()
+            self.assertEqual(engine.call_count, 1)
 
     def test_legacy_path_stays_default_and_enabled_ticket_cannot_downgrade(self):
         with patch.dict(os.environ, {'SSDLC_ENABLE_TASK_BREAKDOWN': 'false'}):
@@ -1053,7 +1076,8 @@ class OrchestratorBootstrapTests(RepositoryTests):
             self.scheduler(lambda *args: self.fail('should not generate')).run(self.plan['tasks'], feedback='Fix behavior')
 
 
-    def test_pipeline_runs_global_gates_and_bounce_cannot_be_ignored(self):
+    @patch('orchestrator.EngineRunner._should_spawn_role_container', return_value=True)
+    def test_pipeline_runs_global_gates_and_bounce_cannot_be_ignored(self, _runtime):
         for review_passes in (True, False):
             with self.subTest(review_passes=review_passes), patch.dict(os.environ, {'SSDLC_ENABLE_TASK_BREAKDOWN': 'true', 'SSDLC_EXECUTION_MODE': 'local'}):
                 # Each scenario needs an independent branch and journal.
