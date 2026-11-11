@@ -6,20 +6,11 @@ from pathlib import Path
 
 from ssdlc_design import DesignSession
 from ssdlc_tasks import PlanError
+from replay.repository_fixtures import finding, review
 
 
-def finding(identifier='D1', **kwargs):
-    return {'finding_id': identifier, 'status': 'OPEN', 'severity': 'BLOCKING', 'category': 'PLAN_DEFECT',
-            'requirement_refs': ['SEC-2'], 'task_ids': [], 'message': 'Retained evidence inventory is incomplete',
-            'evidence': 'ADR omits failed_attempts check logs stored by the scheduler',
-            'requested_change': 'Enumerate retained logs, including archived failed attempts, and test tampering',
-            'new_issue_reason': 'INITIAL_REVIEW', **kwargs}
 
 
-def review(findings=()):
-    blockers = [f for f in findings if f['status'] == 'OPEN' and f['severity'] == 'BLOCKING']
-    return json.dumps({'verdict': 'REVISION_REQUIRED' if blockers else 'APPROVED', 'analysis': 'STRIDE and source-contract assessment',
-                       'findings': list(findings)})
 
 
 class DesignSessionTests(unittest.TestCase):

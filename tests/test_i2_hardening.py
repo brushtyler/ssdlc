@@ -4,6 +4,7 @@ import io
 import json
 from pathlib import Path
 import shutil
+import sys
 import subprocess
 import tempfile
 import threading
@@ -278,6 +279,13 @@ class GraderTargetTests(CandidateCaptureTests):
         self.plan['tasks'][0]['target_files'] = ['app.py']
         self.assertEqual(self.validator().validate(self.plan)[0]['task_id'], 'T1')
 
+    def test_execution_mode_tests_are_outside_the_replay_fixture_boundary(self):
+        self.plan['tasks'][0]['target_files'] = ['tests/test_task_bootstrap.py', 'tests/test_design_session.py']
+        self.assertEqual(self.validator().validate(self.plan)[0]['task_id'], 'T1')
+        self.plan['tasks'][0]['target_files'] = ['tests/replay/repository_fixtures.py']
+        with self.assertRaisesRegex(TaskError, 'explicit reviewed revision'):
+            self.validator().validate(self.plan)
+
     def test_capture_refuses_grader_edit_even_if_manifest_validation_is_bypassed(self):
         self.plan['tasks'][0]['target_files'].append('tests/replay/benchmark.py')
         def developer(*args):
@@ -299,13 +307,28 @@ class GraderProtectionTests(unittest.TestCase):
             for name in REQUIRED:
                 path = root / name; path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source / name, path)
-            self.assertEqual(verify_baseline(root), 'i2-integrity-v3')
+            self.assertEqual(verify_baseline(root), 'i2-fixtures-v4')
             for name in REQUIRED - {'schemas/recovery-grader-baseline.json'}:
                 with self.subTest(path=name):
                     path = root / name; original = path.read_bytes()
                     path.write_bytes(original + b'\n# changed baseline\n')
                     with self.assertRaisesRegex(RuntimeError, 'without reviewed baseline'): verify_baseline(root)
                     path.write_bytes(original)
+
+    def test_isolated_replay_never_imports_mutable_execution_mode_modules(self):
+        source = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'source'
+            shutil.copytree(source, root, ignore=shutil.ignore_patterns('.git', '.ssdlc', '.tools', '__pycache__'))
+            for name in ('tests/test_task_bootstrap.py', 'tests/test_design_session.py'):
+                (root / name).write_text('raise RuntimeError("Mutable mode module entered A5")\n')
+            output = Path(tmp) / 'report.json'
+            proc = subprocess.run([sys.executable, '-I', str(root / 'ssdlc_replay_gate.py'),
+                                   '--output', str(output)], capture_output=True, text=True, timeout=120)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            report = json.loads(output.read_text())
+            self.assertEqual(report['failed_cases'], 0)
+            self.assertEqual(len(report['cases']), 12)
 
     def test_manifest_cannot_remove_grader_members(self):
         from ssdlc_grader import verify_baseline, MANIFEST

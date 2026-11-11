@@ -189,7 +189,7 @@ hardening remains in issue #29.
 
 ## Protected baseline and issue #29 validation
 
-`schemas/recovery-grader-baseline.json` (`i2-integrity-v3`) pins the grader,
+`schemas/recovery-grader-baseline.json` (`i2-fixtures-v4`) pins the grader,
 expectations, replay fixtures, imported test helpers and existing CI gate by
 SHA256. The host verifies those bytes before executing the corpus and before
 self-development planning/scheduling. Self-development is identified from the
@@ -233,3 +233,16 @@ aliases are normalized before grader protection checks; parent traversal remains
 forbidden. Controller snapshots ignore global/system Git configuration and
 injected Git config, and override global excludes/fsmonitor, retaining only
 repository-owned ignore rules.
+
+
+The issue #22 v4 fixture-boundary revision extracts `RepositoryTests`, `finding`
+and `review` unchanged into pinned `tests/replay/repository_fixtures.py`. Replay
+cases import that module directly. Ordinary execution-mode tests still run in
+the full unit suite and retain their assertions, but their complete modules are
+no longer dependencies of the protected replay and are no longer pinned merely
+because they previously hosted shared helpers. Existing imports of those helpers
+from the ordinary test modules remain compatible re-exports. The grader, helper,
+case implementations, expectations, isolated launcher and CI gate stay protected.
+This permits separately reviewed task-only fixture adaptations without granting
+candidate tasks authority to change the recovery oracle. It is not activation,
+verification or a new budget authorization for the historical #22 run.

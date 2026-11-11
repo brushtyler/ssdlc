@@ -11,7 +11,7 @@ REQUIRED = frozenset({
     'tests/replay/README.md', 'tests/replay/__init__.py',
     'tests/replay/test_candidate_capture.py', 'tests/replay/fixtures/issue22-cache.json',
     'tests/replay/test_timeout_recovery.py', 'tests/test_design_recovery.py',
-    'tests/test_design_session.py', 'tests/test_task_bootstrap.py',
+    'tests/replay/repository_fixtures.py',
     'tests/test_recovery_limits.py', 'tests/test_recovery_benchmark.py',
 })
 

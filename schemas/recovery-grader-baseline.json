@@ -1,22 +1,21 @@
 {
   "schema_version": 1,
-  "baseline_id": "i2-integrity-v3",
-  "change_authority": "Explicit issue #32 offline baseline revision: isolated A5 entrypoint and CI job; corpus outcomes unchanged.",
+  "baseline_id": "i2-fixtures-v4",
+  "change_authority": "Explicit issue #22 offline fixture-boundary revision: shared fixtures extracted unchanged; all replay expectations and unit test assertions retained.",
   "files": {
     ".github/workflows/test.yml": "a60d422e785de563fcafa1d28e81c9ebb3691d3cb39df96f924a8f2e656fce64",
-    "ssdlc_grader.py": "00ceea0a60fa03947cc75328cf6ab4af660af51e5831feef261a6c38180767c9",
+    "ssdlc_grader.py": "ff0071926733772d74f2402dc934c373757493e91bc26afa8c2d59ec94194aef",
     "ssdlc_replay_gate.py": "db2bbbf054aff07f7b6434739fc5c7a5d909151102f0b2fc85b2294c7cacadff",
-    "tests/replay/README.md": "db8b337b627ce34f1fca25b21ac674570d3e1e1a95efc003e4fd637aa876ab74",
+    "tests/replay/README.md": "64e49f8524bf7bfedc850518158b5d7a79a034fff509b5cabe3f77fb41c562cf",
     "tests/replay/__init__.py": "8159993444bfd088fff3d1eb62e9550e4db9ac9d3eed449e1e4c7748e861249e",
     "tests/replay/benchmark.py": "f045ac590f66c4e17e524699edfe58aecaf79aed293f4c2311ceaab863718f13",
     "tests/replay/fixtures/i2-recovery.json": "660c417264ad56f92e30c18fe70f59f288f8f58cfb69c03b365e40cec6e2b31a",
     "tests/replay/fixtures/issue22-cache.json": "93e75e2ad6cfc61c2192f101376001912d1cf3993ae16726af481ba7a8967494",
-    "tests/replay/test_candidate_capture.py": "ae483e044b4e92e8eeb06029d657ac977f479d70144322c8eb32b47f6140404e",
-    "tests/replay/test_timeout_recovery.py": "8ee53895b4bed04157c115004c091940dadd90859bb8ff1c97e7d5bce99ae981",
-    "tests/test_design_recovery.py": "6487ce1d7d5bcbc4867357a81e7d6aa3bc2273a48a6b9694e191f91f888b9b1f",
-    "tests/test_design_session.py": "b1caad21f8429004467882c4a22d71d4c83172fd6f1f58337f71fe4782a29925",
-    "tests/test_recovery_benchmark.py": "8a13703baa0d7da05cd49c0b839ca2ae4c8a8c4c1b5aecff2788bf4fd4a18b43",
-    "tests/test_recovery_limits.py": "cce7eb708b8b3e17b6dcbf867aa64f403739e33cd0116daf6147a71af3ca6c9d",
-    "tests/test_task_bootstrap.py": "0ae1c10418327a327cee73effdc9cfa6d1cf7f9829a9cd9459e4995a9fe57311"
+    "tests/replay/repository_fixtures.py": "ad765cc166720ea924a16a295df3d07ca407cc9dd35c874d12a99c3e3af45a9d",
+    "tests/replay/test_candidate_capture.py": "f3d8bc887ed1ea534838e95fecb6b03a77970e9958a7fc81796ec372ddfcc537",
+    "tests/replay/test_timeout_recovery.py": "4e33daaa14d3bfd2b32bc3b63de566c68bd77134150a97d42d93fa261b6de7f9",
+    "tests/test_design_recovery.py": "8d30d755083cb1c9f5a5ebfd4fc6b254127a3c912fa6ce2af3ed4bb6adc748dd",
+    "tests/test_recovery_benchmark.py": "3f7d82ba6e52a48333bce2e98e087aa77022036c3c9713d0b72b653d3c3eb704",
+    "tests/test_recovery_limits.py": "cce7eb708b8b3e17b6dcbf867aa64f403739e33cd0116daf6147a71af3ca6c9d"
   }
 }

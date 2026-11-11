@@ -1,7 +1,7 @@
 """I2 timeout replay uses real Git/journal and host-owned semantic role adapters."""
 import subprocess
 from unittest.mock import patch
-from test_task_bootstrap import RepositoryTests
+from replay.repository_fixtures import RepositoryTests
 from ssdlc_tasks import TaskScheduler, TaskError, git
 from ssdlc_recovery import QuiescentTimeout, RecoveryStop
 

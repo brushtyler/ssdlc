@@ -23,4 +23,4 @@ class RecoveryBenchmarkGate(unittest.TestCase):
         self.assertEqual(sum(c['avoidable_interventions'] for c in report['cases']), 0)
         self.assertEqual(sum(c['escaped_seeded_defects'] for c in report['cases']), 0)
         self.assertTrue(all('ready_pr' not in c and 'live_model_calls' not in c for c in report['cases']))
-        self.assertEqual(report['baseline_id'], 'i2-integrity-v3')
+        self.assertEqual(report['baseline_id'], 'i2-fixtures-v4')
