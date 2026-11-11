@@ -25,7 +25,10 @@
     },
     "producer": {
       "type": "object", "required": ["exit_code", "quiescent", "termination"],
-      "properties": {"exit_code": {"type": "integer"}, "quiescent": {"const": true}, "termination": {"const": "returned"}}
+      "properties": {"exit_code": {"type": ["integer", "null"]}, "quiescent": {"const": true}, "termination": {"enum": ["returned", "imported"]}, "origin_proposal_sha256": {"$ref": "#/$defs/sha"}},
+      "allOf": [{"if": {"properties": {"termination": {"const": "imported"}}},
+                 "then": {"required": ["origin_proposal_sha256"], "properties": {"exit_code": {"type": "null"}}},
+                 "else": {"properties": {"exit_code": {"type": "integer"}}}}]
     },
     "output_sha256": {"$ref": "#/$defs/sha"},
     "payload_sha256": {"$ref": "#/$defs/sha"},

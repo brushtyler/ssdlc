@@ -307,6 +307,7 @@ Sections 1–7 are the implementation specification. This section records where 
 Completion is demonstrated, not inferred from merged schemas or individual unit tests:
 
 - [x] I0 replay passes with zero live model calls and exactly-once developer dispatch in recoverable cases (issue #23; see `docs/candidate-capture.md` and its offline evidence).
+- [x] I1 pre-checkpoint continuation and reviewed amendment replay pass without model dispatch; supported compatibility and evidence are in `docs/continuations.md`. Issue #22 still needs resolved-source review and explicit migration authorization.
 - [ ] A4 and A6 fault cases preserve source, history, counters and explicit uncertainty across restart.
 - [ ] A5 uses protected scenarios and reports total/avoidable interventions and justified refusals separately.
 - [ ] Every enabled route passes B capability, bypass, positive-control and publication cases; residual exposure is authorized explicitly.

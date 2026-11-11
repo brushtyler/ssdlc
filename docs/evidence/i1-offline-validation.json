@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "increment": "I1",
+  "related_issue": 22,
+  "base_commit": "7a813fd8100a9eebde9a879e08069a8cc157e565",
+  "created_at": "2026-11-11T07:58:52.370788+00:00",
+  "provenance": "Direct bootstrap implementation; semantic offline engines, real Git and credential-free Docker smoke; no autonomous delivery claim",
+  "source_files": [
+    {
+      "path": "orchestrator.py",
+      "sha256": "1e4d609ac4050ada7f8120f5d92fcb6cc21da1bf0e3529e9dfec8cfd2ce04144"
+    },
+    {
+      "path": "ssdlc_controller.py",
+      "sha256": "1befc52d26881745865dfba19d7019882ab1fbc9327d90858d65a5c329b88190"
+    },
+    {
+      "path": "ssdlc_tasks.py",
+      "sha256": "917d6ce82e0894b34104a81e95914c50b9ad6e706b52ec365502bd1c2fe8fe36"
+    },
+    {
+      "path": "ssdlc_transitions.py",
+      "sha256": "85c73f73bb109b6ab24f3d688b3d8acca4433b6f448e28a395b0f6886e17017e"
+    },
+    {
+      "path": "ssdlc_continuations.py",
+      "sha256": "073d36c4268de00a0849f0268a279ed3d867eca6a53843cfd22fbacd1c1c0695"
+    },
+    {
+      "path": "ssdlc_amendments.py",
+      "sha256": "3c16362459271bc55d82956d28eee2dff33dafdc5e939a2f1f7af0272a2fe9b5"
+    },
+    {
+      "path": "schemas/candidate-capture.schema.json",
+      "sha256": "7849eae301f1a81b6a2236849b36ae04dc3237242b5711a9aa33c5dadf0c65db"
+    },
+    {
+      "path": "schemas/continuation-snapshot.schema.json",
+      "sha256": "5400e4f1a885b25877cdadeafb1e63ae713bb30dd632d9207da9b2b58d56f2c4"
+    },
+    {
+      "path": "schemas/continuation-proposal.schema.json",
+      "sha256": "89e35aaeb680293a2b157e16eae2e508f33189656df701a29144d07057f9c922"
+    },
+    {
+      "path": "tests/test_transitions.py",
+      "sha256": "2a68264c0c618d6afcb3789a6110b7b2197ea2b1340a712798d33d4055ec6df8"
+    },
+    {
+      "path": "tests/test_continuations.py",
+      "sha256": "6c1ffd268ea2da1a1af8d91de752144eab8ff7c319fd9519532171e7c2d2fd47"
+    },
+    {
+      "path": "tests/test_amendments.py",
+      "sha256": "b215204b98559790ba9aab5ffa6d0712b3314aa5408e25b0714c661a5713a48d"
+    },
+    {
+      "path": "tests/test_task_bootstrap.py",
+      "sha256": "0ae1c10418327a327cee73effdc9cfa6d1cf7f9829a9cd9459e4995a9fe57311"
+    }
+  ],
+  "targeted_suite": {
+    "result": "PASS",
+    "tests": 63,
+    "duration_seconds": 14.107,
+    "python": "3.14.4",
+    "command": "PYTHONPATH=tests python3 -m unittest test_amendments test_transitions test_continuations test_task_bootstrap.OrchestratorBootstrapTests test_task_bootstrap.ValidatorTests -q",
+    "environment": "Host with standard PATH"
+  },
+  "intermediate_full_suite": {
+    "result": "PASS",
+    "tests": 797,
+    "duration_seconds": 267.823,
+    "note": "Before final refusal/schema and initial-plan impact-report additions. Final PR-head CI is authoritative for the complete delivered tree."
+  },
+  "docker_smoke": {
+    "result": "PASS",
+    "image_id": "sha256:67d6aa23250928dba124ad4ee4edb7b6c4aa33fef37c0ff1a7a6ddc078356665",
+    "network": "none",
+    "role_credentials": false,
+    "checks": 3,
+    "completed_tasks": [
+      "T1"
+    ],
+    "pending_tasks": [
+      "T2"
+    ],
+    "charged_development_attempts": 1,
+    "producer_exit_code": null,
+    "model_dispatches": 0
+  },
+  "historical_run_inventory": {
+    "mode": "read_only",
+    "source_files": 74,
+    "journal_sequence": 10,
+    "ledger_entries": 25,
+    "migrated": false,
+    "resumed": false
+  },
+  "compatibility": {
+    "rule": "pre-checkpoint-import-v1",
+    "supported": "Stopped v1.0 legacy journal, one charged root-task candidate, no completed tasks; exact task identities and cumulative allowances retained",
+    "unsupported": [
+      "Completed checkpoints",
+      "Capture-version migration (verification allowances must not reset)",
+      "Task identity changes during execution migration",
+      "Changed requirements or quality policy",
+      "Automatic continuation of model dispatch before I2"
+    ]
+  },
+  "live_provider_calls": 0,
+  "publication": {
+    "contents": "Selected source, docs and sanitized summary only; private runtime journals, source snapshots, prompts, authorizations and raw logs excluded",
+    "gitleaks": {
+      "result": "PASS",
+      "findings": 0,
+      "scope": "Selected public source/docs/evidence export; raw runtime data excluded",
+      "image_id": "sha256:67d6aa23250928dba124ad4ee4edb7b6c4aa33fef37c0ff1a7a6ddc078356665"
+    }
+  }
+}

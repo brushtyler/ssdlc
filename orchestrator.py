@@ -48,7 +48,8 @@ import ssdlc_bounce as bounce
 from ssdlc_bounce import request_identity
 from ssdlc_catalogues import CatalogueError, requirement_catalogue
 from ssdlc_requirements import prepare_requirements
-from ssdlc_controller import assert_controller, controller_snapshot
+from ssdlc_controller import assert_controller, controller_snapshot, execution_contract
+from ssdlc_transitions import runtime_root
 
 from ssdlc_tasks import (
     PlanError, TaskError, DevelopmentBlocked, ResourceLimitError, TaskPlanValidator, TaskScheduler, atomic_json,
@@ -276,6 +277,8 @@ def resume_compatibility(repo_root, ticket, entrypoint, from_phase=None, env=Non
     repo = Path(repo_root).resolve()
     root = repo / '.ssdlc' / ticket
     try:
+        if runtime_root(root) != root:
+            raise TaskError('Continuation is verification-only until I2 authorization')
         path = root / 'state.json'
         state = json.loads(path.read_text()) if path.is_file() else {}
         task_mode = bool(state.get('task_breakdown')) or (os.environ if env is None else env).get('SSDLC_ENABLE_TASK_BREAKDOWN', 'false').lower() == 'true'
@@ -1723,7 +1726,9 @@ class SSDLCOrchestrator:
         self.project_id = self.iso_meta["project_id"]
         self.ticket_id = ticket_id
 
-        self.ssdlc_root = self.repo_root / ".ssdlc" / ticket_id
+        self.ssdlc_root = runtime_root(self.repo_root / ".ssdlc" / ticket_id)
+        if self.ssdlc_root != self.repo_root / '.ssdlc' / ticket_id:
+            raise TaskError('I1 continuation permits verification only; use continuation-verify. Model dispatch needs I2 authorization.')
         self.dir_recon = self.ssdlc_root / "00-recon"
         self.dir_po = self.ssdlc_root / "01-po"
         self.dir_design = self.ssdlc_root / "02-design"
@@ -2025,11 +2030,18 @@ class SSDLCOrchestrator:
                    "For crash safety, enumerate persistence boundaries from the approved design and specify "
                    "the fault injection and expected recovery for each; justify equivalence when grouping boundaries.")
         def review(plan, history):
+            from ssdlc_amendments import fixture_impact
+            impact = fixture_impact(self.repo_root, sorted({p for t in plan['tasks'] for p in t['target_files']}))
+            impact_path = self.dir_design / 'task-planning' / ('fixture-impact-' + digest(plan) + '.json')
+            if impact_path.exists() and json.loads(impact_path.read_text()) != impact:
+                raise PlanError('Fixture impact changed on the same plan; explicit revision required')
+            atomic_json(impact_path, impact)
+            self.record_artifact(str(impact_path.relative_to(self.ssdlc_root)), impact_path)
             t0 = time.time()
             out, cost, tin, tout, trace = EngineRunner.invoke_role(
                 rev_engine, rev_model,
                 review_prompt,
-                json.dumps({"context": context, "plan": plan, "review_history": history}), self.repo_root,
+                json.dumps({"context": context, "plan": plan, "review_history": history, "fixture_impact": impact}), self.repo_root,
                 self.project_id, self.ticket_id, "02-design-task-plan-review", reasoning_effort=rev_effort,
             )
             self.record_ledger(CostAndTelemetryEntry(
@@ -2370,12 +2382,7 @@ class SSDLCOrchestrator:
             snapshot = controller_snapshot(root)
             atomic_json(path, snapshot)
             self.record_artifact(name, path)
-        return {'artifact_ref': name, 'snapshot': snapshot,
-                'verification_owner': 'host orchestrator, outside target task commands',
-                'guard_points': ['before development', 'before each developer invocation',
-                                 'after each developer invocation', 'before and after each verification check'],
-                'limitations': 'Unkeyed integrity checking at guard boundaries; not authentication or continuous containment. '
-                               'Ignored controller files are excluded. No controller environment variables are required.'}
+        return execution_contract(snapshot)
 
     def resume_task_planning(self, review_repairs=None, recover_review=False) -> Path:
         """Resume only planning against sealed upstream artifacts; never execute code."""
@@ -4782,7 +4789,8 @@ def cmd_doctor(repo: Path) -> int:
 
 
 def _foreground_main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="Project-Isolated Multi-CLI SSDLC Orchestrator")
+    parser = argparse.ArgumentParser(description="Project-Isolated Multi-CLI SSDLC Orchestrator",
+        epilog="Stopped-run migration: continuation-inspect / continuation-preview / continuation-prepare / continuation-activate / continuation-verify (each has --help).")
     sub = parser.add_subparsers(dest="subcommand", required=True)
 
     p_doc = sub.add_parser("doctor", help="Check project isolation, CLI versions, and API key fingerprints")
@@ -4997,6 +5005,9 @@ def _supervised_exit_code(value) -> int:
 
 def main(argv=None) -> int:
     words = sys.argv[1:] if argv is None else argv
+    if words and words[0].startswith('continuation-'):
+        from ssdlc_continuations import main as continuation_main
+        return continuation_main(words)
     supervised = bool(os.environ.get('SSDLC_SUPERVISED_RUN_ID')) and bool(words) and words[0] in {'run', 'plan', 'design'}
     if not supervised:
         return _foreground_main(argv)
