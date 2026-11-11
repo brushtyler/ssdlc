@@ -15,7 +15,7 @@ import itertools
 from unittest.mock import patch
 
 import orchestrator as o
-from ssdlc_tasks import PlanError, TaskError, TaskJournal, atomic_json, git
+from ssdlc_tasks import PlanError, TaskError, TaskJournal, atomic_json, digest, git
 import test_task_bootstrap as fixtures
 from test_full_checkpoint_review import framed
 
@@ -196,6 +196,17 @@ class UnifiedExecutionTests(fixtures.RepositoryTests):
 
     def test_reject_records_no_execution_authority(self):
         orch = self.make_orchestrator()
+        self.seed_inputs(orch)
+        orch.state['task_breakdown'] = True
+        # Rejection is permitted only for sealed task history. This initial
+        # journal grants no approval and needs no developer or provider call.
+        TaskJournal(orch.dir_dev / 'tasks').append('INITIALIZED', {
+            'inputs_sha256': digest(dict(plan=self.plan, quality=self.quality,
+                                        context=o.build_task_context(orch.ssdlc_root))),
+            'expected_head': self.base,
+            'tasks': {'T1': {'status': 'PENDING', 'attempts': 0}},
+        })
+        orch._save_state()
         with patch.object(o, 'SSDLCOrchestrator', return_value=orch), \
              patch.object(orch, '_run_task_development') as developer, \
              patch.object(o.EngineRunner, 'invoke_role') as provider, \

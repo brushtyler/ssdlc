@@ -19,11 +19,48 @@ from test_supervisor_core import CoreCase
 from helpers.supervisor_fakes import FakeClock, FakeDocker, CrashAt, hook_environment
 
 
+def historical_documents(root, base='a' * 40):
+    """Schema-valid sealed inputs for supervisor-only historical resume tests."""
+    log = root / '00-recon/baseline/CHECK-HISTORY.log'
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text('Ran 1 test\nOK\n')
+    check = dict(check_id='CHECK-HISTORY', argv=['python3', '-m', 'unittest'],
+                 cwd='.', timeout_sec=5, kind='test', required=True)
+    quality = dict(schema_version='1.0', contract_revision=1, base_commit=base,
+                   sources=[], standards=[], checks=[check], limitations=[], exceptions=[],
+                   baseline=[dict(check_id='CHECK-HISTORY', exit_code=0,
+                                  log_ref='00-recon/baseline/CHECK-HISTORY.log',
+                                  sha256=s.digest(log.read_bytes()))])
+    task = dict(task_id='T1', title='Historical task', description='Scoped behavior',
+                depends_on=[], target_files=['app.py'], ac_refs=['AC-1'], sec_refs=[],
+                standard_refs=[], profile='ALGORITHMIC', complexity='standard', kind='task',
+                contract_refs=[], verification=dict(mode='automated',
+                    quality_check_refs=['CHECK-HISTORY'], checks=[dict(
+                        check_id='CHECK-T1', argv=check['argv'], cwd='.', timeout_sec=5,
+                        ac_refs=['AC-1'], sec_refs=[])]))
+    plan = dict(schema_version='1.0', plan_revision=1, ticket_id='T-1',
+                execution_strategy='sequential_dag', base_commit=base,
+                quality_contract_ref='00-recon/quality-contract.json', tasks=[task])
+    return plan, quality
+
+
 class TestResumeAndArgv(CoreCase):
     def baseline(self):
         root = self.repo / '.ssdlc/T-1'
         root.mkdir(parents=True, exist_ok=True)
-        (root / 'state.json').write_text('{}')
+        from ssdlc_tasks import TaskJournal, digest
+        state = dict(task_breakdown=True, artifacts={})
+        plan, quality = historical_documents(root)
+        for name, value in [('02-design/plan.json', plan), ('00-recon/quality-contract.json', quality)]:
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(value))
+            state['artifacts'][name] = {'sha256': s.digest(path.read_bytes())}
+        directory = root / '03-dev/tasks'
+        if not (directory / 'task-journal.jsonl').exists():
+            TaskJournal(directory).append('INITIALIZED', dict(inputs_sha256=digest(dict(
+                plan=plan, quality=quality, context=o.build_task_context(root))), expected_head=plan['base_commit'], tasks={'T1': dict(status='PENDING', attempts=0)}))
+        (root / 'state.json').write_text(json.dumps(state))
         return root
 
     def terminal(self):
@@ -57,27 +94,24 @@ class TestResumeAndArgv(CoreCase):
             for entry in ('plan', 'design', 'unknown'):
                 self.assertFalse(o.resume_compatibility(self.repo, 'T-1', entry)['ok'])
             self.assertEqual(tree(root), before)
-        (root / '03-dev/tasks').mkdir(parents=True)
+        (root / '03-dev/tasks').mkdir(parents=True, exist_ok=True)
         (root / '03-dev/tasks/task-journal.jsonl').write_text('')
         self.assertFalse(o.resume_compatibility(self.repo, 'T-1', 'run', '00-recon', {'SSDLC_ENABLE_TASK_BREAKDOWN': 'true'})['ok'])
 
-    def test_refusal_one_audit_no_metadata_or_spawn(self):
+    def test_legacy_refusal_no_audit_metadata_or_spawn(self):
         root = self.baseline()
+        (root / 'state.json').write_text('{}')
         store = self.terminal()
         before = tree(root), tree(self.repo / '.ssdlc/.runtime'), tree(store.root)
         with patch.object(s, 'spawn', side_effect=AssertionError):
             result = s.resume(dict(self.args, entrypoint='plan'), self.clock)
-        self.assertEqual(s.exit_code(result), 14)
-        self.assertEqual((tree(root), tree(self.repo / '.ssdlc/.runtime')), before[:2])
-        after = tree(store.root)
-        before[2]['T-1'] = ('dir', sorted([*before[2]['T-1'][1], 'audit.jsonl']))
-        audit = 'T-1/audit.jsonl'
-        self.assertEqual({k: v for k, v in after.items() if k != audit}, {k: v for k, v in before[2].items() if k != audit})
-        self.assertEqual(len((store.root / audit).read_text().splitlines()), 1)
+        self.assertEqual(s.exit_code(result), 23)
+        self.assertEqual((tree(root), tree(self.repo / '.ssdlc/.runtime'), tree(store.root)), before)
         self.assertTrue(result['next_action'])
 
     def test_fingerprint_pinning_and_audited_reauthorization(self):
         self.baseline()
+        self.args['from_phase'] = '03-dev'
         store = self.terminal()
         original = store.read()
         for change in [dict(goal='changed'), dict(tier='S'), dict(test_cmd='true')]:
@@ -124,7 +158,10 @@ class TestResumeAndArgv(CoreCase):
         subprocess.run(['git', '-C', str(self.repo), 'add', '.gitignore'], check=True)
         subprocess.run(['git', '-C', str(self.repo), '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'baseline'], check=True, stdout=subprocess.DEVNULL)
         root = self.baseline()
-        state = dict(task_breakdown=True, risk_tier='S', base_commit=s.git_read(self.repo, 'rev-parse', 'HEAD'),
+        import shutil
+        shutil.rmtree(root / '03-dev')
+        (root / '02-design/plan.json').unlink()
+        state = dict(task_engine_v1=True, task_breakdown=True, risk_tier='S', base_commit=s.git_read(self.repo, 'rev-parse', 'HEAD'),
                      gate_history=[dict(gate=g, passed=True) for g in ('PAIR_DESIGN_GATE', 'RECON_BLAST_RADIUS_GATE', 'PO_SPEC_GATE')], artifacts={})
         for rel, content in [('00-recon/quality-contract.json', '{"checks": []}'), ('01-po/requirements.md', 'AC-1: behavior'), ('00-recon/context-and-blast-radius.md', 'approved baseline')]:
             path = root / rel
@@ -276,7 +313,20 @@ class TestCrashRecoveryT3(CoreCase):
         canonical.mkdir(parents=True)
         wt = canonical / 'worktree'
         subprocess.run(['git', '-C', str(self.repo), 'worktree', 'add', '--detach', str(wt), base], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        (canonical / 'state.json').write_text(json.dumps(dict(status='AWAITING_SUPERVISOR_SIGNOFF', base_commit=base, task_verified_head=base)))
+        from ssdlc_tasks import TaskJournal, digest
+        state = dict(status='AWAITING_SUPERVISOR_SIGNOFF', base_commit=base,
+                     task_verified_head=base, task_breakdown=True, artifacts={})
+        plan, quality = historical_documents(canonical, base)
+        for name, value in [('02-design/plan.json', plan), ('00-recon/quality-contract.json', quality)]:
+            path = canonical / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(value))
+            state['artifacts'][name] = {'sha256': s.digest(path.read_bytes())}
+        TaskJournal(canonical / '03-dev/tasks').append('INITIALIZED', dict(
+            inputs_sha256=digest(dict(plan=plan, quality=quality, context=o.build_task_context(canonical))),
+            expected_head=base, tasks={'T1': dict(status='COMPLETED', attempts=1)}))
+        (canonical / 'state.json').write_text(json.dumps(state))
+        self.args['from_phase'] = '03-dev'
         toolkit = str(Path(o.__file__).resolve().parent)
         self.controller("import os,sys,time\nfrom pathlib import Path\n" +
             f"sys.path.insert(0, {toolkit!r})\nfrom orchestrator import _supervision_event\n" +

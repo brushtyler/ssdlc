@@ -326,10 +326,88 @@ def _resume_run_refusal(root, state, from_phase, baseline_exists=True):
         raise TaskError('Existing task execution must resume with --from-phase 03-dev to preserve its approved inputs')
 
 
+
+LEGACY_COUNTERS = {'legacy_refusals': 0}
+
+
+def legacy_message(ticket):
+    return (f'Run {ticket} is a legacy run and is not executable. Start a new run: '
+            'ssdlc run --ticket <NEW_TICKET> --goal "<goal>" --repo <repo>')
+
+
+def execution_compatibility(repo_root, ticket, command):
+    """Classify persisted execution evidence without locks or writable objects."""
+    result = dict(ok=False, cls='legacy', code='legacy_not_executable', reason='incompatible_state')
+    try:
+        if not isinstance(ticket, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', ticket) or ticket in {'.', '..'}:
+            return dict(result, code='unsupported_transition', reason='invalid_ticket')
+        repo = Path(repo_root).resolve()
+        root = repo / '.ssdlc' / ticket
+        root = runtime_root(root)
+        if any(path.is_symlink() for path in [root / 'state.json', root, *root.parents]):
+            raise PlanError('Symlinked execution root')
+        def read(name):
+            path = root / name
+            if any(part.is_symlink() for part in [root, *path.parents, path]):
+                raise PlanError('Symlinked execution evidence')
+            return path.read_bytes()
+        if not (root / 'state.json').exists():
+            return dict(ok=command in {'run', 'start'}, cls='new_run',
+                        code='compatible' if command in {'run', 'start'} else 'no_such_run', reason='no_such_run')
+        state = json.loads(read('state.json'))
+        def registered(name):
+            data = read(name)
+            if hashlib.sha256(data).hexdigest() != state.get('artifacts', {}).get(name, {}).get('sha256'):
+                raise PlanError('Unregistered execution evidence')
+            return json.loads(data)
+        if state.get('task_breakdown') is True:
+            try:
+                quality = registered('00-recon/quality-contract.json')
+                plan = registered('02-design/plan.json')
+                validate_document('quality-contract', quality)
+                validate_document('plan', plan)
+                for name in CONTEXT_NAMES:
+                    path = root / name
+                    if any(part.is_symlink() for part in [path, *path.parents]):
+                        raise PlanError('Symlinked context')
+                    if path.exists() and hashlib.sha256(read(name)).hexdigest() != state.get('artifacts', {}).get(name, {}).get('sha256'):
+                        raise PlanError('Changed context')
+                data = read('03-dev/tasks/task-journal.jsonl')
+                journal, sequence, _ = TaskJournal._replay(data[:data.rfind(b'\n') + 1])
+                if not journal or sequence < 1 or journal.get('inputs_sha256') != digest(dict(plan=plan, quality=quality, context=build_task_context(root))):
+                    raise PlanError('Unsealed task inputs')
+                if command == 'approve' and (state.get('status') != 'AWAITING_SUPERVISOR_SIGNOFF' or
+                        not journal.get('tasks') or any(t.get('status') != 'COMPLETED' for t in journal['tasks'].values()) or
+                        not state.get('task_verified_head') or state['task_verified_head'] != journal.get('expected_head')):
+                    raise PlanError('Incomplete task approval')
+                return dict(ok=True, cls='sealed_task', code='compatible', reason='compatible')
+            except (OSError, ValueError, KeyError, TypeError, AttributeError, TaskError):
+                pass
+        if (state.get('task_engine_v1') is True and
+                not any((root / name).exists() or (root / name).is_symlink() for name in
+                        ('worktree', '03-dev/tasks', '03-dev/implementation.diff')) and
+                command in {'run', 'start', 'plan', 'design', 'po'}):
+            return dict(ok=True, cls='pre_execution', code='compatible', reason='compatible')
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, TaskError):
+        pass
+    return result
+
+
+def startup_preflight(repo_root, ticket, command, args=None):
+    result = execution_compatibility(repo_root, ticket, command)
+    phase = args.get('from_phase') if isinstance(args, dict) else getattr(args, 'from_phase', None)
+    if result['cls'] == 'pre_execution' and command in {'run', 'start'} and phase not in {None, '00-recon'}:
+        result = dict(ok=False, cls='legacy', code='legacy_not_executable', reason='execution_not_started')
+    return result
+
+
 def resume_compatibility(repo_root, ticket, entrypoint, from_phase=None, env=None):
     """Read-only transition check; never activates runtime or constructs a controller."""
     if not isinstance(ticket, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', ticket) or ticket in {'.', '..'}:
         return dict(ok=False, code='unsupported_transition', reason='invalid_ticket')
+    compatible = startup_preflight(repo_root, ticket, entrypoint, {'from_phase': from_phase})
+    if not compatible['ok']:
+        return compatible
     repo = Path(repo_root).resolve()
     root = repo / '.ssdlc' / ticket
     try:
@@ -2652,6 +2730,7 @@ class SSDLCOrchestrator:
         if self.state_file.exists():
             return json.loads(self.state_file.read_text(encoding="utf-8"))
         state = {
+            "task_engine_v1": True,
             "project_id": self.project_id,
             "ticket_id": self.ticket_id,
             "created_at": utc_now(),
@@ -3198,30 +3277,8 @@ class SSDLCOrchestrator:
                                 progress_policy=limits is not None, diagnose=diagnose if limits is not None else None,
                                 verify_evidence=verify_progress_evidence)
         if import_legacy:
-            legacy = confined(self.dir_design, import_legacy, protect=False)
-            if not legacy.is_dir():
-                raise PlanError('Legacy round directory does not exist')
-            numbered = []
-            for path in legacy.glob('adr-round-*.md'):
-                match = re.fullmatch(r'adr-round-(\d+)\.md', path.name)
-                if match:
-                    numbered.append((int(match[1]), path))
-            numbered.sort()
-            if not numbered or [n for n, _ in numbered] != list(range(1, len(numbered) + 1)):
-                raise PlanError('Legacy round sequence is missing or ambiguous')
-            rounds = []
-            for index, adr in numbered:
-                row = {}
-                for field, path in [('adr', adr), ('review', legacy / f'security-review-round-{index}.md')]:
-                    path = confined(legacy, path.name, protect=False)
-                    if not path.exists() and field == 'review' and index == len(numbered):
-                        continue
-                    name = str(path.relative_to(self.ssdlc_root))
-                    meta = self.state.get('artifacts', {}).get(name)
-                    if not meta or not path.is_file() or file_hash(path) != meta['sha256']:
-                        raise PlanError(f'Legacy design evidence is missing, unregistered or changed: {name}')
-                    row[field] = path.read_text()
-                rounds.append(row)
+            from ssdlc_design import read_history_rounds
+            rounds = read_history_rounds(self.repo_root, self.ticket_id, import_legacy)
             session.import_legacy(rounds)
         elif not session.path.exists() and any(name in ('02-design/adr.md', '02-design/pair-dialogue.md') or name.startswith('02-design/rounds/')
                                                for name in self.state.get('artifacts', {})):
@@ -4647,6 +4704,7 @@ def _foreground_main(argv=None) -> int:
     p_design.add_argument('--repo', '-r', default='.')
     p_design.add_argument('--rounds', type=int, choices=range(1, 9), default=None,
                           help='Explicit total round limit (1-8), preserving consumed rounds')
+    p_design.add_argument('--import-from-ticket', default=None)
     p_design.add_argument('--import-legacy', default=None,
                           help='Import a verified legacy directory relative to 02-design, e.g. rounds/UUID')
 
@@ -4680,6 +4738,22 @@ def _foreground_main(argv=None) -> int:
         p_limits.add_argument('--limits-profile', help='Explicit operator limits JSON for a fresh ticket; frozen on first launch')
 
     args = parser.parse_args(argv)
+    if args.subcommand in {'run', 'start', 'resume', 'approve', 'reject', 'plan', 'design'}:
+        command = getattr(args, 'entrypoint', 'run') if args.subcommand == 'resume' else args.subcommand
+        importing = args.subcommand == 'design' and getattr(args, 'import_from_ticket', None)
+        check = startup_preflight(args.repo, args.ticket, 'run' if importing else command, args)
+        if importing and check['cls'] not in {'new_run', 'pre_execution'}:
+            check = dict(ok=False, code='legacy_not_executable')
+        if not check['ok']:
+            if check.get('reason') == 'invalid_ticket':
+                parser.error('invalid ticket ID')
+            if check['code'] == 'legacy_not_executable':
+                LEGACY_COUNTERS['legacy_refusals'] += 1
+                logging.getLogger(__name__).warning('legacy-refusal ticket=%s command=%s', args.ticket, command)
+                print(legacy_message(args.ticket), file=sys.stderr)
+            else:
+                print(check['code'], file=sys.stderr)
+            return 23
     repo_path = Path(getattr(args, 'repo', '.')).resolve()
     if args.subcommand in {"run", "start", "plan", "design"} and getattr(args, "limits_profile", None):
         from ssdlc_recovery import LimitsStore
@@ -4735,6 +4809,15 @@ def _foreground_main(argv=None) -> int:
         print(orch.resume_task_planning(review_repairs=args.review_repairs, recover_review=args.recover_review))
         return 0
 
+    if args.subcommand == 'design' and args.import_from_ticket:
+        from ssdlc_design import read_history_rounds, DesignSession
+        rounds = read_history_rounds(repo_path, args.import_from_ticket, args.import_legacy)
+        orch = SSDLCOrchestrator(repo_path, args.ticket, sync_remote=False)
+        session = DesignSession(orch.dir_design, {'origin_ticket': args.import_from_ticket}, None, None,
+                                lambda: None, lambda path: orch.record_artifact(str(path.relative_to(orch.ssdlc_root)), path))
+        session.import_legacy(rounds)
+        return 0
+
     if args.subcommand == 'design':
         orch = SSDLCOrchestrator(repo_path, args.ticket, sync_remote=False)
         print(orch.resume_pair_design(round_limit=args.rounds, import_legacy=args.import_legacy))
@@ -4788,6 +4871,21 @@ def main(argv=None) -> int:
     supervised = bool(os.environ.get('SSDLC_SUPERVISED_RUN_ID')) and bool(words) and words[0] in {'run', 'plan', 'design'}
     if not supervised:
         return _foreground_main(argv)
+    # Reject persisted legacy evidence before lifecycle logging can write events.
+    def word_value(flag, default=None):
+        aliases = {'--ticket': '-t', '--repo': '-r'}
+        for name in (flag, aliases.get(flag)):
+            if name in words and words.index(name) + 1 < len(words):
+                return words[words.index(name) + 1]
+        return default
+    check = startup_preflight(word_value('--repo', '.'), word_value('--ticket'), words[0],
+                              {'from_phase': word_value('--from-phase', '00-recon')})
+    if word_value('--ticket') is not None and not check['ok']:
+        if check['code'] == 'legacy_not_executable':
+            LEGACY_COUNTERS['legacy_refusals'] += 1
+            logging.getLogger(__name__).warning('legacy-refusal ticket=%s command=%s', word_value('--ticket'), words[0])
+            print(legacy_message(word_value('--ticket')), file=sys.stderr)
+        return 23
     code, exc_type = 1, None
     try:
         if not _supervised_preflight():
