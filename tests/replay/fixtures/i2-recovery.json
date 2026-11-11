@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "corpus": "i2-recovery-v1",
+  "authority": "Host-owned fixture and grader, outside disposable candidate write mounts",
+  "baseline_commit": "f5a345f106946d6c954303ac5cfaa3945a8c47d9",
+  "max_case_seconds": 120,
+  "cases": {
+    "timeout_checkpoint": {"outcome": "COMPLETED", "logical_invocations": 1, "attempts": 1, "checkpoint": true},
+    "timeout_repair": {"outcome": "COMPLETED", "logical_invocations": 2, "attempts": 2, "checkpoint": true},
+    "uncertain_timeout": {"outcome": "OUTCOME_UNCERTAIN", "logical_invocations": 1, "attempts": 1, "checkpoint": false},
+    "unowned_git_lock": {"outcome": "GIT_LOCK_UNOWNED", "logical_invocations": 0, "attempts": 0, "checkpoint": false},
+    "out_of_scope_timeout": {"outcome": "SCOPE_REQUIRED", "logical_invocations": 1, "attempts": 1, "checkpoint": false},
+    "cost_limit": {"outcome": "LIMIT_REACHED", "logical_invocations": 1, "checkpoint": false},
+    "uncertain_transport": {"outcome": "OUTCOME_UNCERTAIN", "logical_invocations": 1, "checkpoint": false},
+    "design_repair": {"outcome": "APPROVED", "logical_invocations": 9, "diagnoses": 1, "checkpoint": false},
+    "design_stall": {"outcome": "DESIGN_STALLED", "logical_invocations": 9, "diagnoses": 1, "checkpoint": false}
+  }
+}

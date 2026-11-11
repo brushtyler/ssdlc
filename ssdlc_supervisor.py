@@ -1137,7 +1137,7 @@ def worker(store, args):
     # The worker receives only markers at exec; frozen inputs stay in memory.
     def deadlines(v):
         if v['deadlines']['hard_deadline'] is None:
-            v['deadlines']['hard_deadline'] = configured_hard_deadline(payload['env'], store.clock.time())
+            v['deadlines']['hard_deadline'] = ticket_hard_deadline(a['repo'], a['ticket'], payload['env'], store.clock.time())
     store.update(deadlines, (args.generation, 0))
     if not preflight_loop(store, payload['env'], args.generation):
         return 10
@@ -1415,6 +1415,7 @@ SUMMARIES = {
     'quota_unknown': 'Quota verification is unavailable.',
 }
 DEPENDENCIES = {'git', 'docker', 'claude', 'codex', 'agy', 'pytest', 'npm', 'ruff', 'mypy'}
+REASONS.update({'limit_reached', 'outcome_uncertain', 'git_lock_unowned', 'design_stalled', 'environment_diagnosis'})
 REASONS.update(PROBE_CODES | {'preflight_ok', 'preflight_failed', 'docker_unavailable', 'path_unwritable',
     'disk_low', 'routes_unavailable', 'engine_unsupported', 'quality_contract_invalid', 'recovery_exhausted',
     'retry_scheduled', 'hard_deadline', 'completed', 'completion_mismatch', 'observing',
@@ -1685,10 +1686,11 @@ def capture_journal_baseline(store, generation):
 
 CATEGORIES = {'INTEGRITY', 'ENVIRONMENT_RESOURCE', 'SCOPE_REQUIRED', 'ENVIRONMENT_BLOCKED', 'PLAN_ERROR',
               'TASK_EXECUTION', 'CHECK_FAILURE', 'REPAIR_STALLED', 'DEVELOPER_PROTOCOL', 'DEVELOPER_INVOCATION',
-              'AUTHENTICATION', 'AUTH_MISSING', 'AUTH_EXPIRED'}
+              'AUTHENTICATION', 'AUTH_MISSING', 'AUTH_EXPIRED',
+              'LIMIT_REACHED', 'OUTCOME_UNCERTAIN', 'GIT_LOCK_UNOWNED', 'DESIGN_STALLED', 'ENVIRONMENT_DIAGNOSIS'}
 EXC_TYPES = {'TaskError', 'DevelopmentBlocked', 'ResourceLimitError', 'PlanError', 'RuntimeError', 'TimeoutError',
              'TimeoutExpired', 'ConnectionError', 'OSError', 'ValueError', 'SystemExit', 'KeyboardInterrupt',
-             'SupervisorIntegrityError', 'FencedOut', 'Exception'}
+             'SupervisorIntegrityError', 'FencedOut', 'Exception', 'RecoveryStop', 'QuiescentTimeout'}
 CONTROLLER_TYPES = {'shim_released', 'phase_started', 'phase_finished', 'failure', 'progress',
                     'dispatch_started', 'dispatch_finished', 'run_ended'}
 PHASES = {'00-recon', '01-po', '02-design', '02-design-arch', '02-design-sec', '03-dev', '04-review',
@@ -1785,6 +1787,16 @@ def terminal_outcome(events):
                            failures[-1] if failures else None, len(dispatches))
 
 
+def ticket_hard_deadline(repo, ticket, env, now):
+    deadline = configured_hard_deadline(env, now)
+    root = Path(repo) / '.ssdlc' / ticket
+    if (root / 'limits/policy.json').exists():
+        from ssdlc_recovery import LimitsStore
+        _, state = LimitsStore(root)._load(repair=False)
+        deadline = min(deadline, state['deadline_at']) if deadline is not None else state['deadline_at']
+    return deadline
+
+
 def configured_hard_deadline(env, now):
     # Per-call dev timeouts do not bound a complete multi-task pipeline. Only
     # an explicitly configured run timeout authorizes deadline cancellation.
@@ -1868,6 +1880,11 @@ def classify(evidence):
         cls, code, row = 'authentication', auth['code'], '1'
     elif e.get('integrity') or e.get('journal_corrupt') or final.get('category') == 'INTEGRITY':
         cls, code, row = 'integrity', 'integrity_failure', '2'
+    elif final.get('category') in {'LIMIT_REACHED', 'OUTCOME_UNCERTAIN', 'GIT_LOCK_UNOWNED', 'DESIGN_STALLED', 'ENVIRONMENT_DIAGNOSIS'}:
+        from ssdlc_recovery import STOPS
+        category = final['category']
+        cls, code = STOPS[category], category.lower()
+        row = '3' if cls == 'limits' else '5' if cls == 'uncertain_outcome' else '4' if cls == 'operator_decision' else '3b'
     elif p['row3']:
         code = 'hard_deadline' if e.get('hard_deadline') else 'resource_limit' if final.get('category') == 'ENVIRONMENT_RESOURCE' else 'budget_exceeded'
         cls, row = 'limits', '3'

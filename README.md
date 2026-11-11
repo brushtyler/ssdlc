@@ -1011,3 +1011,6 @@ breaker remain enforced.
 
 Stopped pre-capture task runs can use the explicit [I1 continuation workflow](docs/continuations.md).
 It imports reviewed source for fresh verification and keeps model dispatch disabled until I2.
+
+[I2 bounded recovery](docs/bounded-recovery.md) adds explicit frozen limits, fenced Docker timeout capture,
+semantic design progress and a protected offline replay gate. Historical continuations retain their dispatch fence.

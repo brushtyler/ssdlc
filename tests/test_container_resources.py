@@ -127,12 +127,13 @@ class ContainerResourceTests(unittest.TestCase):
             (root/'.ssdlc').mkdir()
             cmd = EngineRunner._wrap_in_role_container(['true'], root, pass_ai_keys=False)
             name = cmd[cmd.index('--name')+1]
-            with patch('orchestrator.subprocess.run', side_effect=[subprocess.TimeoutExpired(cmd, 10), subprocess.CompletedProcess([], 0, '', '')]) as invoke:
+            with patch('orchestrator.subprocess.run', side_effect=[subprocess.TimeoutExpired(cmd, 10), subprocess.CompletedProcess([], 0, '', ''), subprocess.CompletedProcess([], 0, '', '')]) as invoke:
                 with self.assertRaises(subprocess.TimeoutExpired):
                     EngineRunner._run_role_command(cmd, cwd=root, env=None, timeout=10)
-            self.assertEqual(invoke.call_args_list[-1].args[0], ['docker', 'rm', '-f', name])
+            self.assertEqual(invoke.call_args_list[1].args[0], ['docker', 'rm', '-f', name])
             evidence = root/'.ssdlc/.runtime/resources'/(name+'.json')
             self.assertTrue(json.loads(evidence.read_text())['timed_out'])
+            self.assertEqual(invoke.call_args_list[2].args[0][:3], ['docker', 'ps', '-a'])
 
     def test_timeout_never_exposes_role_argv_in_exception_or_traceback(self):
         import traceback
@@ -140,13 +141,13 @@ class ContainerResourceTests(unittest.TestCase):
             root = Path(tmp)
             cmd = ['docker', 'run', '--name', 'owned-test', '-e', 'API_KEY=private-test-value', 'image']
             original = subprocess.TimeoutExpired(cmd, 10, output=b'partial output', stderr=b'partial diagnostic')
-            with patch('orchestrator.subprocess.run', side_effect=[original, subprocess.CompletedProcess([], 0, '', '')]):
+            with patch('orchestrator.subprocess.run', side_effect=[original, subprocess.CompletedProcess([], 0, '', ''), subprocess.CompletedProcess([], 0, '', '')]):
                 try:
                     EngineRunner._run_role_command(cmd, cwd=root, env=None, timeout=10)
                 except subprocess.TimeoutExpired as exc:
                     self.assertEqual(exc.output, b'partial output')
                     self.assertEqual(exc.stderr, b'partial diagnostic')
-                    self.assertEqual(exc.cmd, ['ssdlc-role', 'owned-test'])
+                    self.assertEqual(exc.cmd, ['ssdlc-role', 'terminated-container'])
                     for rendered in (str(exc), repr(exc), traceback.format_exc()):
                         self.assertNotIn('private-test-value', rendered)
                         self.assertNotIn('API_KEY=', rendered)
@@ -202,3 +203,16 @@ class SupervisedContainerLabels(unittest.TestCase):
                 record = json.loads(Path(result.resource_evidence).read_text())
                 if run_id: self.assertEqual(record['run_id'], run_id)
                 else: self.assertNotIn('run_id', record)
+
+    def test_failed_absence_confirmation_never_grants_quiescence(self):
+        from ssdlc_recovery import QuiescentTimeout
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cmd = ['docker', 'run', '--name', 'owned-test', 'image']
+            with patch('orchestrator.subprocess.run', side_effect=[subprocess.TimeoutExpired(cmd, 10),
+                    subprocess.CompletedProcess([], 0, '', ''), subprocess.CompletedProcess([], 0, 'owned-test\n', '')]):
+                with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                    EngineRunner._run_role_command(cmd, cwd=root, env=None, timeout=10)
+            self.assertNotIsInstance(caught.exception, QuiescentTimeout)
+            record = json.loads((root / '.ssdlc/.runtime/resources/owned-test.json').read_text())
+            self.assertTrue(record['cleanup_failed'])

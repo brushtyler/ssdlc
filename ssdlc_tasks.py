@@ -545,7 +545,7 @@ class TaskScheduler:
                  context: dict[str, str], developer: Callable, verifier: Callable,
                  guard: Callable = lambda: None, budget: Callable = lambda: None,
                  max_attempts: int = 3, isolate_candidates: bool = False,
-                 runtime_identity: dict | None = None):
+                 runtime_identity: dict | None = None, recover_timeouts: bool = False):
         self.wt = worktree
         self.directory = directory
         self.plan = plan
@@ -557,6 +557,7 @@ class TaskScheduler:
         self.budget = budget
         self.max_attempts = max_attempts
         self.isolate_candidates = isolate_candidates
+        self.recover_timeouts = recover_timeouts
         self.runtime_identity = copy.deepcopy(runtime_identity or {})
         if max_attempts < 1:
             raise PlanError('max_attempts must be positive')
@@ -567,6 +568,8 @@ class TaskScheduler:
         self.journal.append(event, self.state)
 
     def _assert_candidate_runtime(self, state):
+        if state.get('bounded_recovery', 0) != int(self.recover_timeouts):
+            raise DevelopmentBlocked('INTEGRITY', 'Bounded recovery mode changed; explicit migration required')
         mode = state.get('candidate_isolation', 0)
         if type(mode) is not int or mode != int(self.isolate_candidates):
             raise TaskError('Candidate isolation mode changed; explicit controller migration is required')
@@ -1127,7 +1130,8 @@ class TaskScheduler:
         self._save('PREFLIGHT_BLOCKED' if failed else 'PREFLIGHT_PASSED')
         if failed:
             self._log_failed_checks(failed)
-            raise DevelopmentBlocked('BASELINE_MISMATCH', f'Required checks fail at the clean checkpoint; inspect {directory}')
+            raise DevelopmentBlocked('ENVIRONMENT_DIAGNOSIS' if self.recover_timeouts else 'BASELINE_MISMATCH',
+                                     f'Required checks fail at the clean checkpoint; inspect {directory}')
 
     def _log_failed_checks(self, results: list[dict]) -> None:
         for check in results:
@@ -1353,8 +1357,16 @@ class TaskScheduler:
             metadata = git_identity(workspace)
             record['status'] = 'RUNNING'
             self._save('TASK_STARTED')
-            result = self.developer(task, record['attempts'], prompt, workspace)
-            result = dict(result, termination='returned')
+            try:
+                result = self.developer(task, record['attempts'], prompt, workspace)
+                result = dict(result, termination='returned')
+            except subprocess.TimeoutExpired as exc:
+                from ssdlc_recovery import QuiescentTimeout
+                if not self.recover_timeouts or not isinstance(exc, QuiescentTimeout):
+                    raise DevelopmentBlocked('OUTCOME_UNCERTAIN', 'Timeout writers are not confirmed fenced; no redispatch') from None
+                decode = lambda text: text.decode(errors='replace') if isinstance(text, bytes) else text or ''
+                result = {'output': decode(exc.output) + '\n' + decode(exc.stderr), 'exit_code': None,
+                          'termination': 'timeout', 'quiescent': True, 'fence': exc.fence}
             if result.get('quiescent') is not True:
                 raise DevelopmentBlocked('DEVELOPER_INVOCATION', 'Developer writers are not confirmed quiescent; no redispatch')
             store = CandidateStore(attempt_dir)
@@ -1443,13 +1455,18 @@ class TaskScheduler:
             raise TaskError('Task exceeded approved manifest; scope reconciliation is required')
         for path in changed:
             confined(self.wt, path)
+        timed_out = result.get('termination') == 'timeout'
         imported = result.get('termination') == 'imported'
         if imported and record.get('import_proposal_sha256') != result.get('origin_proposal_sha256'):
             raise DevelopmentBlocked('INTEGRITY', 'Imported candidate has no bound transition authority')
-        blocker = None if imported else developer_blocker(result['output'])
+        blocker = None if imported or timed_out else developer_blocker(result['output'])
         if imported:
             record['completion_confirmation'] = 'unconfirmed_import'
-        if not imported and result['exit_code'] != 0:
+        if timed_out:
+            record['completion_confirmation'] = 'unconfirmed_completion'
+        elif not imported:
+            record.pop('completion_confirmation', None)
+        if not imported and not timed_out and result['exit_code'] != 0:
             blocker = blocker or 'DEVELOPER_INVOCATION'
         if not changed and not blocker:
             raise TaskError('No diff: independent evidence of an already-satisfied task is required')
@@ -1473,6 +1490,9 @@ class TaskScheduler:
                 or self._ignored() != self.state['ignored_paths']):
             raise TaskError('Verification changed source or metadata')
         # Capture all changes, including new files, without staging unknown paths.
+        if self.recover_timeouts:
+            from ssdlc_recovery import require_unlocked_git
+            require_unlocked_git(self.wt)
         if changed:
             indexed = set(git(self.wt, 'ls-files', '-z').split('\x00'))
             stage = [name for name in changed if os.path.lexists(self.wt / name) or name in indexed]
@@ -1489,7 +1509,8 @@ class TaskScheduler:
             return
         # Preserve failed attempt before restoring only its declared paths.
         record['failure'] = json.dumps(results) + '\n' + result['output']
-        category = blocker or 'CHECK_FAILURE'
+        environment_failure = self.recover_timeouts and any(r['exit_code'] in (124, 125, 126, 127) or r['empty_suite'] for r in results)
+        category = blocker or ('ENVIRONMENT_DIAGNOSIS' if environment_failure else 'CHECK_FAILURE')
         candidate = {'attempt': attempt, 'category': category, 'base_commit': record['start_commit'],
                      'tree': tree, 'changed_files': changed,
                      'diff_ref': str((attempt_dir / 'implementation.diff').relative_to(self.directory)),
@@ -1538,6 +1559,9 @@ class TaskScheduler:
             state = {'schema_version': '1.0', 'inputs_sha256': inputs, 'expected_head': self.plan['base_commit'],
                      'ignored_paths': self._ignored(),
                      'tasks': {t['task_id']: {'status': 'PENDING', 'attempts': 0} for t in ordered}}
+            if self.recover_timeouts:
+                state['attempt_limit'] = self.max_attempts
+                state['bounded_recovery'] = 1
             if self.isolate_candidates:
                 if self.wt.stat().st_dev != self.directory.stat().st_dev:
                     raise PlanError('Candidate worktree and evidence must share a filesystem for atomic adoption')
@@ -1549,6 +1573,10 @@ class TaskScheduler:
         if state['inputs_sha256'] != inputs:
             raise TaskError('Inputs changed: explicit plan migration/invalidation is required')
         self._assert_candidate_runtime(state)
+        from ssdlc_recovery import require_unlocked_git
+        require_unlocked_git(self.wt)
+        if 'attempt_limit' in state and state['attempt_limit'] != self.max_attempts:
+            raise DevelopmentBlocked('LIMIT_REACHED', 'Persistent task attempt limit cannot change on resume')
         for task in ordered:
             record = state['tasks'][task['task_id']]
             if 'protected_snapshot' in record and self._protected() != record['protected_snapshot']:

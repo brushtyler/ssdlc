@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "increment": "I2",
+  "base_commit": "f5a345f106946d6c954303ac5cfaa3945a8c47d9",
+  "created_at": "2026-11-11T09:19:54.624745+00:00",
+  "provenance": "Direct bootstrap implementation. Semantic engines, real Git and credential-free Docker timeout smoke; no unattended delivery or live model claim.",
+  "source_files": [
+    {
+      "path": "orchestrator.py",
+      "sha256": "de019cf954e45861047a86a860e18a8b84733b5fc1526c23a1549467232b0b5e"
+    },
+    {
+      "path": "schemas/candidate-capture.schema.json",
+      "sha256": "c358d19500e3de87e07e2aa0af5a6a40d5a787a8cebccb038f9d3bd3e9dc6e40"
+    },
+    {
+      "path": "schemas/design-review.schema.json",
+      "sha256": "7d62a3aebb7b62a5f7e0d65e9904a555188c5b021814f06bddccc782da798845"
+    },
+    {
+      "path": "ssdlc_design.py",
+      "sha256": "de5732b23a360b35fa640036c9163ff1cd9a933d0860ed42288fb027bf54a5a2"
+    },
+    {
+      "path": "ssdlc_supervisor.py",
+      "sha256": "9c5455a16e28923b3b8b32fe6c23ffc7db8fac89a7d308924f38545e03aca028"
+    },
+    {
+      "path": "ssdlc_tasks.py",
+      "sha256": "de91aefc3b5fd68293bd6cf79b91ef8839190fba7ea3ef5b75264c1908ddf090"
+    },
+    {
+      "path": "tests/test_container_resources.py",
+      "sha256": "cd50cbeba22cb50410498c5690761ea8c68c37ed08226f0b6f3e16913ce9a2e7"
+    },
+    {
+      "path": "schemas/recovery-limits.schema.json",
+      "sha256": "bb27f0bdf778e6864b733ba7589e4a0f4b506e1d1f7fd738eeac8361b5f1f507"
+    },
+    {
+      "path": "ssdlc_recovery.py",
+      "sha256": "53e96db8a15d1917662fc7fe4750c53d2f9ea407b4e389e1429581c4e836e15c"
+    },
+    {
+      "path": "tests/replay/benchmark.py",
+      "sha256": "f0e5a57aa8c3a0755e3e345e018a5a7f0cea7397c06376fc3143eda6207c0aeb"
+    },
+    {
+      "path": "tests/replay/test_timeout_recovery.py",
+      "sha256": "8ee53895b4bed04157c115004c091940dadd90859bb8ff1c97e7d5bce99ae981"
+    },
+    {
+      "path": "tests/test_design_recovery.py",
+      "sha256": "8850efa8ecc239b7a4a698043d724b1642f2c7360524b34f6527c42f5ae14d56"
+    },
+    {
+      "path": "tests/test_recovery_limits.py",
+      "sha256": "06d9649a4005050ee82414b574f063c7fdaf78c544a53f17a22c180700ead557"
+    },
+    {
+      "path": "tests/replay/fixtures/i2-recovery.json",
+      "sha256": "a45bcb2652b197a546edafe3078074884206f1ba13f4f2d0209d2245d83c20ec"
+    },
+    {
+      "path": "tests/test_recovery_benchmark.py",
+      "sha256": "061be2e212127e4fab5a6d78df0693962539fac734569d86980aba2a00cbf42e"
+    }
+  ],
+  "targeted_suite": {
+    "result": "PASS",
+    "tests": 121,
+    "duration_seconds": 24.348,
+    "python": "3.14.4",
+    "command": "PYTHONPATH=tests python3 -m unittest test_recovery_limits test_design_recovery replay.test_timeout_recovery test_design_session test_container_resources replay.test_candidate_capture test_task_bootstrap.OrchestratorBootstrapTests -q",
+    "environment": "Host, standard PATH"
+  },
+  "intermediate_full_suite": {
+    "result": "PASS",
+    "tests": 830,
+    "duration_seconds": 291.742,
+    "note": "Before final entrypoint/mode guards, derived ADR-delta replay and extra tests. Complete final PR-head CI is authoritative."
+  },
+  "docker_smoke": {
+    "result": "PASS",
+    "developer_dispatches": 1,
+    "checks": 3,
+    "termination": "timeout",
+    "producer_exit_code": null,
+    "completion_confirmation": "unconfirmed_completion",
+    "model_calls": 0,
+    "network": "none",
+    "role_credentials": false,
+    "fence": true,
+    "image_id": "sha256:67d6aa23250928dba124ad4ee4edb7b6c4aa33fef37c0ff1a7a6ddc078356665"
+  },
+  "benchmark": {
+    "corpus": "i2-recovery-v1",
+    "cases": 9,
+    "failed_cases": 0,
+    "expected_successful_engine_outcomes": 3,
+    "total_interventions_required": 6,
+    "avoidable_interventions": 0,
+    "human_callbacks_executed": 0,
+    "escaped_seeded_defects": 0,
+    "repair_defect_denominator": 1,
+    "ready_prs": 0,
+    "results": "docs/evidence/i2-replay-results.json",
+    "ci_integration": {
+      "test": "test_recovery_benchmark.RecoveryBenchmarkGate.test_pinned_recovery_corpus",
+      "result": "PASS",
+      "duration_seconds": 2.067,
+      "workflow_changes": false
+    }
+  },
+  "live_provider_calls": 0,
+  "compatibility": {
+    "activation": "Explicit frozen profile for a fresh ticket; no profile over prior accounting",
+    "historical_i1_model_dispatch": "Still fenced pending explicit cumulative-limit reconciliation; no migration/resume performed",
+    "financial_bounds": "Separate observed API dollars and CLI estimates; missing/default-zero telemetry remains unknown; no guaranteed pre-call price ceiling",
+    "transport": "Current inference POST never automatically replayed; generic retry reservation requires trusted non-dispatch proof",
+    "lock_cleanup": "Unowned Git locks preserved; no ownership inferred from age/PID"
+  },
+  "publication": {
+    "selected_export": "Raw prompts, runtime journals, authorizations and provider transcripts excluded",
+    "gitleaks": {
+      "result": "PASS",
+      "findings": 0,
+      "scope": "20 selected source/docs/evidence files; private runtime excluded",
+      "image_id": "sha256:67d6aa23250928dba124ad4ee4edb7b6c4aa33fef37c0ff1a7a6ddc078356665"
+    }
+  }
+}

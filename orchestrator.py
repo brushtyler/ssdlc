@@ -134,11 +134,40 @@ def _supervision_fault(point):
     pass
 
 
+def _bounded_entrypoint(fn):
+    @functools.wraps(fn)
+    def wrapped(self, *args, **kwargs):
+        from ssdlc_recovery import LimitsStore
+        previous = getattr(_dispatch_local, 'limits', None)
+        if previous is not None and previous.root == self.ssdlc_root:
+            return fn(self, *args, **kwargs)
+        if ((self.ssdlc_root / 'limits/policy.json').exists()
+                or (self.ssdlc_root / 'limits/policy.json').is_symlink()
+                or (self.ssdlc_root / 'limits/task-journal.jsonl').exists()):
+            store = LimitsStore(self.ssdlc_root)
+            with ticket_lock(self.ssdlc_root / 'limits/limits.lock'):
+                envelope, _ = store._load()
+            assert_controller(Path(__file__).resolve().parent, envelope['binding']['controller'])
+            if envelope['binding']['ticket'] != self.ticket_id:
+                raise TaskError('Limit policy belongs to another ticket')
+            _dispatch_local.limits = store
+        elif os.environ.get('SSDLC_AUTONOMOUS', '').lower() == 'true':
+            from ssdlc_recovery import RecoveryStop
+            raise RecoveryStop('LIMIT_REACHED', 'Autonomous launch requires an explicitly authorized limits profile')
+        try:
+            return fn(self, *args, **kwargs)
+        finally:
+            _dispatch_local.limits = previous
+    return wrapped
+
+
 def _supervised_dispatch(fn):
     signature = inspect.signature(fn)
     @functools.wraps(fn)
     def wrapped(*args, **kwargs):
-        if not os.environ.get('SSDLC_SUPERVISED_RUN_ID') or getattr(_dispatch_local, 'depth', 0):
+        limits = getattr(_dispatch_local, 'limits', None)
+        supervised = bool(os.environ.get('SSDLC_SUPERVISED_RUN_ID'))
+        if (not supervised and limits is None) or getattr(_dispatch_local, 'depth', 0):
             return fn(*args, **kwargs)
         bound = signature.bind(*args, **kwargs).arguments
         engine = bound.get('engine', fn.__name__.removeprefix('run_'))
@@ -153,8 +182,18 @@ def _supervised_dispatch(fn):
             matches = [p for p in PHASES if isinstance(phase, str) and (phase == p or phase.startswith(p + '-'))]
             if matches:
                 fields['phase'] = max(matches, key=len)
+        requested = bound.get('phase', fields.get('phase', ''))
+        role = requested
+        phase = fields.get('phase', requested)
+        if limits is not None:
+            policy = limits._load(repair=False)[0]['policy']
+            role = next((r for r in sorted(policy['role_invocations'], key=len, reverse=True)
+                         if requested == r or requested.startswith(r + '-')), requested)
+            phase = next((p for p in sorted(policy['phase_invocations'], key=len, reverse=True)
+                          if requested == p or requested.startswith(p + '-')), requested)
+        reservation = limits.reserve(role, phase, engine) if limits is not None else None
         dispatch_id = uuid.uuid4().hex
-        if not _supervision_event('dispatch_started', dispatch_id=dispatch_id, engine=engine, **fields):
+        if supervised and not _supervision_event('dispatch_started', dispatch_id=dispatch_id, engine=engine, **fields):
             from ssdlc_supervisor import SupervisorIntegrityError
             raise SupervisorIntegrityError('filesystem_integrity')
         _supervision_fault('dispatch.after_started_before_engine')
@@ -163,8 +202,14 @@ def _supervised_dispatch(fn):
             result = fn(*args, **kwargs)
         except BaseException as exc:
             _supervision_event('dispatch_finished', dispatch_id=dispatch_id, outcome='raised', exc_type=type(exc).__name__)
+            if limits is not None:
+                from ssdlc_recovery import QuiescentTimeout
+                limits.finish(reservation, 'terminated' if isinstance(exc, QuiescentTimeout) else 'uncertain')
             raise
         else:
+            if limits is not None:
+                from ssdlc_recovery import observed_usage
+                limits.finish(reservation, 'returned', observed_usage(engine, fn.__name__, result))
             _supervision_fault('dispatch.after_engine_before_finished')
             _supervision_event('dispatch_finished', dispatch_id=dispatch_id, outcome='returned')
             return result
@@ -178,11 +223,12 @@ def _supervised_phase(phase):
     def decorate(fn):
         @functools.wraps(fn)
         def wrapped(*args, **kwargs):
-            if not os.environ.get('SSDLC_SUPERVISED_RUN_ID'):
-                return fn(*args, **kwargs)
             with _dispatch_context(phase=phase):
                 _supervision_event('phase_started', phase=phase)
-                result = fn(*args, **kwargs)
+                if args and isinstance(getattr(args[0], 'ssdlc_root', None), Path):
+                    result = _bounded_entrypoint(fn)(*args, **kwargs)
+                else:
+                    result = fn(*args, **kwargs)
                 _supervision_event('phase_finished', phase=phase)
                 return result
         return wrapped
@@ -1087,7 +1133,11 @@ class EngineRunner:
     @staticmethod
     def _run_role_command(cmd, *, cwd, env, timeout, input=None):
         """Execute once; preserve resource evidence even for zero-exit PID failures."""
+        limits = getattr(_dispatch_local, 'limits', None)
+        if limits is not None:
+            timeout = min(timeout, limits.remaining(), limits._load(repair=False)[0]['policy']['invocation_timeout_seconds'])
         cwd = Path(cwd)
+        resource_root = EngineRunner._find_repo_root(cwd)
         docker = cmd[:2] == ["docker", "run"] and "--name" in cmd
         name = cmd[cmd.index("--name") + 1] if docker else None
         timed_out = False
@@ -1101,12 +1151,20 @@ class EngineRunner:
             if name:
                 try:
                     subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=15, check=True)
+                    absence = subprocess.run(['docker', 'ps', '-a', '--filter', 'name=^/' + name + '$',
+                                              '--format', '{{.Names}}'], capture_output=True, text=True, timeout=15, check=True)
+                    if absence.stdout.strip():
+                        cleanup_failed = True
                 except (OSError, subprocess.SubprocessError):
                     # Cleanup failure must not reveal the original credential-bearing
                     # exception through an implicit chained traceback.
                     cleanup_failed = True
             # Docker argv contains AI credentials passed with -e. Never expose it
             # through exception messages, repr(), chained tracebacks or state.json.
+            if name and not cleanup_failed:
+                from ssdlc_recovery import QuiescentTimeout
+                raise QuiescentTimeout(timeout, exc.output, exc.stderr,
+                    {'container': name, 'removed': True, 'absence_confirmed': True}) from None
             raise subprocess.TimeoutExpired(
                 ["ssdlc-role", name or "local"], timeout,
                 output=exc.output, stderr=exc.stderr,
@@ -1123,7 +1181,7 @@ class EngineRunner:
                             if separator:
                                 metrics[key] = value
                     proc.stderr = "".join(line for line in lines if not line.startswith(marker))
-                path = EngineRunner._find_repo_root(cwd) / ".ssdlc/.runtime/resources" / (name + ".json")
+                path = resource_root / ".ssdlc/.runtime/resources" / (name + ".json")
                 failed = any(int(metrics.get(key, "0")) > 0 for key in
                              ("pids.events.max", "memory.events.oom", "memory.events.oom_kill"))
                 atomic_json(path, {"container": name, "cwd": str(cwd), "timed_out": timed_out,
@@ -1204,6 +1262,8 @@ class EngineRunner:
         api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
         trace_user = f"{project_id}:{ticket_id}:{phase}"
         if not api_key:
+            if getattr(_dispatch_local, 'limits', None) is not None:
+                raise DevelopmentBlocked('AUTH_MISSING', 'Bounded API route cannot silently fall back to another provider')
             out, c, ti, to = EngineRunner.call_cli_fallback(
                 model, system_prompt, user_prompt, reasoning_effort=reasoning_effort
             )
@@ -1229,29 +1289,18 @@ class EngineRunner:
             "X-Title": f"SSDLC/{project_id}/{ticket_id}",
         }
 
-        max_attempts = 3
-        data: Dict[str, Any] = {}
-        for attempt_idx in range(1, max_attempts + 1):
-            req = urllib.request.Request(url, data=req_bytes, headers=headers, method="POST")
-            try:
-                with urllib.request.urlopen(req, timeout=300) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                break
-            except urllib.error.HTTPError as e:
-                err_body = e.read().decode("utf-8", errors="replace")
-                if e.code in (429, 500, 502, 503, 504) and attempt_idx < max_attempts:
-                    backoff = 2 ** attempt_idx
-                    print(f"    [WARN] OpenRouter HTTP {e.code} on {phase}; retrying in {backoff}s ({attempt_idx}/{max_attempts})...")
-                    time.sleep(backoff)
-                    continue
-                raise RuntimeError(f"OpenRouter HTTP {e.code}: {err_body}") from e
-            except (urllib.error.URLError, TimeoutError) as e:
-                if attempt_idx < max_attempts:
-                    backoff = 2 ** attempt_idx
-                    print(f"    [WARN] OpenRouter network error ({e}) on {phase}; retrying in {backoff}s ({attempt_idx}/{max_attempts})...")
-                    time.sleep(backoff)
-                    continue
-                raise RuntimeError(f"OpenRouter network failure after {max_attempts} attempts: {e}") from e
+        limits = getattr(_dispatch_local, 'limits', None)
+        if limits is not None and not os.environ.get('SSDLC_SUPERVISED_RUN_ID'):
+            from ssdlc_recovery import RecoveryStop
+            raise RecoveryStop('LIMIT_REACHED', 'Bounded HTTP inference requires the detached supervisor hard deadline')
+        http_timeout = min(300, limits.remaining()) if limits is not None else 300
+        req = urllib.request.Request(url, data=req_bytes, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=http_timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+            from ssdlc_recovery import RecoveryStop
+            raise RecoveryStop('OUTCOME_UNCERTAIN', 'Inference transport has no proven non-dispatch/idempotency; no automatic replay') from None
 
         content = data["choices"][0]["message"]["content"]
         usage = data.get("usage", {})
@@ -2384,6 +2433,7 @@ class SSDLCOrchestrator:
             self.record_artifact(name, path)
         return execution_contract(snapshot)
 
+    @_bounded_entrypoint
     def resume_task_planning(self, review_repairs=None, recover_review=False) -> Path:
         """Resume only planning against sealed upstream artifacts; never execute code."""
         with ticket_lock(self.ssdlc_root / "ticket.lock"):
@@ -2466,8 +2516,10 @@ class SSDLCOrchestrator:
         scheduler = TaskScheduler(
             wt, self.dir_dev / "tasks", plan, quality, context, develop,
             verify, guard, self.check_budget_circuit_breaker,
-            max_attempts=int(os.environ.get("SSDLC_MAX_DEV_RETRIES", "3")),
+            max_attempts=(getattr(_dispatch_local, "limits")._load(repair=False)[0]["policy"]["development_attempts"]
+                          if getattr(_dispatch_local, "limits", None) is not None else int(os.environ.get("SSDLC_MAX_DEV_RETRIES", "3"))),
             isolate_candidates=True,
+            recover_timeouts=getattr(_dispatch_local, 'limits', None) is not None,
             runtime_identity={'controller_sha256': digest(controller),
                               'environment': runtime_environment},
         )
@@ -3006,11 +3058,12 @@ class SSDLCOrchestrator:
             'Classify optional improvements as ADVISORY; do not expand scope or turn documented limitations into blockers. '
             'Explain newly introduced or previously missed findings. Inspect source to verify signatures, state shapes, '
             'all retained evidence and exception boundaries; do not demand implementation code before design approval. '
+            'Optional progress_evidence must cite only the host progress_evidence_catalogue with exact hash and approved obligation IDs; model prose and rewritten ADRs are not material evidence. '
             'Legacy prose reviews remain relevant: account for their unresolved concerns in the first structured review.\n' + schema)
         routing = {role: [engine, model, [SquadDispatcher.resolve_reasoning_effort(role, risk, attempt=i) for i in range(1, 9)]]
                    for role, engine, model in [('02-design-arch', arch_engine, arch_model), ('02-design-sec', sec_engine, sec_model)]}
         def invoke(role, engine, model, system, user, rnd):
-            effort = routing[role][2][rnd - 1]
+            effort = routing[role][2][rnd - 1] if role in routing else routing['02-design-sec'][2][0]
             print(f'[02-design] {role} round {rnd}: {engine}:{model}, reasoning={effort}', flush=True)
             start = time.time()
             out, cost, tin, tout, trace = EngineRunner.invoke_role(
@@ -3023,14 +3076,45 @@ class SSDLCOrchestrator:
             return invoke('02-design-arch', arch_engine, arch_model, arch_prompt,
                           {'context': context, 'previous_adr': previous, 'review_history': history}, rnd)
         def reviewer(rnd, adr, history):
+            catalogue = [dict(artifact_ref=ref, sha256=meta['sha256'], report=json.loads((self.ssdlc_root / meta['path']).read_text()))
+                for ref, meta in self.state.get('artifacts', {}).items()
+                if ref.startswith('02-design/design-session/source-inspection-')]
             return invoke('02-design-sec', sec_engine, sec_model, review_prompt,
-                          {'context': context, 'adr': adr, 'review_history': history}, rnd)
+                          {'context': dict(context, progress_evidence_catalogue=catalogue), 'adr': adr, 'review_history': history}, rnd)
         def artifact(path):
             self.record_artifact(str(path.relative_to(self.ssdlc_root)), path)
+        limits = getattr(_dispatch_local, 'limits', None)
+        def diagnose(subject, previous, history):
+            limits.reserve_diagnosis(subject)
+            from ssdlc_recovery import inspect_design_sources
+            report = inspect_design_sources(self.repo_root, [e['path'] for e in context['source_evidence']])
+            path = self.dir_design / 'design-session' / ('source-inspection-' + subject + '.json')
+            atomic_json(path, report)
+            artifact(path)
+            return invoke('02-design-diagnosis', sec_engine, sec_model,
+                          'Diagnose stalled design against approved obligations. Return a bounded repair proposal; do not change requirements, run code, approve the design or allocate calls.',
+                          {'context': dict(context, source_inspection=report), 'adr': previous, 'history': history}, 1)
+        def verify_progress_evidence(item):
+            ref = item['artifact_ref']
+            meta = self.state.get('artifacts', {}).get(ref)
+            if not ref.startswith('02-design/design-session/source-inspection-') or not meta or meta['sha256'] != item['sha256']:
+                return False
+            path = confined(self.ssdlc_root, ref, protect=False)
+            if file_hash(path) != item['sha256']:
+                raise DevelopmentBlocked('INTEGRITY', 'Registered design inspection changed')
+            report = json.loads(path.read_text())
+            return (report['kind'] == 'source_inspection' and report['base_commit'] == self.state['base_commit']
+                    and bool(report['files']) and all(file_hash(confined(self.repo_root, f['path'])) == f['sha256'] for f in report['files']))
+        bounded_policy = limits._load(repair=False)[0]['policy'] if limits is not None else None
+        if bounded_policy and round_limit is not None and round_limit != bounded_policy['design_rounds']:
+            from ssdlc_recovery import RecoveryStop
+            raise RecoveryStop('LIMIT_REACHED', 'Design round extension requires a new explicit limit authorization')
         session = DesignSession(self.dir_design,
                                 {'context': context, 'architect_prompt': arch_prompt, 'review_prompt': review_prompt,
                                  'routing': routing}, architect, reviewer, self.check_budget_circuit_breaker, artifact,
-                                initial_limit=int(os.environ.get('SSDLC_MAX_DESIGN_ROUNDS', '5')), extend_limit=round_limit)
+                                initial_limit=bounded_policy['design_rounds'] if bounded_policy else int(os.environ.get('SSDLC_MAX_DESIGN_ROUNDS', '5')), extend_limit=round_limit,
+                                progress_policy=limits is not None, diagnose=diagnose if limits is not None else None,
+                                verify_evidence=verify_progress_evidence)
         if import_legacy:
             legacy = confined(self.dir_design, import_legacy, protect=False)
             if not legacy.is_dir():
@@ -3080,6 +3164,7 @@ class SSDLCOrchestrator:
         self.record_gate('PAIR_DESIGN_GATE', True, 'Persistent ADR and independently approved structured review')
         return self.dir_design / 'adr.md', self.dir_design / 'threat-model.md'
 
+    @_bounded_entrypoint
     def resume_pair_design(self, round_limit=None, import_legacy=None) -> Tuple[Path, Path]:
         """Resume design only against sealed upstream artifacts; never execute code."""
         with ticket_lock(self.ssdlc_root / 'ticket.lock'):
@@ -4476,6 +4561,11 @@ To **REJECT** and send feedback back to the team:
     ]
 
     def check_budget_circuit_breaker(self) -> None:
+        limits = getattr(_dispatch_local, 'limits', None)
+        if limits is not None:
+            envelope, state = limits._load(repair=False)
+            limits.check(state, envelope['policy'])
+            return
         env_cap = os.environ.get("SSDLC_BUDGET_CAP_USD", "").strip()
         if env_cap:
             budget_cap = float(env_cap)
@@ -4495,6 +4585,7 @@ To **REJECT** and send feedback back to the team:
             self._save_state()
             raise TaskError(msg)
 
+    @_bounded_entrypoint
     def run_pipeline(
         self,
         goal: str,
@@ -4914,7 +5005,24 @@ def _foreground_main(argv=None) -> int:
     p_preview.add_argument('--phase', required=True, choices=tuple(bounce.PHASES))
     p_preview.add_argument('--attempt', required=True, type=int)
 
+    for p_limits in (p_run, p_start, p_plan, p_design):
+        p_limits.add_argument('--limits-profile', help='Explicit operator limits JSON for a fresh ticket; frozen on first launch')
+
     args = parser.parse_args(argv)
+    repo_path = Path(getattr(args, 'repo', '.')).resolve()
+    if args.subcommand in {"run", "start", "plan", "design"} and getattr(args, "limits_profile", None):
+        from ssdlc_recovery import LimitsStore
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.ticket) or args.ticket in {".", ".."}:
+            parser.error("limits authorization requires a literal ticket ID")
+        root = repo_path / ".ssdlc" / args.ticket
+        store = LimitsStore(root)
+        state_path = root / "state.json"
+        if not store.policy_path.exists() and state_path.exists():
+            raise TaskError("Existing ticket accounting requires an explicit migration; no fresh limits profile")
+        store.authorize(json.loads(Path(args.limits_profile).read_text()),
+            {"ticket": args.ticket, "base_commit": git(repo_path, "rev-parse", "HEAD"),
+             "controller": controller_snapshot(Path(__file__).resolve().parent)})
+
     if args.subcommand in {'start', 'status', 'cancel', 'monitor', 'resume'} or (args.subcommand == 'run' and args.detach):
         import ssdlc_supervisor
         return ssdlc_supervisor.cli(args, parser)
