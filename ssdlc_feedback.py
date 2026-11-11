@@ -98,7 +98,7 @@ def source_binding(source):
     failure = row['failed_attempts'][-1]
     if failure['category'] != 'SCOPE_REQUIRED' or not failure.get('capture_sha256'):
         raise FeedbackError('Feedback requires a captured explicit scope refusal')
-    return dict(task_id=source['task_id'], parent_selector=source['parent_selector'],
+    return dict(task_id=source['task_id'], attempt=row['attempts'], parent_selector=source['parent_selector'],
                 plan_sha256=digest(source['plan']), source_files_sha256=digest(source['files']),
                 failure_sha256=digest(failure), capture_sha256=failure['capture_sha256'],
                 counters_sha256=digest(source['counters']))
@@ -386,6 +386,27 @@ class FeedbackStore:
                 return copy.deepcopy(call)
             call.update(status='RETURNED', receipt=receipt)
             self._append('FEEDBACK_ROLE_RETURNED', state)
+            return copy.deepcopy(call)
+
+    def bind_invocation(self, operation, invocation_id, limits_sha256):
+        """Attach an existing native reservation; this allocates no budget."""
+        _hash(operation); _hash(limits_sha256)
+        if not isinstance(invocation_id, str) or not re.fullmatch(r'[a-f0-9]{32}', invocation_id):
+            raise FeedbackError('Invalid native feedback invocation')
+        with ticket_lock(self.root / 'feedback.lock'):
+            authority, state = self._read()
+            if authority['status'] != 'ACTIVE' or state is None:
+                raise FeedbackError('Feedback authorization is incomplete')
+            call = next((r for r in state['role_calls'] if r['operation_id'] == operation), None)
+            if call is None or call['status'] != 'INTENT':
+                raise FeedbackError('Native reservation requires a pending role intent')
+            binding = dict(invocation_id=invocation_id, limits_sha256=limits_sha256)
+            if 'native' in call:
+                if call['native'] != binding:
+                    raise FeedbackError('Native invocation binding cannot change')
+                return copy.deepcopy(call)
+            call['native'] = binding
+            self._append('FEEDBACK_ROLE_FUNDED', state)
             return copy.deepcopy(call)
 
     def public_projection(self):

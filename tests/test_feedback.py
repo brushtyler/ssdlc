@@ -25,7 +25,7 @@ class FeedbackTests(unittest.TestCase):
             parent_selector={'transition_id': 'parent'},
             plan={'tasks': [{'task_id': 'T08', 'ac_refs': ['AC-37'], 'sec_refs': ['SEC-11']}]},
             files={'developer.log': file_hash(self.evidence / 'developer.log')}, counters={'invocations': 37},
-            journal={'tasks': {'T08': {'attempts': 2, 'failed_attempts': [
+            journal={'tasks': {'T08': {'status': 'FAILED', 'attempts': 2, 'failed_attempts': [
                 {'category': 'SCOPE_REQUIRED', 'capture_sha256': 'a' * 64}]}}})
         self.ticket = self.root / 'ISSUE22'
         self.policy = dict(schema_version=1, capability='record-only-v1', ticket='ISSUE22',

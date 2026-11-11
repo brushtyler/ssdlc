@@ -9,7 +9,7 @@ future execution authority; a recorded approval never grants model dispatch.
 | Increment | Contract | Status |
 | --- | --- | --- |
 | F1 | Typed requests, conservative diagnosis, persistent routing/role receipts, ownership and independence metadata | Implemented offline; native inspection commands below |
-| F2 | Funded role adapter, delegated native activation, technical fencing, lineage and cumulative amendment limits | Pending; no autonomous activation enabled |
+| F2 | Funded role adapter, delegated native activation, technical fencing, lineage and cumulative amendment limits | In development: offline funded consultations, accounting bindings and live lock borrowing; delegated activation not enabled |
 | F3 | Supervisor recovery integration, sanitized idempotent GitHub projections, prerequisite proposals and supported return | Pending; no new DAG node or GitHub ticket starts implicitly |
 
 This does not complete #39 or #38. It does not change a running controller or
@@ -139,6 +139,38 @@ snapshots and credentials. They are data for a future GH adapter, not authority
 or an implemented publication workflow.
 
 ## F2/F3 readiness requirements
+
+The F2 support modules implement counted consultations through `LimitsStore`,
+with explicit named `feedback-*` role caps and the `feedback` phase. They require
+a host guard and an injected read-only runner; there is no default SDK runner or
+dispatch CLI. A recording grant does not fund them. I2 admission includes the
+feedback phase only when that phase and named feedback roles are explicitly
+present in the exact authorized profile. Existing profiles remain unchanged.
+
+`FundedFeedbackRoles` persists a recording intent, native reservation and binding
+before invoking the supplied runner. It captures the structured response before
+final native reconciliation. A captured response can finish the same reservation
+after interruption without inference; a lost/uncertain result cannot. Unknown
+costs remain null. Calls cannot consume/refund development attempts or replace
+the frozen limits authority.
+
+`ssdlc_feedback_bindings.py` separates a technical review subject from exactly
+the recorded consultation accounting advance. Only the native limits journal
+and snapshot may advance. Their prior journal prefix, all existing invocation
+rows, deadline, policy and other counters remain identical; each added invocation
+must match one captured funded response. A changed technical input, unrelated
+call or altered historical cost is refused. This relation still needs to be bound
+into the delegated activation contract; it is not itself activation authority.
+
+Native locks remain nonreentrant. `LockLease` records a live process/thread-owned
+file descriptor, and scope prepare/activate can explicitly borrow that exact
+registered lease. Released, fabricated, other-thread and replaced-file leases
+are refused. Borrowing additionally checks the actual exclusive Linux FLOCK in
+`/proc/self/fdinfo`; an open descriptor whose lock was released or downgraded is
+not ownership. Ordinary ticket locking retains its existing POSIX behavior.
+Borrowing does not attest complete writer fencing and does not
+replace the existing exact operator authorization. The future technical fencing
+contract must additionally prove quiescence and resolved dispatches.
 
 F2 must introduce an explicit execution-delegation contract, not synthesize
 `source_fenced: true` or reuse an unrelated exact operator approval. It must

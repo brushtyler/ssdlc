@@ -18,6 +18,7 @@ from ssdlc_tasks import (TaskError, TaskJournal, TaskScheduler, TaskPlanValidato
                          atomic_json, digest, file_hash, git, ticket_lock, validate_document)
 from ssdlc_transitions import (TransitionError, TransitionStore, _regular,
                                source_binding, sync_tree, validate_authorization)
+from ssdlc_locks import transition_lock
 
 
 def _ticket(path):
@@ -157,7 +158,7 @@ def subject(source, plan, reason):
 
 
 def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_snapshot,
-            guard=lambda: None, clock=time.time, fault=lambda point: None):
+            guard=lambda: None, clock=time.time, fault=lambda point: None, held_locks=()):
     """Stage a reviewed amendment, retaining all prior generations and counters."""
     from ssdlc_preparations import unfinished, register, update, pending, clear_pending
     from ssdlc_candidates import inventory
@@ -165,11 +166,11 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
     ticket, repo = _ticket(ticket), Path(repo).resolve()
     if ticket != repo / '.ssdlc' / plan.get('ticket_id', ''):
         raise TransitionError('Scope target must be the canonical ticket of the target repository')
-    with ticket_lock(ticket / 'ticket.lock'):
+    with transition_lock(ticket / 'ticket.lock', held_locks):
         if unfinished(ticket, namespace='execution'):
             raise TransitionError('Earlier preparation requires native discard')
         source = inspect(ticket)
-        with ticket_lock(source['root'] / '03-dev/tasks/scheduler.lock'):
+        with transition_lock(source['root'] / '03-dev/tasks/scheduler.lock', held_locks):
             guard()
             reviewed = subject(source, plan, reason)
             if (not isinstance(review, dict) or set(review) != {'subject_sha256', 'reviewer', 'report', 'scope_diff'}
@@ -277,7 +278,8 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                 raise
 
 
-def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=time.time, fault=lambda point: None):
+def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=time.time, fault=lambda point: None,
+             held_locks=()):
     from ssdlc_candidates import inventory
     from ssdlc_preparations import update, clear_pending
     ticket, preparation = _ticket(ticket), _ticket(preparation)
@@ -286,7 +288,7 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
             or proposal.get('authorization_contract') != 'scope-amendment-v1'):
         raise TransitionError('Activation requires the recorded scope preparation')
     validate_authorization(authorization, proposal)
-    with ticket_lock(ticket / 'ticket.lock'):
+    with transition_lock(ticket / 'ticket.lock', held_locks):
         guard()
         store = TransitionStore(ticket / 'execution', fault)
         selected, projected = store.load(), _read(preparation, 'projection.json')
@@ -297,7 +299,7 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
             clear_pending(ticket, proposal['transition_id'], namespace='execution')
             return selected
         source = inspect(ticket)
-        with ticket_lock(source['root'] / '03-dev/tasks/scheduler.lock'):
+        with transition_lock(source['root'] / '03-dev/tasks/scheduler.lock', held_locks):
             if (source['parent_selector'] != proposal['parent_selector'] or source['files'] != proposal['source_files']
                     or str(source['root']) != recipe['source_root'] or source['worktree_sha256'] != recipe['source_worktree_sha256']):
                 raise TransitionError('Parent generation changed after amendment review')

@@ -238,7 +238,9 @@ def _prepare(ticket, repo, request, *, runtime_identity, controller_snapshot, ve
                    'task_floors': {tid: {key: copy.deepcopy(row[key]) for key in
                         ('attempts', 'failed_attempts', 'reconciliation_required', 'capture_verifications') if key in row}
                         for tid, row in current['tasks'].items()},
-                   'allowed_entrypoints': ALLOWED_ENTRYPOINTS, 'allowed_phases': ALLOWED_PHASES}
+                   'allowed_entrypoints': ALLOWED_ENTRYPOINTS,
+                   'allowed_phases': ALLOWED_PHASES + (['feedback'] if 'feedback' in profile['phase_invocations']
+                       and any(r.startswith('feedback-') for r in profile['role_invocations']) else [])}
         envelope = {'policy': profile, 'binding': binding}
         initial['policy_sha256'] = digest(envelope)
         store = LimitsStore(runtime, clock)

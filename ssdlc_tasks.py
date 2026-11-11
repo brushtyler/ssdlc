@@ -452,7 +452,9 @@ def ticket_lock(path: Path):
         except BlockingIOError as exc:
             raise TaskError('Another process is running this ticket') from exc
         try:
-            yield
+            from ssdlc_locks import record_lock
+            with record_lock(path, stream.fileno()) as lease:
+                yield lease
         finally:
             fcntl.flock(stream, fcntl.LOCK_UN)
 
