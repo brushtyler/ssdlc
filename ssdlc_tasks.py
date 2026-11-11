@@ -510,6 +510,27 @@ class TaskJournal:
             state = event['state']
         return state, sequence, previous
 
+    @staticmethod
+    def head(path: Path) -> dict | None:
+        """Read a journal position without creating or repairing anything."""
+        path = Path(path)
+        if not path.exists():
+            return None
+        data = path.read_bytes()
+        _, sequence, sha = TaskJournal._replay(data[:data.rfind(b'\n') + 1])
+        return {'sequence': sequence, 'sha256': sha} if sequence else None
+
+    @staticmethod
+    def replay_range(path: Path, seq: int, sha: str) -> tuple[dict, list[dict]]:
+        data = Path(path).read_bytes()
+        data = data[:data.rfind(b'\n') + 1]
+        TaskJournal._replay(data)
+        events = [json.loads(line) for line in data.splitlines()]
+        for index, event in enumerate(events):
+            if event['sequence'] == seq and event['sha256'] == sha:
+                return event['state'], events[index + 1:]
+        raise TaskError('Journal anchor is not on the chain')
+
     def peek(self) -> dict | None:
         """Read the journal state without repairing files or changing append position."""
         if not self.path.exists():
@@ -683,6 +704,8 @@ class TaskScheduler:
             if peeked['inputs_sha256'] != inputs:
                 raise TaskError('Inputs changed: explicit plan migration/invalidation is required')
             self._require_all_completed(peeked)
+            if reason.startswith('corrective:') and any(peeked['tasks'][tid]['attempts'] >= self.max_attempts for tid in roots):
+                raise TaskError('attempts_exhausted')
             state = self.journal.load()
             self.state = state
             for tid, record in state['tasks'].items():
@@ -1122,6 +1145,9 @@ class TaskScheduler:
                                                        attempt['capture_sha256'])
                     except (CandidateError, OSError, ValueError, KeyError, TypeError):
                         problem('capture_changed')
+            for previous in record.get('superseded', []):
+                for check in previous['checks']:
+                    inspect(check)
             numbers, directories = set(), set()
             attempts = record.get('revalidations', [])
             for attempt in attempts:
@@ -1144,11 +1170,19 @@ class TaskScheduler:
                             or [c['check_id'] for c in attempt['checks']] != expected
                             or [c['check_id'] for c in attempt['started_checks']] != expected
                             or any(c['exit_code'] != 0 or c['empty_suite'] for c in attempt['checks'])
-                            or attempt['head'] != self.state.get('expected_head') or not attempt['tree']):
+                            or not self._supporting_head(attempt['head']) or not attempt['tree']):
                         problem('invalid_supporting_attempt', path=attempt['dir'])
         except (PlanError, OSError, RuntimeError, KeyError, TypeError, ValueError, UnicodeDecodeError):
             problem('malformed_record')
         return problems
+
+    def _supporting_head(self, head):
+        expected = self.state.get('expected_head')
+        if head == expected:
+            return True
+        return (any(g['from_head'] == head for g in self.state.get('generations', []))
+                and subprocess.run(['git', 'merge-base', '--is-ancestor', head, expected],
+                                   cwd=self.wt, capture_output=True).returncode == 0)
 
     def _evidence_valid(self, record, task_id=None) -> bool:
         return not self._evidence_problems(record, task_id)
@@ -1182,8 +1216,29 @@ class TaskScheduler:
             return self._inventory_problems(self.journal.peek())
 
     def _inventory_problems_active(self, active, revalidating, pcf=None) -> list[dict]:
-        """Strict inventory skeleton; active-state relaxations are not enabled."""
-        return self._inventory_problems(self.state)
+        """Allow only missing current checks in explicitly incomplete substates."""
+        problems = self._inventory_problems(self.state)
+        allowed = set()
+        for tid, record in self.state['tasks'].items():
+            if tid == active and record['status'] in ('RUNNING', 'VERIFYING'):
+                # A status label alone does not establish an active corrective
+                # generation. Ordinary retained evidence must still fail closed.
+                repairs = record.get('repairs', [])
+                if repairs and any(
+                        run.get('txn_id') == repairs[-1]['txn_id']
+                        and run['status'] == 'RUNNING' and tid in run['roots']
+                        for run in self.state.get('revalidation_runs', [])):
+                    allowed.add(tid)
+            if tid == pcf and record['status'] == 'FAILED' and record.get('checks') == []:
+                failures = record.get('failed_attempts', [])
+                if len(failures) > record.get('failed_floor', 0):
+                    last = failures[-1]
+                    if (last['attempt'] == record['attempts'] and last['category'] != 'CHECK_FAILURE'
+                            and last['checks'] == []
+                            and not self._resolve_evidence(last['diff_ref'], last['diff_sha256'])[1]):
+                        allowed.add(tid)
+        return [p for p in problems if not (p['reason'] == 'missing_checks'
+                                           and p['task_id'] in allowed)]
 
     def _preflight(self) -> None:
         """Run required checks at the clean checkpoint in the actual task worktree."""
@@ -1218,7 +1273,7 @@ class TaskScheduler:
                 log_retry_reason('task-dev', diagnostic_excerpt(path.read_text(), 3000), path)
 
     def _repair_context(self, record: dict) -> dict | None:
-        failures = record.get('failed_attempts', [])
+        failures = record.get('failed_attempts', [])[record.get('failed_floor', 0):]
         if not failures:
             return None
         latest = failures[-1]
@@ -1243,9 +1298,10 @@ class TaskScheduler:
         return context
 
     def _restore_candidate(self, task: dict, record: dict, *, protocol_recovery=False) -> None:
-        if not record.get('failed_attempts'):
+        failures = record.get('failed_attempts', [])[record.get('failed_floor', 0):]
+        if not failures:
             return
-        candidate = record['failed_attempts'][-1]
+        candidate = failures[-1]
         if candidate['category'] != 'CHECK_FAILURE' and not (protocol_recovery and candidate['category'] == 'DEVELOPER_PROTOCOL'):
             raise DevelopmentBlocked(candidate['category'], 'Previous attempt needs explicit reconciliation')
         self._assert_clean()
@@ -1323,7 +1379,7 @@ class TaskScheduler:
                 git(self.wt, 'restore', '--source', record['start_commit'], '--staged', '--worktree', '--', path)
             else:
                 git(self.wt, 'reset', '--', path)
-                confined(self.wt, path)
+                confined(self.wt, path, protect=False)
                 target = self.wt / path
                 if target.is_file() or target.is_symlink():
                     target.unlink()
@@ -1351,6 +1407,10 @@ class TaskScheduler:
         if (git(self.wt, 'rev-parse', 'HEAD^') != parent or git(self.wt, 'rev-parse', 'HEAD^{tree}') != tree
                 or record['commit_message'] != git(self.wt, 'log', '-1', '--format=%B') or self._changed()):
             raise TaskError('Checkpoint differs from verified content; manual reconciliation required')
+        if record.get('repairs'):
+            record['restored_by'] = None
+            self.state.setdefault('generations', []).append(dict(
+                txn_id=record['repairs'][-1]['txn_id'], from_head=parent, to_head=head))
         record.update(status='COMPLETED', commit=head)
         self.state['expected_head'] = head
         self._save('TASK_COMPLETED')
@@ -1571,7 +1631,7 @@ class TaskScheduler:
             except CandidateError as exc:
                 raise DevelopmentBlocked('INTEGRITY', str(exc)) from exc
 
-    def _finish_attempt(self, task, record, result, attempt_dir):
+    def _finish_attempt(self, task, record, result, attempt_dir, *, strict_scope=False):
         attempt = record['attempts']
         log = attempt_dir / 'developer.log'
         data = result['output'].encode()
@@ -1584,8 +1644,28 @@ class TaskScheduler:
             try: os.fsync(directory_fd)
             finally: os.close(directory_fd)
         record['producer'] = {k: v for k, v in result.items() if k != 'output'}
-        self.guard()
         self._assert_tree()
+        changed = self._changed()
+        forbidden = {'ssdlc_controller.py', 'ssdlc_gate_reports.py', 'ssdlc_quality.py',
+                     'quality-contract.json', 'orchestrator.py', 'ssdlc_gate_protocol.py',
+                     'ssdlc_candidates.py'}
+        protected_change = (self._protected() != record['protected_snapshot'] or any(
+            Path(name).name in forbidden or name.startswith('scripts/gate')
+            or 'quality-contract' in name for name in changed))
+        scope_change = (not set(changed) <= set(task['target_files'])
+                        or developer_blocker(result['output']) == 'SCOPE_REQUIRED')
+        if strict_scope and (protected_change or scope_change):
+            (attempt_dir / 'implementation.diff').write_text(git(self.wt, 'diff', 'HEAD', '--binary'))
+            record.setdefault('failed_attempts', []).append(dict(
+                attempt=record['attempts'], category='PROTECTED_PATH' if protected_change else 'SCOPE_REQUIRED',
+                base_commit=record['start_commit'], changed_files=changed, checks=[],
+                diff_ref=str((attempt_dir / 'implementation.diff').relative_to(self.directory)),
+                diff_sha256=file_hash(attempt_dir / 'implementation.diff')))
+            record.update(status='FAILED', checks=[], changed_files=changed)
+            self._save('ATTEMPT_FAILED')
+            self._rollback_attempt(record, changed)
+            raise TaskError('protected_path_modified' if protected_change else 'scope_changed')
+        self.guard()
         if self._protected() != record['protected_snapshot']:
             raise TaskError('Developer modified protected paths; preserving attempt')
         if self._ignored() != self.state['ignored_paths']:
@@ -1661,7 +1741,7 @@ class TaskScheduler:
             candidate['invocation_id'] = record['invocation_id']
         prior = record.setdefault('failed_attempts', [])
         outcomes = lambda checks: [(c['check_id'], c['exit_code'], c['empty_suite']) for c in checks]
-        if (category == 'CHECK_FAILURE' and prior and prior[-1]['category'] == 'CHECK_FAILURE'
+        if (category == 'CHECK_FAILURE' and len(prior) > record.get('failed_floor', 0) and prior[-1]['category'] == 'CHECK_FAILURE'
                 and prior[-1]['attempt'] < attempt
                 and prior[-1]['tree'] == tree and outcomes(prior[-1]['checks']) == outcomes(results)):
             candidate['category'] = category = 'REPAIR_STALLED'
@@ -1788,6 +1868,104 @@ class TaskScheduler:
         self.guard()
         return copy.deepcopy(state)
 
+    def repair(self, ordered, roots, corrective, *, txn_id, on_step):
+        """Repair selected roots and verify their closure under one scheduler lock."""
+        with ticket_lock(self.directory / 'scheduler.lock'):
+            self.guard()
+            self.state = self.journal.load()
+            if self.state is None:
+                raise TaskError('No scheduler state to repair')
+            self._assert_candidate_runtime(self.state)
+            if self.state['inputs_sha256'] != digest(dict(plan=self.plan, quality=self.quality, context=self.context)):
+                raise TaskError('Inputs changed')
+            closure, _ = self._closure(set(roots))
+            tasks = self._plan_index()
+            matches = [i for i in self.state.get('invalidations', [])
+                       if i['reason'] == 'corrective:' + txn_id]
+            if (len(matches) != 1 or set(matches[0]['roots']) != set(roots)
+                    or matches[0]['closure'] != closure):
+                raise TaskError('Repair requires matching corrective invalidation')
+            if [t['task_id'] for t in ordered if t['task_id'] in closure] != closure:
+                raise TaskError('Repair order differs from plan')
+            for tid in roots:
+                rec = self.state['tasks'][tid]
+                done = rec['status'] == 'COMPLETED' and rec.get('repairs', [{}])[-1].get('txn_id') == txn_id
+                if not done and rec['attempts'] >= self.max_attempts:
+                    raise TaskError('attempts_exhausted')
+            self._assert_clean()
+            runs = self.state.setdefault('revalidation_runs', [])
+            run = next((r for r in runs if r.get('txn_id') == txn_id), None)
+            if run is None:
+                run = dict(run=max((r['run'] for r in runs), default=0) + 1, txn_id=txn_id,
+                           head=self.state['expected_head'], tree=git(self.wt, 'rev-parse', 'HEAD^{tree}'),
+                           roots=closure, status='RUNNING', blocked={})
+                runs.append(run)
+                self._save('REVALIDATION_STARTED')
+            else:
+                interrupted = False
+                for tid in closure:
+                    for attempt in self.state['tasks'][tid].get('revalidations', []):
+                        if attempt['status'] == 'RUNNING' and attempt['run'] == run['run']:
+                            attempt['status'] = 'INTERRUPTED'
+                            interrupted = True
+                if interrupted:
+                    self._save('REVALIDATION_INTERRUPTED')
+            def step(name, **info):
+                info['event'] = TaskJournal.head(self.journal.path)
+                on_step(name, info)
+            for index, tid in enumerate(closure):
+                record = self.state['tasks'][tid]
+                if tid in roots:
+                    if record['status'] == 'COMPLETED' and record.get('repairs', [{}])[-1].get('txn_id') == txn_id:
+                        continue
+                    if any(self.state['tasks'][dep]['status'] != 'COMPLETED' for dep in tasks[tid]['depends_on']):
+                        raise TaskError('Dependency has not completed')
+                    if not record.get('repairs') or record['repairs'][-1]['txn_id'] != txn_id:
+                        record.setdefault('superseded', []).append({k: copy.deepcopy(record.get(k))
+                                                                   for k in ('commit', 'checks', 'restored_by')})
+                        record.setdefault('repairs', []).append(dict(txn_id=txn_id, attempt=record['attempts'] + 1))
+                        record['failed_floor'] = len(record.get('failed_attempts', []))
+                    if record['status'] in ('RUNNING', 'VERIFYING'):
+                        raise TaskError('uncertain_dispatch')
+                    try:
+                        if record['status'] == 'COMMIT_INTENT':
+                            self._complete_intent(tasks[tid], record)
+                        else:
+                            self._execute_task(tasks[tid], record, corrective=corrective, strict_scope=True)
+                    except DevelopmentBlocked as exc:
+                        step('REPAIR_BLOCKED', root=tid, category=exc.category)
+                        raise TaskError('repair_failed') from exc
+                    step('REPAIR_COMMITTED', root=tid, commit=record['commit'], closure_index=index)
+                elif record['status'] != 'COMPLETED':
+                    self.budget()
+                    outcome = self._revalidate_task(tid, run, self.state['expected_head'],
+                        git(self.wt, 'rev-parse', 'HEAD^{tree}'), self._protected(), self._ignored())
+                    if not outcome.complete:
+                        raise TaskError('dependent_revalidation_failed')
+                    step('DEPENDENT_VERIFIED', task=tid, closure_index=index)
+            if run['status'] != 'COMPLETE':
+                self._finalize_txn_run(run)
+                step('REVALIDATION_RUN_FINISHED')
+            preflight = run.get('final_preflight')
+            if preflight is not None:
+                if (preflight >= len(self.state.get('preflights', []))
+                        or self.state['preflights'][preflight]['status'] != 'PASSED'):
+                    raise TaskError('final_checkpoint_failed')
+            else:
+                self.budget()
+                run['final_preflight'] = len(self.state.get('preflights', []))
+                try:
+                    self._preflight()
+                except DevelopmentBlocked as exc:
+                    step('PREFLIGHT_FAILED_RECORDED', status=self.state['preflights'][-1]['status'])
+                    raise TaskError('final_checkpoint_failed') from exc
+                step('FINAL_PREFLIGHT_PASSED')
+            if self._inventory_problems(self.state):
+                raise TaskError('Repair evidence is missing or altered')
+            self._assert_clean()
+            self.guard()
+            return copy.deepcopy(self.state)
+
     def _execute_task(self, task, record, *, corrective=None, strict_scope=False) -> None:
         """Execute the ordinary per-task attempt loop without acquiring a lock."""
         state = self.state
@@ -1796,7 +1974,8 @@ class TaskScheduler:
             self.guard()
             self.dispatch_budget()
             repair = self._repair_context(record)
-            self._restore_candidate(task, record)
+            if record.get('failed_attempts', [])[record.get('failed_floor', 0):]:
+                self._restore_candidate(task, record)
             record['attempts'] += 1
             attempt = record['attempts']
             record.update(status='RUNNING', start_commit=state['expected_head'], checks=[],
@@ -1817,7 +1996,7 @@ class TaskScheduler:
                 result = self._capture_developer(task, record, prompt, attempt_dir)
             else:
                 result = self.developer(task, attempt, prompt)
-            self._finish_attempt(task, record, result, attempt_dir)
+            self._finish_attempt(task, record, result, attempt_dir, strict_scope=strict_scope)
             if record['status'] == 'COMPLETED':
                 break
         if record['status'] != 'COMPLETED':
