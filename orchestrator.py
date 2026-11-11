@@ -2724,6 +2724,7 @@ class SSDLCOrchestrator:
             historical_capture_authority=history_authority,
             max_attempts=(getattr(_dispatch_local, "limits")._load(repair=False)[0]["policy"]["development_attempts"]
                           if getattr(_dispatch_local, "limits", None) is not None else int(os.environ.get("SSDLC_MAX_DEV_RETRIES", "3"))),
+            bootstrap=quality.get("bootstrap"),
             isolate_candidates=True,
             recover_timeouts=getattr(_dispatch_local, 'limits', None) is not None,
             runtime_identity={'controller_sha256': digest(controller),
@@ -2734,6 +2735,8 @@ class SSDLCOrchestrator:
         self.state["status"] = "IN_PROGRESS"
         self._save_state()
         result = scheduler.run(ordered, recover_protocol_task=recover_protocol_task)
+        if result.get("bootstrap", {}).get("status") == "PROVEN":
+            self.state["bootstrap"] = {"status": "post-bootstrap", "proven_head": result["bootstrap"]["proven_head"]}
         self.state["tasks_status"] = result["tasks"]
         self.state["task_verified_head"] = result["expected_head"]
         diff = self.dir_dev / "implementation.diff"

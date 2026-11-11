@@ -172,3 +172,95 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(bootstrap.positive_test_count('=== 3 passed in 0.1s ===', ''), 3)
         self.assertEqual(bootstrap.positive_test_count('no tests ran', ''), 0)
         self.assertIsNone(bootstrap.positive_test_count('', ''))
+
+
+from replay.repository_fixtures import RepositoryTests
+from ssdlc_tasks import TaskError
+
+
+class CheckpointTests(RepositoryTests):
+    def setUp(self):
+        super().setUp()
+        self.wt = self.worktree()
+        self.quality['bootstrap'] = {'window_tasks': 1, 'initial_commit': self.base, 'baseline_status': 'absent'}
+        self.quality['baseline'] = []
+
+    def develop(self, task, attempt, prompt):
+        (self.wt / task['target_files'][0]).write_text('value = 1\n')
+        return {'output': 'TASK_DEV_STATUS: COMPLETE', 'exit_code': 0}
+
+    def make_scheduler(self, verifier=None):
+        return self.scheduler(self.develop, verifier, bootstrap=self.quality['bootstrap'], max_attempts=1)
+
+    def test_checkpoint_failures(self):
+        cases = [('empty', ('', '', 0)), ('silent', ('', '', 0)),
+                 ('zero', ('Ran 0 tests in 0.1s', '', 0)),
+                 ('failing', ('Ran 1 test in 0.1s', '', 1)),
+                 ('timeout', subprocess.TimeoutExpired(['test'], 1)),
+                 ('missing', FileNotFoundError()), ('permission', PermissionError())]
+        # Each case has its own journal and clean candidate repository.
+        for name, outcome in cases:
+            with self.subTest(name=name):
+                scheduler = self.make_scheduler()
+                scheduler.directory = self.artifacts / name
+                from ssdlc_tasks import TaskJournal
+                scheduler.journal = TaskJournal(scheduler.directory)
+                def verify(*args):
+                    if isinstance(outcome, Exception):
+                        raise outcome
+                    return outcome
+                scheduler.verifier = verify
+                with self.assertRaises(TaskError):
+                    scheduler.run(self.plan['tasks'])
+                state = scheduler.journal.peek()
+                self.assertEqual(state['bootstrap']['status'], 'CHECKPOINT_STARTED')
+                checks = state['tasks']['T1']['checks']
+                self.assertEqual(len(checks), 2)
+                if name in ('timeout', 'missing', 'permission'):
+                    self.assertEqual(checks[-1]['exit_code'], 124 if name == 'timeout' else 127)
+                else:
+                    self.assertTrue(checks[-1]['exit_code'] or checks[-1]['empty_suite'])
+                with self.assertRaises(bootstrap.BootstrapError) as raised:
+                    scheduler.run(self.plan['tasks'])
+                self.assertEqual(raised.exception.code, 'interrupted')
+
+    def test_positive_proof_spends_exemption_and_preserves_contract(self):
+        self.plan['tasks'].append(self.task('T2', [], [], ['second.py'], ['T1']))
+        sealed = json.dumps(self.quality, sort_keys=True)
+        scheduler = self.make_scheduler()
+        result = scheduler.run(self.plan['tasks'])
+        self.assertEqual(result['bootstrap']['status'], 'PROVEN')
+        self.assertEqual(result['bootstrap']['proven_head'], result['tasks']['T1']['commit'])
+        self.assertEqual(result['inputs_sha256'], digest({'plan': self.plan, 'quality': self.quality,
+                                                        'context': scheduler.context}))
+        self.assertEqual(json.dumps(self.quality, sort_keys=True), sealed)
+        self.assertEqual(len(result['preflights']), 1)
+        self.assertEqual(result['preflights'][0]['head'], result['tasks']['T1']['commit'])
+        self.assertTrue(all(len(t['checks']) == 2 for t in result['tasks'].values()))
+        events = [json.loads(line)['event'] for line in scheduler.journal.path.read_text().splitlines()]
+        self.assertEqual(events.count('PREFLIGHT_BOOTSTRAP_EXEMPT'), 1)
+        self.assertEqual(events.count('BOOTSTRAP_PROVEN'), 1)
+
+    def test_crash_before_proof_refuses_resume(self):
+        scheduler = self.make_scheduler()
+        save = scheduler._save
+        class Crash(BaseException):
+            pass
+        def fault(event):
+            save(event)
+            if event == 'TASK_COMPLETED':
+                raise Crash()
+        with patch.object(scheduler, '_save', side_effect=fault), self.assertRaises(Crash):
+            scheduler.run(self.plan['tasks'])
+        with self.assertRaises(bootstrap.BootstrapError) as raised:
+            scheduler.run(self.plan['tasks'])
+        self.assertEqual(raised.exception.code, 'interrupted')
+
+    def test_protected_task_rejected_with_or_without_bootstrap(self):
+        self.plan['tasks'][0]['target_files'] = ['.ssdlc/state.json']
+        for enabled in (False, True):
+            scheduler = self.make_scheduler()
+            scheduler.bootstrap = self.quality['bootstrap'] if enabled else None
+            with self.subTest(bootstrap=enabled), self.assertRaises(PlanError):
+                from ssdlc_tasks import confined
+                confined(scheduler.wt, self.plan['tasks'][0]['target_files'][0])

@@ -558,7 +558,8 @@ class TaskScheduler:
                  guard: Callable = lambda: None, budget: Callable = lambda: None,
                  max_attempts: int = 3, isolate_candidates: bool = False,
                  runtime_identity: dict | None = None, recover_timeouts: bool = False,
-                 historical_capture_authority=None, dispatch_budget=None, historical_task_floors=None):
+                 historical_capture_authority=None, dispatch_budget=None, historical_task_floors=None, bootstrap: dict | None = None):
+        self.bootstrap = copy.deepcopy(bootstrap)
         self.wt = worktree
         self.directory = directory
         self.plan = plan
@@ -981,6 +982,10 @@ class TaskScheduler:
                     out, err, rc = self.verifier(check['argv'], cwd, check['timeout_sec'])
             except subprocess.TimeoutExpired as exc:
                 out, err, rc = '', f'Verification timeout: {exc}', 124
+            except (FileNotFoundError, PermissionError):
+                if not self.bootstrap:
+                    raise
+                out, err, rc = '', 'Command unavailable', 127
             log = attempt_dir / f'check-{index}.log'
             if exclusive:
                 self._assert_evidence_dir(attempt_dir, task.get('task_id'), check['check_id'])
@@ -1006,6 +1011,10 @@ class TaskScheduler:
             else:
                 log.write_text(out + '\n' + err)
             empty = test_suite_is_empty(out, err)
+            if (self.state.get('bootstrap', {}).get('status') == 'CHECKPOINT_STARTED'
+                    and check.get('kind') == 'test'):
+                from ssdlc_bootstrap import positive_test_count
+                empty = empty or (positive_test_count(out, err) or 0) < 1
             results.append({'check_id': check['check_id'], 'exit_code': rc, 'empty_suite': empty,
                             'log_ref': str(log.relative_to(self.directory)), 'sha256': file_hash(log)})
             record['checks'] = results
@@ -1309,6 +1318,9 @@ class TaskScheduler:
         record.update(status='COMPLETED', commit=head)
         self.state['expected_head'] = head
         self._save('TASK_COMPLETED')
+        if self.state.get('bootstrap', {}).get('status') == 'CHECKPOINT_STARTED':
+            self.state['bootstrap'].update(status='PROVEN', proven_head=head)
+            self._save('BOOTSTRAP_PROVEN')
 
     def _developer_prompt(self, task, record):
         repair = self._repair_context(record)
@@ -1652,6 +1664,8 @@ class TaskScheduler:
             state = {'schema_version': '1.0', 'inputs_sha256': inputs, 'expected_head': self.plan['base_commit'],
                      'ignored_paths': self._ignored(),
                      'tasks': {t['task_id']: {'status': 'PENDING', 'attempts': 0} for t in ordered}}
+            if self.bootstrap is not None:
+                state['bootstrap'] = {'status': 'PENDING', 'window_tasks': 1}
             if self.recover_timeouts:
                 state['attempt_limit'] = self.max_attempts
                 state['bounded_recovery'] = 1
@@ -1665,6 +1679,10 @@ class TaskScheduler:
         self.state = state
         if state['inputs_sha256'] != inputs:
             raise TaskError('Inputs changed: explicit plan migration/invalidation is required')
+        if state.get('bootstrap', {}).get('status') == 'CHECKPOINT_STARTED':
+            from ssdlc_bootstrap import BootstrapError
+            # Even a committed task cannot recover a proof event lost to interruption.
+            raise BootstrapError('interrupted')
         self._assert_candidate_runtime(state)
         from ssdlc_recovery import require_unlocked_git
         require_unlocked_git(self.wt)
@@ -1709,7 +1727,11 @@ class TaskScheduler:
             if record['attempts'] >= self.max_attempts and not recovering:
                 raise TaskError(f'Task {task["task_id"]} exhausted its persistent attempt limit')
         if pending:
-            self._preflight()
+            if state.get('bootstrap', {}).get('status') == 'PENDING':
+                state['bootstrap']['status'] = 'CHECKPOINT_STARTED'
+                self._save('PREFLIGHT_BOOTSTRAP_EXEMPT')
+            else:
+                self._preflight()
         if recover_protocol_task:
             task = next(t for t in ordered if t['task_id'] == recover_protocol_task)
             if not all(state['tasks'][dep]['status'] == 'COMPLETED' for dep in task['depends_on']):
@@ -1721,6 +1743,9 @@ class TaskScheduler:
                 if not self._evidence_valid(record, task['task_id']):
                     raise TaskError('Completed task evidence is missing or altered')
                 continue
+            if (state.get('bootstrap', {}).get('status') == 'PROVEN'
+                    and task in pending and task != pending[0]):
+                self._preflight()
             if any(state['tasks'][dep]['status'] != 'COMPLETED' for dep in task['depends_on']):
                 raise TaskError('Dependency has not completed')
             while record['attempts'] < self.max_attempts:
