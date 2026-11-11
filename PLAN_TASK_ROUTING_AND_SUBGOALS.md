@@ -432,8 +432,7 @@ Nessuna proposta genera automaticamente codice, nuovi ticket, altri subgoal o ag
 Default iniziali da validare durante l'implementazione; configurazioni effettive e limiti sono registrati nel ticket. Cambi di configurazione durante la ripresa sono espliciti e non azzerano i consumi.
 
 ```bash
-# Attivazione graduale; abilitare dopo i gate di integrazione.
-export SSDLC_ENABLE_TASK_BREAKDOWN="false"
+# Routing proposto per incrementi futuri; il motore task è sempre attivo.
 export SSDLC_TASK_SIMPLE_MODEL="gpt-6-luna"
 export SSDLC_TASK_CRITICAL_MODEL="gpt-6.1-sol"
 export SSDLC_MAX_REASONING_EFFORT="medium"
@@ -470,7 +469,7 @@ Ogni incremento include i relativi test; la suite non è rinviata alla fine. Per
 ### Step 1 — Contratto di qualità, schema del piano e schema advisory
 
 - Introdurre schema del contratto, del piano, del manifest effettivo, degli eventi advisory e della proiezione `advisory-proposals.json`, adapter degli standard, `TaskPlanValidator`, snapshot e gate di integrità.
-- Aggiornare setup, recon, design e pianificazione Tier S; definire migrazione e feature flag.
+- Aggiornare setup, recon, design e pianificazione Tier S; definire la compatibilità senza selettori di esecuzione.
 - Test: riferimenti mancanti, ID duplicati, cicli, dipendenze inesistenti, percorsi/symlink esterni, controlli mancanti, file protetti eliminati e standard non applicabili. Verificare schema/provenienza delle proposte, rifiuto di riferimenti inesistenti e distinzione tra ipotesi e osservazioni dimostrate. Un progetto diverso da yuna non eredita percorsi o regole yuna.
 - Accettazione: ogni task ha standard e verifiche risolvibili; piani incompleti non arrivano al codice.
 
@@ -508,11 +507,11 @@ Ogni incremento include i relativi test; la suite non è rinviata alla fine. Per
 - Scenari riproducibili per Tier S, M e L, con almeno un bounce, un arresto/ripresa, un subgoal, una lacuna scoperta dall'analisi critica e una proposta advisory. Includere consegna concorrente, sintesi opzionale incompleta e azioni su proposte riprese dopo crash; esercitare anche il percorso precedente e la migrazione.
 - Confrontare gli stessi scenari con routing diversi: i gate, gli standard applicati e i criteri di completamento devono restare identici.
 - Registrare percentuale di task accettati al primo tentativo, escalation, regressioni globali, violazioni di standard, recuperi riusciti, durata e consumi. Per l'advisory misurare duplicati, proposte validate/accettate e casi utili scoperti, senza ottimizzare il volume di suggerimenti o il solo numero di chiamate.
-- Accettazione finale: ripresa senza perdita o duplicazione, dipendenze rivalidate dopo una correzione, copertura indipendente delle interazioni, nessuna regressione non gestita nei controlli obbligatori, evidenze conservate, advisory classificato senza aggirare i gate e consegna vincolata alla revisione verificata. Abilitare il nuovo percorso dopo il superamento di questi scenari.
+- Accettazione finale: ripresa senza perdita o duplicazione, dipendenze rivalidate dopo una correzione, copertura indipendente delle interazioni, nessuna regressione non gestita nei controlli obbligatori, evidenze conservate, advisory classificato senza aggirare i gate e consegna vincolata alla revisione verificata. Verificare questi scenari prima della consegna.
 
 ## 12. Stato del bootstrap progressivo
 
-Stato aggiornato al 9 novembre 2026. Il percorso per task resta **opt-in**: i risultati del bootstrap e dei micro-ticket non equivalgono all'accettazione finale degli Step 1–6.
+Il motore task è ora il percorso unico; Tier S richiede un solo nodo. `jsonschema` è obbligatorio. Il flag precedente è ignorato: i risultati del bootstrap e dei micro-ticket non equivalgono all'accettazione finale degli Step 1–6.
 
 ### Step 3b.3a — Preview only
 

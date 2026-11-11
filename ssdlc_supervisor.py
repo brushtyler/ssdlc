@@ -717,7 +717,7 @@ def new_record(a, store):
                       review_repairs=a.get('review_repairs'), rounds=a.get('rounds'), compatibility_approved=True,
                       containers_possible=project_env.get('SSDLC_EXECUTION_MODE', 'docker') != 'native',
                       runtime_root=str(canonical_root(a['repo'], a['ticket']).relative_to(Path(a['repo']))),
-                      task_mode=bool(read_document(canonical_root(a['repo'], a['ticket']) / 'state.json').get('task_breakdown')) or project_env.get('SSDLC_ENABLE_TASK_BREAKDOWN', 'false').lower() == 'true')
+                      task_mode=True)
     return dict(schema_version=1, revision=0, worker_generation=1, run_id=store.run_id, nonce=uuid.uuid4().hex,
         resumes=a.get('_resumes'), project=dict(key=digest(a['repo'])[:16], name='project'), ticket=a['ticket'],
         created_at=float(store.clock.time()), authorized=authorized,
@@ -1503,9 +1503,7 @@ def route_child(repo, entrypoint, tier, ticket=''):
     if ticket and (canonical_root(repo, ticket) / 'limits/policy.json').is_file():
         from ssdlc_recovery import LimitsStore
         allowed = LimitsStore(canonical_root(repo, ticket))._load(repair=False)[0]['binding'].get('allowed_phases')
-    profiles = sorted({t.get('profile', 'ALGORITHMIC') for t in plan.get('tasks', [])}) if plan.get('tasks') else (
-        PROFILES if state.get('task_breakdown') or os.environ.get('SSDLC_ENABLE_TASK_BREAKDOWN') == 'true'
-        else (state.get('dev_profile', 'ALGORITHMIC'),))
+    profiles = sorted({t.get('profile', 'ALGORITHMIC') for t in plan.get('tasks', [])}) if plan.get('tasks') else PROFILES
     routes, panel = {}, []
     for t in ('S', 'M', 'L') if tier == 'auto' else (tier,):
         for role in ROLE_KEYS_BY_ENTRYPOINT[entrypoint]:
@@ -1964,11 +1962,6 @@ def completion(store, d, state):
     if kind == 'run':
         if state.get('status') != 'AWAITING_SUPERVISOR_SIGNOFF':
             return False
-        # Legacy pipelines have no task checkpoint. Bind the decision to the
-        # mode authorized at launch; old records without a mode remain strict.
-        task_mode = d['authorized'].get('task_mode', True) or bool(state.get('task_breakdown')) or bool(state.get('task_verified_head'))
-        if not task_mode:
-            return True
         worktree = pinned_root(repo, store.ticket, d) / 'worktree'
         return (worktree.is_dir() and bool(state.get('task_verified_head')) and
                 git_read(worktree, 'rev-parse', 'HEAD') == state['task_verified_head'] and

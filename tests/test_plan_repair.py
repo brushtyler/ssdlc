@@ -185,7 +185,7 @@ class PlanningResumeTests(RepositoryTests):
 
     def test_resume_only_plans_without_repeating_upstream_phases_or_running_code(self):
         orch = self.seed()
-        with patch.object(orch, '_ensure_task_plan') as plan, patch.object(orch, 'run_phase_po') as po, patch.object(orch, 'run_phase_pair_design') as design, patch.object(orch, 'run_phase_dev') as dev:
+        with patch.object(orch, '_ensure_task_plan') as plan, patch.object(orch, 'run_phase_po') as po, patch.object(orch, 'run_phase_pair_design') as design, patch.object(orch, '_run_task_development') as dev:
             orch.resume_task_planning()
             plan.assert_called_once()
             po.assert_not_called()

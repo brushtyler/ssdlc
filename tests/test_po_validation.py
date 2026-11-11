@@ -166,6 +166,6 @@ class POTests(bootstrap.RepositoryTests):
             self.assertEqual(orchestrator.main(['po', '--repo', str(self.repo), '--ticket', 'TKT-1']), 0)
         self.orch.state.update(task_breakdown=False, po_validation_ref=None)
         with patch.dict('os.environ', {'SSDLC_ENABLE_TASK_BREAKDOWN': 'false'}):
-            _, engine = self.generate('Prose AC-1 and SEC-1 only, legacy acceptance.')
+            _, engine = self.generate('AC-1: Required behavior\nSEC-1: Required security')
         self.assertEqual(engine.call_count, 1)
         self.assertTrue(self.orch.state['gate_history'][-1]['passed'])

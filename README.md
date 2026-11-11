@@ -471,7 +471,7 @@ recovered and blocked-by-reason runs without touching provider accounting.
 Logs contain selectors, revision, status, reason codes and counts, never finding
 text or provider payloads.
 
-## Task breakdown bootstrap (opt-in)
+## Unified task execution
 
 The first implementation increment provides versioned JSON schemas in `schemas/`,
 `TaskPlanValidator`, and a sequential DAG executor in `ssdlc_tasks.py`. The controller
@@ -592,15 +592,13 @@ python3 -m venv .tools/python
 .tools/python/bin/python3 -m unittest discover -s tests -v
 ```
 
-Enable the path explicitly in the target project's `.ssdlc/project.env`:
+Every new run uses the task engine. Tier S requires exactly one plan node and uses the same scheduler, journal and quality gates. `jsonschema` is required (install `requirements.txt`).
 
-```bash
-export SSDLC_ENABLE_TASK_BREAKDOWN="true"
-```
+The obsolete task-breakdown environment setting is ignored with a warning. Newly captured required checks carry candidate proof; historical sealed contracts remain unchanged. QA shell commands are reported separately and do not establish typed-check equivalence. Supervisor rejection records feedback only and authorizes no repair.
 
 New projects default to generic standards. The existing yuna templates require
 `SSDLC_STANDARDS_PROFILE=yuna` during initialization. Existing project standards are
-preserved; review project-specific rules already installed before enabling the feature.
+preserved; review project-specific rules already installed before starting a run.
 
 Quality discovery recognizes Python tests, Ruff/Mypy configured in `pyproject.toml`,
 and npm `test`, `lint` and `typecheck` scripts. For other tools, supply
@@ -950,7 +948,7 @@ it from issue prose. Neither `--issue` nor `--sync-remote` is generated.
 | authentication | Refresh out of band, then explicitly resume or restart. Presence is `auth_unverified`; there is no shipped native probe or refresh adapter. |
 | integrity | Inspect and reconcile changed or corrupt evidence before explicit resume. |
 | limits | Explicitly authorize a changed limit; no automatic increase. |
-| code_defect | Task mode only, with a returned, terminal-bound failed check or stalled repair; inspect diagnostics and explicitly authorize a supported resume if attempts are exhausted. |
+| code_defect | With a returned, terminal-bound failed task check or stalled repair; inspect diagnostics and explicitly authorize a supported resume if attempts are exhausted. |
 | uncertain_outcome | Inspect and reconcile the engine result; never retry an open or raised dispatch automatically. |
 | operator_decision | Resolve scope or environment decisions explicitly. |
 | unsupported_transition | Choose a compatible supported entrypoint. |

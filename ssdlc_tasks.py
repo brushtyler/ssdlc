@@ -194,7 +194,7 @@ def validate_document(name: str, document: Any) -> None:
     try:
         from jsonschema import Draft202012Validator
     except ImportError as exc:
-        raise PlanError('Task breakdown requires requirements.txt in the SSDLC Python environment.') from exc
+        raise PlanError('jsonschema is required; install requirements.txt in the SSDLC Python environment.') from exc
     schema = json.loads((SCHEMA_DIR / f'{name}.schema.json').read_text())
     errors = sorted(Draft202012Validator(schema).iter_errors(document), key=lambda e: str(list(e.path)))
     if errors:

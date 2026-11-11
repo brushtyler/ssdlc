@@ -282,9 +282,7 @@ def _resume_git(repo, *args):
     return proc.stdout.rstrip('\n')
 
 
-def _resume_plan_refusal(repo, root, state, task_mode):
-    if not task_mode:
-        raise PlanError("Planning resume requires task breakdown")
+def _resume_plan_refusal(repo, root, state):
     if (root / "worktree").exists() or ((root / "03-dev") / "tasks/task-journal.jsonl").exists():
         raise PlanError("Execution already started; explicit plan migration is required")
     gates = [g for g in state.get("gate_history", []) if g['gate'] == 'PAIR_DESIGN_GATE']
@@ -300,7 +298,7 @@ def _resume_plan_refusal(repo, root, state, task_mode):
             raise PlanError(f"Planning input is missing, unapproved or changed: {name}")
 
 
-def _resume_design_refusal(repo, root, state, task_mode, read_git=None):
+def _resume_design_refusal(repo, root, state, read_git=None):
     read_git = read_git or _resume_git
     if (root / "worktree").exists() or ((root / "02-design") / 'plan.json').exists():
         raise PlanError('Planning or execution already started; explicit design migration required')
@@ -309,8 +307,7 @@ def _resume_design_refusal(repo, root, state, task_mode, read_git=None):
         if not history or not history[-1]['passed']:
             raise PlanError(f'Design requires approved upstream gate: {gate}')
     required = ['00-recon/context-and-blast-radius.md', '01-po/requirements.md']
-    if task_mode:
-        required.append('00-recon/quality-contract.json')
+    required.append('00-recon/quality-contract.json')
     for name in required:
         meta = state.get('artifacts', {}).get(name)
         path = root / name
@@ -320,12 +317,12 @@ def _resume_design_refusal(repo, root, state, task_mode, read_git=None):
         raise PlanError('Design requires the unchanged clean target baseline')
 
 
-def _resume_run_refusal(root, state, task_mode, from_phase, baseline_exists=True):
+def _resume_run_refusal(root, state, from_phase, baseline_exists=True):
     if from_phase not in ('00-recon', '03-dev'):
         raise TaskError('Bootstrap task mode resumes from 03-dev; skipping later gates requires Step 3 attestations')
     if from_phase == '03-dev' and not baseline_exists:
         raise TaskError('Resume requires baseline state')
-    if task_mode and from_phase == '00-recon' and (root / '03-dev/tasks/task-journal.jsonl').exists():
+    if from_phase == '00-recon' and (root / '03-dev/tasks/task-journal.jsonl').exists():
         raise TaskError('Existing task execution must resume with --from-phase 03-dev to preserve its approved inputs')
 
 
@@ -344,16 +341,34 @@ def resume_compatibility(repo_root, ticket, entrypoint, from_phase=None, env=Non
             root = resolved
         path = root / 'state.json'
         state = json.loads(path.read_text()) if path.is_file() else {}
-        task_mode = bool(state.get('task_breakdown')) or (os.environ if env is None else env).get('SSDLC_ENABLE_TASK_BREAKDOWN', 'false').lower() == 'true'
         if entrypoint == 'run':
-            _resume_run_refusal(root, state, task_mode, from_phase or '00-recon', path.is_file())
+            _resume_run_refusal(root, state, from_phase or '00-recon', path.is_file())
         elif entrypoint in {'plan', 'design'}:
-            globals()['_resume_' + entrypoint + '_refusal'](repo, root, state, task_mode)
+            globals()['_resume_' + entrypoint + '_refusal'](repo, root, state)
         else:
             raise PlanError('Unsupported resume entrypoint')
         return dict(ok=True, code='compatible', reason='compatible')
     except (TaskError, OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
         return dict(ok=False, code='unsupported_transition', reason='incompatible_state')
+
+
+OPTIONAL_FALLBACK = "(Skipped in Tier S)"
+CONTEXT_NAMES = ("01-po/requirements.md", "02-design/adr.md", "02-design/threat-model.md")
+_OBSOLETE_FLAG_WARNED = False
+
+
+def build_task_context(ssdlc_root: Path) -> Dict[str, str]:
+    """Read the exact context values sealed by the task scheduler."""
+    return {name: (ssdlc_root / name).read_text(encoding="utf-8")
+            if (ssdlc_root / name).exists() else OPTIONAL_FALLBACK for name in CONTEXT_NAMES}
+
+
+def _warn_obsolete_task_flag() -> None:
+    global _OBSOLETE_FLAG_WARNED
+    if 'SSDLC_ENABLE_TASK_BREAKDOWN' in os.environ and not _OBSOLETE_FLAG_WARNED:
+        _OBSOLETE_FLAG_WARNED = True
+        logging.getLogger(__name__).warning(
+            'obsolete-flag name=SSDLC_ENABLE_TASK_BREAKDOWN action=ignored')
 
 
 def utc_now() -> str:
@@ -1939,9 +1954,6 @@ class SSDLCOrchestrator:
             len(plan.get('repair_roots', [])), len(plan.get('revalidation_tasks', [])), len(reasons))
         return result
 
-    def _task_mode(self) -> bool:
-        return bool(self.state.get("task_breakdown")) or os.environ.get("SSDLC_ENABLE_TASK_BREAKDOWN", "false").lower() == "true"
-
     def _ensure_quality_contract(self) -> Dict[str, Any]:
         target = self.dir_recon / "quality-contract.json"
         if target.exists():
@@ -1951,8 +1963,6 @@ class SSDLCOrchestrator:
             return json.loads(target.read_text())
         if "00-recon/quality-contract.json" in self.state.get("artifacts", {}):
             raise PlanError("Registered quality contract disappeared; refusing regeneration")
-        if not self._task_mode():
-            raise PlanError("Task breakdown is disabled")
         if (git(self.repo_root, "rev-parse", "HEAD") != self.state["base_commit"]
                 or git(self.repo_root, "status", "--porcelain")):
             raise PlanError("Create a clean, committed baseline before capturing the quality contract")
@@ -1993,10 +2003,17 @@ class SSDLCOrchestrator:
                 if marker in pyproject:
                     checks.append({"check_id": f"CHECK-{name}", "argv": argv, "cwd": ".", "timeout_sec": 300, "kind": kind, "required": True})
             if not checks:
-                raise PlanError("No project checks discovered. Configure .ssdlc/quality-contract.json before enabling task breakdown")
+                raise PlanError("No project checks discovered. Configure .ssdlc/quality-contract.json before starting task execution")
             contract = {"schema_version": "1.0", "contract_revision": 1, "base_commit": self.state["base_commit"],
                         "sources": sources, "standards": standards, "checks": checks, "baseline": [],
                         "limitations": ["Automatic discovery covers Python tests, configured Ruff/Mypy and npm test/lint/typecheck; provide an explicit contract for other tools."], "exceptions": []}
+        for check in contract["checks"]:
+            if check.get("required"):
+                check["candidate_proof"] = True
+        if sum(c.get("required", False) and c.get("candidate_proof", False) for c in contract["checks"]) > candidate_reports.MAX_CANDIDATE_CHECKS:
+            raise PlanError("More than 32 candidate checks cannot be sealed")
+        contract.setdefault("limitations", []).append(
+            "QA shell commands are recorded separately and are not typed-check equivalents")
         validate_document("quality-contract", contract)
         baseline_dir = self.dir_recon / "baseline"
         baseline_dir.mkdir(exist_ok=True)
@@ -2087,6 +2104,7 @@ class SSDLCOrchestrator:
                   "and reference all required quality checks and applicable standards. Each requirement must map to executable checks. "
                   "Use kind=task and automated verification only: this bootstrap has no subgoal or review_only engine. "
                   "Preserve the supplied base_commit, ticket_id and quality_contract_ref. Do not reduce scope or security constraints.\n" + schema)
+        prompt += "\nTier S requires exactly one plan node covering all requirements."
         prompt += ("\nEvery implementation task must include its new behavior tests in target_files and run them locally. "
                    "Do not defer all new tests to a final task. Preparatory tasks may have empty AC/SEC references "
                    "with local regression checks, but must still obey all applicable safety invariants. "
@@ -2107,6 +2125,8 @@ class SSDLCOrchestrator:
             raise PlanError("Task plan needs an independent reviewer")
         def validate(plan):
             validator.validate(plan)
+            if self.state.get("risk_tier") == "S" and len(plan["tasks"]) != 1:
+                raise PlanError("Tier S requires exactly one plan node")
             if plan["ticket_id"] != self.ticket_id or plan["base_commit"] != self.state["base_commit"]:
                 raise PlanError("Planner changed ticket identity or base_commit")
         def generate(attempt, inputs, previous):
@@ -2499,7 +2519,7 @@ class SSDLCOrchestrator:
         """Resume only planning against sealed upstream artifacts; never execute code."""
         with ticket_lock(getattr(self, "ticket_lock_path", self.ssdlc_root / "ticket.lock")):
             self.state = self._load_or_init_state()
-            _resume_plan_refusal(self.repo_root, self.ssdlc_root, self.state, self._task_mode())
+            _resume_plan_refusal(self.repo_root, self.ssdlc_root, self.state)
             self.state.pop("failure", None)
             self.state.update(current_phase="02-design", current_step="task-plan", status="IN_PROGRESS")
             self._save_state()
@@ -2514,14 +2534,17 @@ class SSDLCOrchestrator:
             self._save_state()
             return self.dir_design / 'plan.json'
 
-    def _run_task_development(self, feedback: str = "", recover_protocol_task=None) -> Tuple[Path, List[str]]:
+    @_supervised_phase('03-dev')
+    def run_phase_dev(self, recover_protocol_task=None) -> Tuple[Path, List[str]]:
+        # Keep the native, bounded phase entrypoint while using one task engine.
+        return self._run_task_development(recover_protocol_task)
+
+    def _run_task_development(self, recover_protocol_task=None) -> Tuple[Path, List[str]]:
         plan = self._ensure_task_plan()
         controller = self._ensure_controller_contract()
         quality = json.loads((self.dir_recon / "quality-contract.json").read_text())
         wt = self._ensure_worktree()
-        context = {name: self._read_optional(self.ssdlc_root / name) for name in (
-            "01-po/requirements.md", "02-design/adr.md", "02-design/threat-model.md",
-        )}
+        context = build_task_context(self.ssdlc_root)
         validator = TaskPlanValidator(self.repo_root, context["01-po/requirements.md"], quality, self.ssdlc_root)
         ordered = validator.validate(plan)
         runtime_environment = self._verification_environment(quality['checks'][0]['argv'])
@@ -2602,7 +2625,7 @@ class SSDLCOrchestrator:
         self.state["current_step"] = "task-development"
         self.state["status"] = "IN_PROGRESS"
         self._save_state()
-        result = scheduler.run(ordered, feedback, recover_protocol_task=recover_protocol_task)
+        result = scheduler.run(ordered, recover_protocol_task=recover_protocol_task)
         self.state["tasks_status"] = result["tasks"]
         self.state["task_verified_head"] = result["expected_head"]
         diff = self.dir_dev / "implementation.diff"
@@ -2936,7 +2959,7 @@ class SSDLCOrchestrator:
         """Repair/validate recorded PO syntax only; never call a provider."""
         with ticket_lock(getattr(self, 'ticket_lock_path', self.ssdlc_root / 'ticket.lock')):
             self.state = self._load_or_init_state()
-            if (not self._task_mode() or self.state.get('current_phase') not in ('01-po', '02-design')
+            if (self.state.get('current_phase') not in ('01-po', '02-design')
                     or self.worktree_dir.exists() or (self.dir_design / 'plan.json').exists()
                     or (self.dir_design / 'design-session/session.json').exists()
                     or (self.dir_dev / 'tasks/task-journal.jsonl').exists()
@@ -2972,16 +2995,6 @@ class SSDLCOrchestrator:
         recon_text = (self.dir_recon / "context-and-blast-radius.md").read_text(encoding="utf-8")
 
         ui_nfr_prompt = ""
-        if dev_profile == "FRONTEND_UI" and not self._task_mode():
-            ui_nfr_prompt = (
-                "\n\n### MANDATORY FRONTEND / MOBILE NON-FUNCTIONAL REQUIREMENTS:\n"
-                "- NFR-DESIGN-SYSTEM: Every UI element MUST strictly use the living design tokens from DESIGN_SYSTEM.md (space.*, shape.*, type.*, useTheme()). Zero hardcoded hex colors or arbitrary spacing numbers permitted.\n"
-                "- NFR-REUSE-FIRST: Explicitly mandate reusing existing primitives from COMPONENT_CATALOG.md (<Button>, <Card>, <Loading>, <SecureImage>) instead of inventing bespoke widgets.\n"
-                "- NFR-SAFE-AREA: Explicit handling of notch, Dynamic Island, status bar, and home indicator insets (useSafeAreaInsets or container).\n"
-                "- NFR-4-STATES: Every interactive component or screen must define 4 states: Loading (skeleton/spinner with max 5s timeout), Empty, Error (with retry trigger), and Success/Active.\n"
-                "- NFR-OFFLINE-AUTH: Behavior when guest or network is offline.\n"
-                "- NFR-ASSETS: Explicit requirement for vector/SVG icons (e.g. @expo/vector-icons or SVG component); raw Unicode glyphs or emoji as icons are STRICTLY PROHIBITED.\n"
-            )
 
         sys_prompt = (
             "You are the Product Owner (PO) in a strict Secure Software Development Lifecycle (SSDLC).\n"
@@ -2994,11 +3007,10 @@ class SSDLCOrchestrator:
             f"{ui_nfr_prompt}"
             "Be concrete, testable, and unambiguous."
         )
-        if self._task_mode():
-            sys_prompt += ("\nRequirement IDs must match (AC|SEC)-[A-Za-z0-9]+(-[A-Za-z0-9]+)*. "
-                           "Use AC-1-1 or AC-1a for explicit child definitions, never AC-1.1. "
-                           "Declare each ID exactly once. Prose mentions are not definitions. "
-                           "Keep ordinary subcases as prose if they are not separate named obligations.")
+        sys_prompt += ("\nRequirement IDs must match (AC|SEC)-[A-Za-z0-9]+(-[A-Za-z0-9]+)*. "
+                       "Use AC-1-1 or AC-1a for explicit child definitions, never AC-1.1. "
+                       "Declare each ID exactly once. Prose mentions are not definitions. "
+                       "Keep ordinary subcases as prose if they are not separate named obligations.")
         user_prompt = f"CODEBASE RECON & BLAST RADIUS:\n{recon_text}\n\nUSER GOAL:\n{goal}"
 
         t0 = time.time()
@@ -3024,7 +3036,7 @@ class SSDLCOrchestrator:
                 "Product Owner",
                 engine,
                 model,
-                "GENERATED" if self._task_mode() else "PASS",
+                "GENERATED",
                 dur,
                 cost,
                 tin,
@@ -3034,16 +3046,8 @@ class SSDLCOrchestrator:
             )
         )
 
-        if self._task_mode():
-            self._validate_po_requirements()
-            out = req_file.read_text(encoding='utf-8')
-        else:
-            has_ac = bool(re.search(r"AC-\d+", out))
-            has_sec = bool(re.search(r"SEC-\d+", out))
-            if not (has_ac and has_sec):
-                self.record_gate("PO_SPEC_GATE", False, "Missing numbered AC-x or SEC-x items")
-                raise RuntimeError("PO Gate Failed: requirements.md must define AC-1..N and SEC-1..N.")
-            self.record_gate("PO_SPEC_GATE", True, "Verified numbered ACs and Security Abuse Cases.")
+        self._validate_po_requirements()
+        out = req_file.read_text(encoding='utf-8')
         print(f"    [OK] Wrote {req_file.relative_to(self.repo_root)}")
 
         if self.remote_sync.enabled:
@@ -3131,11 +3135,6 @@ class SSDLCOrchestrator:
             'approved integrity requirement covers. Enumerate persistence boundaries and precise fault injection points. '
             'Respect the documented threat model and scope; do not invent stronger external-writer guarantees. '
             'Return the ADR as Markdown. History contains prior reviews; the previous ADR is the repair starting point.')
-        if profile == 'FRONTEND_UI' and not self._task_mode():
-            arch_prompt += (' Specify exact Design System tokens (import { space, shape, type, useTheme } from "@/theme/tokens"). '
-                            'Check COMPONENT_CATALOG.md and reuse existing primitives (<Button>, <Card>, <Loading>, <SecureImage>). '
-                            'Ensure Safe Area Insets via useSafeAreaInsets. Use vector/SVG icons (@expo/vector-icons or custom SVG), '
-                            'never raw Unicode glyphs. Do not invent a parallel design system.')
         schema = (Path(__file__).parent / 'schemas/design-review.schema.json').read_text()
         review_prompt = (
             'Review the entire ADR comprehensively using STRIDE, the approved requirements, quality contract, '
@@ -3252,7 +3251,7 @@ class SSDLCOrchestrator:
         """Resume design only against sealed upstream artifacts; never execute code."""
         with ticket_lock(getattr(self, 'ticket_lock_path', self.ssdlc_root / 'ticket.lock')):
             self.state = self._load_or_init_state()
-            _resume_design_refusal(self.repo_root, self.ssdlc_root, self.state, self._task_mode(), read_git=git)
+            _resume_design_refusal(self.repo_root, self.ssdlc_root, self.state, read_git=git)
             self.state.update(status='IN_PROGRESS', current_phase='02-design', current_step='pair-design')
             self.state.pop('failure', None)
             self._save_state()
@@ -3297,174 +3296,9 @@ class SSDLCOrchestrator:
         self.isolation.ensure_trusted_path(self.worktree_dir)
         return self.worktree_dir
 
-    def _read_optional(self, path: Path, fallback: str = "(Skipped in Tier S)") -> str:
+    def _read_optional(self, path: Path, fallback: str = OPTIONAL_FALLBACK) -> str:
         return path.read_text(encoding="utf-8") if path.exists() else fallback
 
-    @_supervised_phase('03-dev')
-    def run_phase_dev(self, feedback: str = "", attempt: int = 1) -> Tuple[Path, List[str]]:
-        if self._task_mode():
-            return self._run_task_development(feedback)
-        return self._run_phase_dev_legacy(feedback, attempt)
-
-    def _run_phase_dev_legacy(self, feedback: str = "", attempt: int = 1) -> Tuple[Path, List[str]]:
-        risk_tier = self.state.get("risk_tier", "M")
-        dev_profile = self.state.get("dev_profile", "ALGORITHMIC")
-        dev_engine, dev_model, dev_effort, dev_reason = SquadDispatcher.dispatch_role(
-            "03-dev", risk_tier, dev_profile, attempt=attempt
-        )
-        print(
-            f"\n==> [{self.project_id} | Phase 3: 03-dev] Developer ({dev_engine}:{dev_model or 'default'}, "
-            f"reasoning={dev_effort}, profile={dev_profile}) in isolated worktree (Attempt {attempt})..."
-        )
-        print(f"    [Squad Dispatcher] 03-dev allocated — {dev_reason}")
-        self.state["current_phase"] = "03-dev"
-        self._save_state()
-
-        wt = self._ensure_worktree()
-        recon_text = self._read_optional(self.dir_recon / "context-and-blast-radius.md")
-        req_text = self._read_optional(self.dir_po / "requirements.md")
-        adr_text = self._read_optional(self.dir_design / "adr.md")
-        tm_text = self._read_optional(self.dir_design / "threat-model.md")
-
-        use_or = os.environ.get("SSDLC_DEV_USE_OPENROUTER", "false").lower() == "true"
-
-        ui_dev_rules = ""
-        if dev_profile == "FRONTEND_UI":
-            ui_dev_rules = (
-                "\n\nMANDATORY FRONTEND / UI/UX IMPLEMENTATION RULES:\n"
-                "- ZERO TOKEN DRIFT: Import space, shape, type, useTheme from `@/theme/tokens`. Never use hardcoded hex colors or arbitrary spacing numbers.\n"
-                "- REUSE COMPONENT CATALOG: Reuse primitives from `@/components/Primitives` (<Button>, <Card>, <Loading>) before inventing custom widgets.\n"
-                "- Do NOT use raw Unicode characters or emojis (e.g. '♥', '★', arrows) as icons. Always use vector icons (e.g. from `@expo/vector-icons` or SVG).\n"
-                "- Always use `useSafeAreaInsets` or safe area containers for top/bottom boundaries to prevent notch and status bar collisions.\n"
-                "- Implement all 4 component states: Loading (skeleton/spinner with max 5s timeout), Empty, Error (with retry trigger), and Success.\n"
-            )
-
-        prompt = (
-            "You are the Developer in an SSDLC pipeline working inside an isolated Git worktree.\n"
-            "Implement the code and unit tests required by the PO Requirements and the approved ADR + Threat Model.\n"
-            "STRICT RULES:\n"
-            "- Do NOT modify any files inside `.ssdlc/` or `.agents/`.\n"
-            "- Write clean, production-grade code and unit tests.\n\n"
-            f"CODEBASE RECON:\n{recon_text}\n\n"
-            f"PO REQUIREMENTS:\n{req_text}\n\n"
-            f"APPROVED ARCHITECTURE (ADR):\n{adr_text}\n\n"
-            f"THREAT MODEL MITIGATIONS REQUIRED:\n{tm_text}\n"
-            f"{ui_dev_rules}"
-        )
-        if feedback:
-            prompt += f"\n\nCRITICAL FEEDBACK FROM PREVIOUS REVIEW/QA/APPSEC GATE (MUST FIX):\n{feedback}\n"
-
-        t0 = time.time()
-        in_container = Path("/.dockerenv").exists() or os.environ.get("SSDLC_EXECUTION_MODE", "docker") == "docker"
-        dev_sandbox = "danger-full-access" if in_container else "workspace-write"
-        tier_dev_budgets = {"S": 1.0, "M": 2.5, "L": 8.0}
-        dev_budget_env = os.environ.get("SSDLC_DEV_BUDGET_USD", "").strip()
-        dev_budget = float(dev_budget_env) if dev_budget_env else tier_dev_budgets.get(risk_tier, 2.5)
-        if dev_engine == "claude":
-            out, rc, dev_cost, dev_tin, dev_tout = EngineRunner.run_claude(
-                prompt,
-                cwd=wt,
-                read_only=False,
-                use_openrouter=use_or,
-                writable_worktree=wt,
-                model=dev_model,
-                reasoning_effort=dev_effort,
-                max_budget_usd=dev_budget,
-            )
-        else:
-            out, rc = EngineRunner.run_codex(
-                prompt,
-                cwd=wt,
-                sandbox=dev_sandbox,
-                model=dev_model,
-                reasoning_effort=dev_effort,
-                use_openrouter=use_or,
-                writable_worktree=wt,
-            )
-            dev_cost, dev_tin, dev_tout = 0.0, 0, 0
-        dur = time.time() - t0
-
-        # Cryptographic SHA-256 integrity check on upstream .ssdlc/ specs & threat model
-        for protected_rel in ("01-po/requirements.md", "02-design/adr.md", "02-design/threat-model.md"):
-            meta = self.state.get("artifacts", {}).get(protected_rel)
-            if meta:
-                protected_file = self.ssdlc_root / meta["path"]
-                if protected_file.exists() and sha256_file(protected_file) != meta["sha256"]:
-                    self.record_gate("DEV_TAMPER_CHECK", False, f"SHA-256 mismatch on {protected_rel}")
-                    raise RuntimeError(
-                        f"Security Violation: Upstream SSDLC artifact {protected_rel} was modified during Phase 3 Dev!"
-                    )
-
-        log_path = self.dir_dev / f"dev-attempt-{attempt}.log"
-        log_path.write_text(out, encoding="utf-8")
-        self.record_artifact(f"03-dev/dev-attempt-{attempt}.log", log_path)
-
-        subprocess.run(["git", "add", "-A"], cwd=str(wt), capture_output=True)
-        tamper_chk = subprocess.run(
-            ["git", "diff", "--cached", "--name-only"],
-            cwd=str(wt),
-            capture_output=True,
-            text=True,
-        )
-        changed_files = [
-            f.strip() for f in tamper_chk.stdout.splitlines() if f.strip()
-        ]
-        for cf in changed_files:
-            if cf.startswith(".ssdlc/") or cf.startswith(".agents/"):
-                subprocess.run(["git", "reset", "HEAD", cf], cwd=str(wt), capture_output=True)
-                subprocess.run(["git", "checkout", "--", cf], cwd=str(wt), capture_output=True)
-                self.record_gate("DEV_TAMPER_CHECK", False, f"Dev attempted to touch {cf}")
-                raise RuntimeError(f"Security Violation: Dev agent attempted to modify {cf}")
-
-        diff_proc = subprocess.run(
-            ["git", "diff", "--cached"],
-            cwd=str(wt),
-            capture_output=True,
-            text=True,
-        )
-        diff_text = diff_proc.stdout
-        diff_path = self.dir_dev / "implementation.diff"
-        diff_path.write_text(diff_text, encoding="utf-8")
-        self.record_artifact("03-dev/implementation.diff", diff_path)
-
-        specialists = set(self.state.get("specialists_triggered", []))
-        for cf in changed_files:
-            lower_cf = cf.lower()
-            if any(k in lower_cf for k in ("migration", "schema", "prisma", "alembic", ".sql", "models.py")):
-                specialists.add("DB_MIGRATION_AND_PRIVACY_SPECIALIST")
-            if any(k in lower_cf for k in ("package.json", "package-lock.json", "pyproject.toml", "requirements", "cargo.toml", "go.mod", "auth", "crypto", "jwt", "oauth")):
-                specialists.add("APPSEC_SUPPLY_CHAIN_REDTEAM")
-            if any(k in lower_cf for k in ("async", "worker", "queue", "cache", "pool", "concurrent")):
-                specialists.add("PERF_AND_CONCURRENCY_SRE")
-        self.state["specialists_triggered"] = sorted(specialists)
-        self._save_state()
-
-        self.record_ledger(
-            CostAndTelemetryEntry(
-                f"03-dev-a{attempt}",
-                "Developer",
-                dev_engine,
-                dev_model or "default",
-                "COMPLETED" if rc == 0 else f"RC_{rc}",
-                dur,
-                cost_usd=dev_cost,
-                tokens_in=dev_tin,
-                tokens_out=dev_tout,
-                trace_user=f"{self.project_id}:{self.ticket_id}:03-dev-a{attempt}",
-                reasoning_effort=dev_effort,
-            )
-        )
-        self.record_gate(
-            f"DEV_IMPLEMENTATION_A{attempt}",
-            bool(diff_text.strip()),
-            f"Changed {len(changed_files)} file(s); engine={dev_engine}, reasoning={dev_effort}; specialists={self.state['specialists_triggered']}",
-        )
-        print(f"    [OK] Captured diff ({len(changed_files)} files) -> {diff_path.relative_to(self.repo_root)}")
-        return diff_path, changed_files
-
-    # ------------------------------------------------------------------
-    # PHASE 4: Code Reviewer (+ Conditional DB & Perf/SRE Specialist Lenses)
-    # ------------------------------------------------------------------
     def _verified_task_review_input(self, diff_text: str) -> Tuple[Path, int]:
         try:
             diff_limit = int(os.environ.get('SSDLC_REVIEW_MAX_DIFF_CHARS', '200000'))
@@ -3704,13 +3538,12 @@ class SSDLCOrchestrator:
                 "- Component States: Verify Loading, Empty, and Error states are implemented.\n"
             )
 
-        if self._task_mode():
-            _, diff_limit = self._verified_task_review_input(diff_text)
-            ui_review_rules = (
-                "\nPROJECT QUALITY CONTRACT (apply the actual project rules, including test/config changes):\n"
-                + (self.dir_recon / "quality-contract.json").read_text()
-                + "\nCheck missing scenarios and task interactions before delivery.\n"
-            )
+        _, diff_limit = self._verified_task_review_input(diff_text)
+        ui_review_rules = (
+            "\nPROJECT QUALITY CONTRACT (apply the actual project rules, including test/config changes):\n"
+            + (self.dir_recon / "quality-contract.json").read_text()
+            + "\nCheck missing scenarios and task interactions before delivery.\n"
+        )
         review_engine = os.environ.get("SSDLC_REVIEW_ENGINE", "openrouter")
 
         sys_prompt = (
@@ -3744,93 +3577,12 @@ class SSDLCOrchestrator:
             f"PO REQUIREMENTS:\n{req_text}\n\n"
             f"ADR:\n{adr_text}\n\n"
             f"THREAT MODEL:\n{tm_text}\n\n"
-            f"GIT DIFF TO REVIEW:\n```diff\n{diff_text if self._task_mode() else diff_text[:60000]}\n```"
+            f"GIT DIFF TO REVIEW:\n```diff\n{diff_text}\n```"
         )
 
-        if self._task_mode():
-            return self._task_review_gate(attempt, review_models, rev_effort, review_engine,
-                                          sys_prompt, user_prompt, diff_text)
+        return self._task_review_gate(attempt, review_models, rev_effort, review_engine,
+                                      sys_prompt, user_prompt, diff_text)
 
-        review_cwd = self.worktree_dir if self._task_mode() else self.repo_root
-        review_run = self.dir_review / 'runs' / uuid.uuid4().hex
-        review_run.mkdir(parents=True)
-        inputs_path = review_run / 'inputs.json'
-        atomic_json(inputs_path, {'verified_head': self.state.get('task_verified_head'), 'review_cwd': str(review_cwd),
-                                 'diff_chars': len(diff_text), 'diff_char_budget': diff_limit if self._task_mode() else 60000,
-                                 'system_prompt': sys_prompt, 'user_prompt': user_prompt, 'review_models': review_models})
-        self.record_artifact(str(inputs_path.relative_to(self.ssdlc_root)), inputs_path)
-
-        combined_reviews: List[str] = [f"# Multi-Model Code Review Report (Attempt {attempt}, reasoning={rev_effort})\n"]
-        all_approved = True
-
-        for reviewer_index, mdl in enumerate(review_models, 1):
-            self.check_budget_circuit_breaker()
-            effective_engine, effective_model = resolve_review_entry(mdl, review_engine)
-            print(f"    -> Running Reviewer: {effective_engine}:{effective_model} (reasoning={rev_effort})...")
-            t0 = time.time()
-            rev_out, cost, tin, tout, trace_user = EngineRunner.invoke_role(
-                effective_engine,
-                effective_model,
-                sys_prompt,
-                user_prompt,
-                review_cwd,
-                self.project_id,
-                self.ticket_id,
-                f"04-review-a{attempt}",
-                sandbox="read-only",
-                reasoning_effort=rev_effort,
-            )
-            dur = time.time() - t0
-            verdict = parse_review_verdict(rev_out)
-            raw_review = review_run / f'reviewer-{reviewer_index}.md'
-            raw_review.write_text(rev_out)
-            self.record_artifact(str(raw_review.relative_to(self.ssdlc_root)), raw_review)
-            input_changed = self._task_mode() and (git(review_cwd, 'rev-parse', 'HEAD') != self.state['task_verified_head']
-                                                   or bool(git(review_cwd, 'status', '--porcelain')))
-            passed = verdict == "APPROVED" and not input_changed
-            if not passed:
-                all_approved = False
-            self.record_ledger(
-                CostAndTelemetryEntry(
-                    f"04-review-a{attempt}",
-                    "Code Reviewer",
-                    effective_engine,
-                    effective_model,
-                    'INPUT_CHANGED' if input_changed else verdict or "INVALID_VERDICT",
-                    dur,
-                    cost,
-                    tin,
-                    tout,
-                    trace_user,
-                    reasoning_effort=rev_effort,
-                )
-            )
-            self.check_budget_circuit_breaker()
-            if input_changed:
-                self.record_gate(f'CODE_REVIEW_A{attempt}', False, 'Verified checkpoint changed during review')
-                raise TaskError('Verified checkpoint changed during review; approval withheld')
-            verdict_note = "Invalid or ambiguous final verdict; approval withheld.\n\n" if verdict is None else ""
-            combined_reviews.append(f"## Reviewer: `{effective_engine}:{effective_model}` ({verdict or 'INVALID_VERDICT'}, reasoning={rev_effort})\n\n{verdict_note}{rev_out}\n\n---\n")
-
-        report_text = "\n".join(combined_reviews)
-        rev_path = self.dir_review / f"review-report-a{attempt}.md"
-        rev_path.write_text(report_text, encoding="utf-8")
-        canon_path = self.dir_review / "review-report.md"
-        canon_path.write_text(report_text, encoding="utf-8")
-
-        self.record_artifact(f"04-review/review-report-a{attempt}.md", rev_path)
-        self.record_artifact("04-review/review-report.md", canon_path)
-        self.record_gate(
-            f"CODE_REVIEW_A{attempt}",
-            all_approved,
-            f"Reviewed by {len(review_models)} model(s); approved={all_approved}",
-        )
-        print(f"    [{'OK' if all_approved else 'BOUNCE'}] Code Review status: {'APPROVED' if all_approved else 'CHANGES_REQUESTED'}")
-        return all_approved, report_text
-
-    # ------------------------------------------------------------------
-    # PHASE 5: QA & Security Verification
-    # ------------------------------------------------------------------
     def _run_deterministic_scanners(self, wt: Path, test_cmd: Optional[str]) -> Tuple[bool, str]:
         logs: List[str] = ["# Deterministic QA & Security Execution Logs\n"]
         overall_ok = True
@@ -3885,7 +3637,7 @@ class SSDLCOrchestrator:
             if not test_passed:
                 overall_ok = False
             logs.append(
-                f"## [{'PASS' if test_passed else 'FAIL'}] Test Suite (`{effective_test_cmd}` — exit code {t_rc})\n"
+                f"## [{'PASS' if test_passed else 'FAIL'}] shell_command (`{effective_test_cmd}` — exit code {t_rc})\n"
                 f"```text\n{t_out + t_err}\n```\n"
             )
         else:
@@ -4061,11 +3813,10 @@ class SSDLCOrchestrator:
         self._save_state()
 
         wt = self._ensure_worktree()
-        if self._task_mode():
-            wt, _ = self._verified_task_review_input(self._read_optional(self.dir_dev / 'implementation.diff', ''))
+        wt, _ = self._verified_task_review_input(self._read_optional(self.dir_dev / 'implementation.diff', ''))
         det_ok, det_logs = self._run_deterministic_scanners(wt, test_cmd)
         det_log_path = self.dir_qa / f"deterministic-checks-a{attempt}.md"
-        det_log_path.write_text(det_logs, encoding="utf-8")
+        det_log_path.write_text("# QA deterministic reports (shell_command)\n\n" + det_logs, encoding="utf-8")
         self.record_artifact(f"05-qa/deterministic-checks-a{attempt}.md", det_log_path)
 
         req_text = self._read_optional(self.dir_po / "requirements.md")
@@ -4074,8 +3825,7 @@ class SSDLCOrchestrator:
 
         ui_qa_rules = ""
         qa_cwd = self.repo_root
-        if self._task_mode():
-            qa_cwd = wt
+        qa_cwd = wt
         if dev_profile == "FRONTEND_UI":
             ui_qa_rules = (
                 "\n\nMANDATORY UI/UX ACCEPTANCE VERIFICATION:\n"
@@ -4104,75 +3854,12 @@ class SSDLCOrchestrator:
             f"PO REQUIREMENTS:\n{req_text}\n\n"
             f"THREAT MODEL:\n{tm_text}\n\n"
             f"DETERMINISTIC TEST & SCAN LOGS:\n{det_logs}\n\n"
-            f"IMPLEMENTATION DIFF:\n```diff\n{diff_text if self._task_mode() else diff_text[:60000]}\n```"
+            f"IMPLEMENTATION DIFF:\n```diff\n{diff_text}\n```"
         )
 
-        if self._task_mode():
-            return self._task_verification_gate('qa', attempt, qa_engine, qa_model, qa_effort,
-                diff_text, sys_prompt, user_prompt, {'det_ok': det_ok}, [('ev/qa-deterministic', det_log_path)])
+        return self._task_verification_gate('qa', attempt, qa_engine, qa_model, qa_effort,
+            diff_text, sys_prompt, user_prompt, {'det_ok': det_ok}, [('ev/qa-deterministic', det_log_path)])
 
-        qa_run = self.dir_qa / 'runs' / uuid.uuid4().hex
-        qa_run.mkdir(parents=True)
-        input_path = qa_run / 'inputs.json'
-        atomic_json(input_path, {'verified_head': self.state.get('task_verified_head'), 'qa_cwd': str(qa_cwd),
-                                 'system_prompt': sys_prompt, 'user_prompt': user_prompt})
-        self.record_artifact(str(input_path.relative_to(self.ssdlc_root)), input_path)
-
-        t0 = time.time()
-        qa_out, cost, tin, tout, trace_user = EngineRunner.invoke_role(
-            qa_engine,
-            qa_model,
-            sys_prompt,
-            user_prompt,
-            qa_cwd,
-            self.project_id,
-            self.ticket_id,
-            f"05-qa-a{attempt}",
-            sandbox="read-only",
-            reasoning_effort=qa_effort,
-        )
-        dur = time.time() - t0
-
-        qa_verdict = parse_qa_verdict(qa_out)
-        llm_qa_ok = qa_verdict == 'PASSED'
-        input_changed = self._task_mode() and (git(qa_cwd, 'rev-parse', 'HEAD') != self.state['task_verified_head']
-                                               or bool(git(qa_cwd, 'status', '--porcelain')))
-        if input_changed:
-            self._gate_terminal = ("05-qa", "integrity_blocked")
-        final_qa_ok = det_ok and llm_qa_ok and not input_changed
-        raw_path = qa_run / 'response.md'
-        raw_path.write_text(qa_out)
-        self.record_artifact(str(raw_path.relative_to(self.ssdlc_root)), raw_path)
-
-        qa_path = self.dir_qa / "qa-traceability-matrix.md"
-        qa_path.write_text(qa_out, encoding="utf-8")
-        self.record_artifact("05-qa/qa-traceability-matrix.md", qa_path)
-        self.record_ledger(
-            CostAndTelemetryEntry(
-                f"05-qa-a{attempt}",
-                "QA & Security Verifier",
-                qa_engine,
-                qa_model,
-                'INPUT_CHANGED' if input_changed else 'INVALID_VERDICT' if qa_verdict is None else "PASSED" if final_qa_ok else "FAILED",
-                dur,
-                cost,
-                tin,
-                tout,
-                trace_user,
-                reasoning_effort=qa_effort,
-            )
-        )
-        self.record_gate(
-            f"QA_VERIFICATION_A{attempt}",
-            final_qa_ok,
-            f"deterministic_ok={det_ok}, ac_matrix_ok={llm_qa_ok}, input_changed={input_changed}, reasoning={qa_effort}",
-        )
-        print(f"    [{'OK' if final_qa_ok else 'BOUNCE'}] QA Gate status: {'PASSED' if final_qa_ok else 'FAILED'}")
-        return final_qa_ok, f"{det_logs}\n\n{qa_out}"
-
-    # ------------------------------------------------------------------
-    # PHASE 5b: AppSec Red-Teamer & Supply-Chain / SCA Auditor
-    # ------------------------------------------------------------------
     @_supervised_phase('05b-appsec')
     def run_phase_appsec(self, attempt: int = 1) -> Tuple[bool, str]:
         self._gate_terminal = None
@@ -4191,112 +3878,30 @@ class SSDLCOrchestrator:
         tm_text = self._read_optional(self.dir_design / "threat-model.md")
         diff_text = self._read_optional(self.dir_dev / "implementation.diff", "")
 
-        if self._task_mode():
-            wt, limit = self._verified_task_review_input(diff_text)
-            scanners = self._run_appsec_scans(wt)
-            text = '\n'.join(f'## {r.id}: {r.status}\n{r.reason}\n{r.log}' for r in scanners)
-            evidence = []
-            for index, result in enumerate(scanners):
-                path = self.dir_appsec / f'scanner-{index}-a{attempt}.log'
-                path.write_text(result.log + '\n' + result.reason)
-                self.record_artifact(str(path.relative_to(self.ssdlc_root)), path)
-                evidence.append((f'ev/sca-{result.id}', path))
-            for name in (f'supply-chain-sca-a{attempt}.md', 'supply-chain-sca.md'):
-                path = self.dir_appsec / name
-                path.write_text(text)
-                self.record_artifact(str(path.relative_to(self.ssdlc_root)), path)
-            status = self.dir_appsec / 'scanner-status.json'
-            status.write_text(scanner_status_json(scanners))
-            self.record_artifact('05b-appsec/scanner-status.json', status)
-            evidence.append(('ev/sca-status', status))
-            excerpt = text if len(text) <= limit else text[:limit // 2] + '\n[excerpt; full logs: ev/sca-status and scanner evidence]\n' + text[-limit // 2:]
-            return self._task_verification_gate('appsec', attempt, appsec_engine, appsec_model, appsec_effort,
-                diff_text, 'You are the AppSec auditor. Analyze security and dependencies. End with exactly one final '
-                'APPSEC_STATUS: SECURE or APPSEC_STATUS: VULNERABLE line.',
-                f'REQUIREMENTS:\n{req_text}\nTHREAT MODEL:\n{tm_text}\nSCA:\n{excerpt}\nCOMPLETE DIFF:\n{diff_text}',
-                {'scanners': all(r.status in ('passed', 'not_applicable') for r in scanners)}, evidence, scanners)
+        wt, limit = self._verified_task_review_input(diff_text)
+        scanners = self._run_appsec_scans(wt)
+        text = '\n'.join(f'## {r.id}: {r.status}\n{r.reason}\n{r.log}' for r in scanners)
+        evidence = []
+        for index, result in enumerate(scanners):
+            path = self.dir_appsec / f'scanner-{index}-a{attempt}.log'
+            path.write_text(result.log + '\n' + result.reason)
+            self.record_artifact(str(path.relative_to(self.ssdlc_root)), path)
+            evidence.append((f'ev/sca-{result.id}', path))
+        for name in (f'supply-chain-sca-a{attempt}.md', 'supply-chain-sca.md'):
+            path = self.dir_appsec / name
+            path.write_text(text)
+            self.record_artifact(str(path.relative_to(self.ssdlc_root)), path)
+        status = self.dir_appsec / 'scanner-status.json'
+        status.write_text(scanner_status_json(scanners))
+        self.record_artifact('05b-appsec/scanner-status.json', status)
+        evidence.append(('ev/sca-status', status))
+        excerpt = text if len(text) <= limit else text[:limit // 2] + '\n[excerpt; full logs: ev/sca-status and scanner evidence]\n' + text[-limit // 2:]
+        return self._task_verification_gate('appsec', attempt, appsec_engine, appsec_model, appsec_effort,
+            diff_text, 'You are the AppSec auditor. Analyze security and dependencies. End with exactly one final '
+            'APPSEC_STATUS: SECURE or APPSEC_STATUS: VULNERABLE line.',
+            f'REQUIREMENTS:\n{req_text}\nTHREAT MODEL:\n{tm_text}\nSCA:\n{excerpt}\nCOMPLETE DIFF:\n{diff_text}',
+            {'scanners': all(r.status in ('passed', 'not_applicable') for r in scanners)}, evidence, scanners)
 
-        sca_logs = ["# Supply-Chain & Dependency Audit (SCA)\n"]
-        if (wt / "package-lock.json").exists() and (shutil.which("npm") or EngineRunner._should_spawn_role_container()):
-            npma_out, npma_err, npma_rc = EngineRunner.run_sandboxed_cmd(
-                ["npm", "audit", "--audit-level=high"],
-                cwd=wt,
-                timeout=120,
-            )
-            sca_logs.append(f"## npm audit (exit {npma_rc})\n```\n{(npma_out + npma_err)[:8000]}\n```\n")
-        if ((wt / "requirements.txt").exists() or (wt / "pyproject.toml").exists()) and (shutil.which("pip-audit") or EngineRunner._should_spawn_role_container()):
-            pa_out, pa_err, pa_rc = EngineRunner.run_sandboxed_cmd(
-                ["pip-audit"],
-                cwd=wt,
-                timeout=120,
-            )
-            sca_logs.append(f"## pip-audit (exit {pa_rc})\n```\n{(pa_out + pa_err)[:8000]}\n```\n")
-
-        sca_text = "\n".join(sca_logs)
-        sca_path = self.dir_appsec / "supply-chain-sca.md"
-        sca_path.write_text(sca_text, encoding="utf-8")
-        self.record_artifact("05b-appsec/supply-chain-sca.md", sca_path)
-
-        sys_prompt = (
-            "You are the Principal AppSec Red-Teamer & Supply-Chain Security Auditor.\n"
-            "Attempt to break the implementation diff and audit any new dependencies:\n"
-            "1. ## Offensive Security & Exploit Analysis (Injection, Auth Bypass, IDOR, SSRF, Path Traversal, Deserialization, DoS)\n"
-            "2. ## Supply-Chain & Dependency Review (new packages, typosquatting, CVEs, license risks)\n"
-            "3. ## Secrets, Crypto & Data Exposure Check\n"
-            "At the very end, output EXACTLY one of:\n"
-            "APPSEC_STATUS: SECURE (if no exploitable vulnerabilities or high-severity supply-chain risks exist)\n"
-            "or\n"
-            "APPSEC_STATUS: VULNERABLE (if any exploitable flaw or unmitigated security risk exists)"
-        )
-        user_prompt = (
-            f"PO SECURITY REQUIREMENTS:\n{req_text}\n\n"
-            f"THREAT MODEL:\n{tm_text}\n\n"
-            f"SCA SCANNER LOGS:\n{sca_text}\n\n"
-            f"IMPLEMENTATION DIFF:\n```diff\n{diff_text[:60000]}\n```"
-        )
-
-        t0 = time.time()
-        appsec_out, cost, tin, tout, trace_user = EngineRunner.invoke_role(
-            appsec_engine,
-            appsec_model,
-            sys_prompt,
-            user_prompt,
-            self.repo_root,
-            self.project_id,
-            self.ticket_id,
-            f"05b-appsec-a{attempt}",
-            sandbox="read-only",
-            reasoning_effort=appsec_effort,
-        )
-        dur = time.time() - t0
-
-        secure = "APPSEC_STATUS: SECURE" in appsec_out
-        redteam_path = self.dir_appsec / "redteam-audit.md"
-        redteam_path.write_text(appsec_out, encoding="utf-8")
-        self.record_artifact("05b-appsec/redteam-audit.md", redteam_path)
-
-        self.record_ledger(
-            CostAndTelemetryEntry(
-                f"05b-appsec-a{attempt}",
-                "AppSec Red-Teamer",
-                appsec_engine,
-                appsec_model,
-                "SECURE" if secure else "VULNERABLE",
-                dur,
-                cost,
-                tin,
-                tout,
-                trace_user,
-                reasoning_effort=appsec_effort,
-            )
-        )
-        self.record_gate(f"APPSEC_REDTEAM_A{attempt}", secure, f"AppSec verdict: {'SECURE' if secure else 'VULNERABLE'} (reasoning={appsec_effort})")
-        print(f"    [{'OK' if secure else 'BOUNCE'}] AppSec Gate status: {'SECURE' if secure else 'VULNERABLE'}")
-        return secure, appsec_out
-
-    # ------------------------------------------------------------------
-    # PHASE 6: DevSecOps Release, Rollback & Observability Engineer
-    # ------------------------------------------------------------------
     def _ops_docs_context(self, phase, diff_text, texts):
         wt, _ = self._verified_task_review_input(diff_text)
         disclosure = dict(schema_version='1.0', phase=phase,
@@ -4321,7 +3926,7 @@ class SSDLCOrchestrator:
         return wt, block, disclosure
 
     def _ops_docs_enabled(self):
-        return self._task_mode() and candidate_reports.convergence_enabled(self._ensure_quality_contract())
+        return candidate_reports.convergence_enabled(self._ensure_quality_contract())
 
     def _verify_ops_docs_after(self, diff_text):
         fresh = git(self.worktree_dir, 'diff', '--binary', self.state['base_commit'], 'HEAD') + '\n'
@@ -4479,10 +4084,11 @@ class SSDLCOrchestrator:
                 f"| `{item['phase']}` | {item['role']} | `{item['engine']}:{item['model']}` | `{item.get('reasoning_effort', 'medium')}` | `{item.get('trace_user', '')}` | **{item['status']}** | {item['duration_sec']}s | ${item['cost_usd']:.4f} |"
             )
 
+        # QA shell_command reports remain separate from typed contract checks.
         artifact_rows = []
         for name, meta in sorted(self.state["artifacts"].items()):
             artifact_rows.append(
-                f"| [`{name}`](./{meta['path']}) | `{meta['sha256'][:16]}...` | {meta['size_bytes']} B | {meta['recorded_at']} |"
+                f"| {'shell_command ' if name.startswith('05-qa/deterministic-checks-') else ''}[`{name}`](./{meta['path']}) | `{meta['sha256'][:16]}...` | {meta['size_bytes']} B | {meta['recorded_at']} |"
             )
 
         gate_rows = []
@@ -4562,7 +4168,7 @@ To **APPROVE** and merge the verified branch into your project repository (and p
 ./ssdlc approve {self.ticket_id}
 ```
 
-To **REJECT** and send feedback back to the team:
+To **REJECT** and record feedback (free text authorizes no repair):
 ```bash
 ./ssdlc reject {self.ticket_id} --reason "Describe required adjustment"
 ```
@@ -4572,7 +4178,7 @@ To **REJECT** and send feedback back to the team:
         self.record_artifact("EVIDENCE_PACK.md", pack_path)
         print(f"    [OK] Evidence Pack ready at: {pack_path.relative_to(self.repo_root)}")
 
-        if self.remote_sync.enabled and (not self._task_mode() or ready_for_signoff):
+        if self.remote_sync.enabled and (ready_for_signoff):
             wt = self.worktree_dir
             branch = self.state.get("dev_branch", f"ssdlc/{self.ticket_id}")
             base_branch = "main"
@@ -4588,23 +4194,8 @@ To **REJECT** and send feedback back to the team:
             except Exception:
                 pass
 
-            if self._task_mode() and (git(wt, "status", "--porcelain") or self._get_head_sha(wt) != self.state.get("task_verified_head")):
+            if (git(wt, "status", "--porcelain") or self._get_head_sha(wt) != self.state.get("task_verified_head")):
                 raise TaskError("Refusing to publish changes outside verified checkpoints")
-            if wt.exists() and not self._task_mode():
-                subprocess.run(["git", "add", "-A"], cwd=str(wt), capture_output=True)
-                status_chk = subprocess.run(
-                    ["git", "status", "--porcelain"],
-                    cwd=str(wt),
-                    capture_output=True,
-                    text=True,
-                )
-                if status_chk.stdout.strip():
-                    subprocess.run(
-                        ["git", "commit", "-m", f"feat({self.ticket_id}): implementation checkpoint"],
-                        cwd=str(wt),
-                        capture_output=True,
-                        text=True,
-                    )
 
             if not self.state.get("issue_id"):
                 req_text = self._read_optional(self.dir_po / "requirements.md")
@@ -4686,17 +4277,17 @@ To **REJECT** and send feedback back to the team:
         tier: str = "auto",
         from_phase: str = "00-recon",
     ) -> Path:
+        _warn_obsolete_task_flag()
         if self.ssdlc_root != self.repo_root / '.ssdlc' / self.ticket_id and from_phase != '03-dev':
             raise DevelopmentBlocked('SCOPE_REQUIRED', 'Reconciled execution must resume from 03-dev')
         with ticket_lock(getattr(self, "ticket_lock_path", self.ssdlc_root / "ticket.lock")):
             # Reload state after acquiring the lock, not from a potentially stale constructor.
             self.state = self._load_or_init_state()
-            if self._task_mode():
-                self.state["task_breakdown"] = True
-                self._save_state()
-                if os.environ.get("SSDLC_EXECUTION_MODE", "docker") == "docker" and not EngineRunner._should_spawn_role_container():
-                    raise TaskError("Task mode in Docker requires role-container isolation. Run the controller on the host with the runner image available, or explicitly select local mode.")
-                self._ensure_quality_contract()
+            self.state["task_breakdown"] = True
+            self._save_state()
+            if os.environ.get("SSDLC_EXECUTION_MODE", "docker") == "docker" and not EngineRunner._should_spawn_role_container():
+                raise TaskError("Task mode in Docker requires role-container isolation. Run the controller on the host with the runner image available, or explicitly select local mode.")
+            self._ensure_quality_contract()
             try:
                 return self._run_pipeline(goal, test_cmd, tier, from_phase)
             except TaskError as exc:
@@ -4724,12 +4315,9 @@ To **REJECT** and send feedback back to the team:
         tier: str = "auto",
         from_phase: str = "00-recon",
     ) -> Path:
-        if self._task_mode() or os.environ.get('SSDLC_SUPERVISED_RUN_ID'):
-            # The read-only compatibility API checks whether baseline state exists.
-            # The existing foreground path retains its previous refusal contract.
-            _resume_run_refusal(self.ssdlc_root, self.state, self._task_mode(), from_phase)
+        _resume_run_refusal(self.ssdlc_root, self.state, from_phase)
         quality_path = self.ssdlc_root / '00-recon' / 'quality-contract.json'
-        if self._task_mode() and quality_path.exists() and candidate_reports.convergence_enabled(json.loads(quality_path.read_text())):
+        if quality_path.exists() and candidate_reports.convergence_enabled(json.loads(quality_path.read_text())):
             candidate_reports.reconcile_candidate_store(self.ssdlc_root, self.state['artifacts'], self._register_new)
         start_idx = self.PHASE_ORDER.index(from_phase) if from_phase in self.PHASE_ORDER else 0
 
@@ -4755,19 +4343,19 @@ To **REJECT** and send feedback back to the team:
         else:
             print("    [RESUME] Skipping 02-design")
 
-        if self._task_mode():
-            self._ensure_task_plan()
+        self._ensure_task_plan()
 
         frozen = getattr(_dispatch_local, 'limits', None)
         max_retries = (frozen._load(repair=False)[0]['policy']['development_attempts'] if frozen is not None
                        else int(os.environ.get('SSDLC_MAX_DEV_RETRIES', '3')))
-        feedback = ""
         passed_all = False
 
         if start_idx <= self.PHASE_ORDER.index("05b-appsec"):
             for attempt in range(1, max_retries + 1):
+                if attempt > 1:
+                    raise TaskError("Gate rejection requires explicit invalidation; free text authorizes no repair")
                 if attempt > 1 or start_idx <= self.PHASE_ORDER.index("03-dev"):
-                    self.run_phase_dev(feedback=feedback, attempt=attempt)
+                    self.run_phase_dev()
                     self.check_budget_circuit_breaker()
                 else:
                     print("    [RESUME] Skipping initial 03-dev execution")
@@ -4777,7 +4365,6 @@ To **REJECT** and send feedback back to the team:
                     self._stop_on_terminal_gate()
                     self.check_budget_circuit_breaker()
                     if not rev_ok:
-                        feedback = f"Code Reviewer rejected the diff (Attempt {attempt}):\n{rev_report}"
                         continue
                 else:
                     print("    [RESUME] Skipping initial 04-review execution")
@@ -4787,7 +4374,6 @@ To **REJECT** and send feedback back to the team:
                     self._stop_on_terminal_gate()
                     self.check_budget_circuit_breaker()
                     if not qa_ok:
-                        feedback = f"QA Gate rejected the implementation (Attempt {attempt}):\n{qa_report}"
                         continue
                 else:
                     print("    [RESUME] Skipping initial 05-qa execution")
@@ -4802,7 +4388,6 @@ To **REJECT** and send feedback back to the team:
                     self._stop_on_terminal_gate()
                     self.check_budget_circuit_breaker()
                     if not appsec_ok:
-                        feedback = f"AppSec Red-Teamer rejected the implementation (Attempt {attempt}):\n{appsec_report}"
                         continue
 
                 passed_all = True
@@ -4825,7 +4410,7 @@ To **REJECT** and send feedback back to the team:
                 self.run_phase_docs()
                 self.check_budget_circuit_breaker()
 
-        if self._task_mode() and passed_all:
+        if passed_all:
             if (self._get_head_sha(self.worktree_dir) != self.state.get("task_verified_head")
                     or git(self.worktree_dir, "status", "--porcelain")):
                 raise TaskError("Code changed after task verification; global gates cannot authorize delivery")
@@ -4837,15 +4422,14 @@ To **REJECT** and send feedback back to the team:
             self._approve_and_merge()
 
     def _approve_and_merge(self) -> None:
-        if self._task_mode():
-            if self.state.get("status") != "AWAITING_SUPERVISOR_SIGNOFF":
-                raise TaskError("Task ticket has not passed the global gates")
-            if (self._get_head_sha(self.worktree_dir) != self.state.get("task_verified_head")
-                    or git(self.worktree_dir, "status", "--porcelain")):
-                raise TaskError("Task worktree no longer matches the verified checkpoint")
-            if (git(self.repo_root, "rev-parse", "HEAD") != self.state["base_commit"]
-                    or git(self.repo_root, "status", "--porcelain")):
-                raise TaskError("Bootstrap approval requires a clean unchanged target; advanced-target integration belongs to Step 3")
+        if self.state.get("status") != "AWAITING_SUPERVISOR_SIGNOFF":
+            raise TaskError("Task ticket has not passed the global gates")
+        if (self._get_head_sha(self.worktree_dir) != self.state.get("task_verified_head")
+                or git(self.worktree_dir, "status", "--porcelain")):
+            raise TaskError("Task worktree no longer matches the verified checkpoint")
+        if (git(self.repo_root, "rev-parse", "HEAD") != self.state["base_commit"]
+                or git(self.repo_root, "status", "--porcelain")):
+            raise TaskError("Bootstrap approval requires a clean unchanged target; advanced-target integration belongs to Step 3")
         if self.state.get("status") not in ("AWAITING_SUPERVISOR_SIGNOFF", "ESCALATED_TO_SUPERVISOR"):
             raise RuntimeError(f"Ticket {self.ticket_id} is in status {self.state.get('status')}, cannot approve.")
         disclosures = self._completion_disclosures()
@@ -4853,22 +4437,8 @@ To **REJECT** and send feedback back to the team:
             print(disclosures, flush=True)
         wt = self.worktree_dir
         branch = self.state["dev_branch"]
-        if wt.exists() and not self._task_mode():
-            subprocess.run(["git", "add", "-A"], cwd=str(wt), check=True)
-            subprocess.run(
-                ["git", "commit", "-m", f"feat({self.ticket_id}): SSDLC verified implementation"],
-                cwd=str(wt),
-                capture_output=True,
-                text=True,
-            )
-            sha = self._get_head_sha(wt)
-            (self.dir_dev / "commit-sha.txt").write_text(sha + "\n", encoding="utf-8")
-            self.record_artifact("03-dev/commit-sha.txt", self.dir_dev / "commit-sha.txt")
 
-        if self._task_mode():
-            git(self.repo_root, "merge", "--ff-only", self.state["task_verified_head"])
-        else:
-            subprocess.run(["git", "merge", "--no-ff", branch, "-m", f"Merge SSDLC verified branch {branch}"], cwd=str(self.repo_root), check=True)
+        git(self.repo_root, "merge", "--ff-only", self.state["task_verified_head"])
 
         # Compound Knowledge: Auto-register any new components into .ssdlc/standards/COMPONENT_CATALOG.md
         standards_catalog = self.repo_root / ".ssdlc" / "standards" / "COMPONENT_CATALOG.md"
@@ -4980,6 +4550,7 @@ def cmd_doctor(repo: Path) -> int:
 
 
 def _foreground_main(argv=None) -> int:
+    _warn_obsolete_task_flag()
     parser = argparse.ArgumentParser(description="Project-Isolated Multi-CLI SSDLC Orchestrator",
         epilog="Stopped-run migration: continuation-inspect / continuation-preview / continuation-prepare / continuation-activate / continuation-verify (each has --help).")
     sub = parser.add_subparsers(dest="subcommand", required=True)
@@ -4987,12 +4558,12 @@ def _foreground_main(argv=None) -> int:
     p_doc = sub.add_parser("doctor", help="Check project isolation, CLI versions, and API key fingerprints")
     p_doc.add_argument("--repo", "-r", default=".", help="Path to project repository")
 
-    p_run = sub.add_parser("run", help="Run the risk-tiered SSDLC pipeline for a ticket")
+    p_run = sub.add_parser("run", help="Run the risk-tiered task engine for a ticket")
     p_run.add_argument("--ticket", "-t", required=True, help="Ticket ID (e.g., TKT-001-auth)")
     p_run.add_argument("--goal", "-g", required=True, help="High-level requirement or feature goal")
     p_run.add_argument("--tier", default=None, choices=["auto", "S", "M", "L"], help="Risk tier: auto, S, M, or L")
     p_run.add_argument("--repo", "-r", default=".", help="Path to Git repository (default: current dir)")
-    p_run.add_argument("--test-cmd", default=None, help="Deterministic test command for Phase 5 QA")
+    p_run.add_argument("--test-cmd", default=None, help="QA shell command (recorded separately from typed contract checks)")
     p_run.add_argument(
         "--from-phase",
         default="00-recon",
@@ -5088,7 +4659,7 @@ def _foreground_main(argv=None) -> int:
     app_sync.add_argument("--no-sync-remote", dest="sync_remote", action="store_false",
                           help="Do not push merged branch")
 
-    p_rej = sub.add_parser("reject", help="Supervisor rejection: bounce back to Dev with feedback")
+    p_rej = sub.add_parser("reject", help="Supervisor rejection: record rejection; free text authorizes no repair")
     p_rej.add_argument("ticket", help="Ticket ID")
     p_rej.add_argument("--reason", required=True, help="Supervisor rejection feedback")
     p_rej.add_argument("--repo", "-r", default=".", help="Path to Git repository")
@@ -5192,12 +4763,7 @@ def _foreground_main(argv=None) -> int:
         sync_remote = args.sync_remote
         orch = SSDLCOrchestrator(repo_path, args.ticket, sync_remote=sync_remote)
         orch.record_gate("SUPERVISOR_SIGNOFF", False, f"Rejected by supervisor: {args.reason}")
-        orch.run_phase_dev(feedback=f"SUPERVISOR REJECTION: {args.reason}", attempt=99)
-        orch.run_phase_review(attempt=99)
-        orch.run_phase_qa(test_cmd=args.test_cmd, attempt=99)
-        if orch.state.get("risk_tier") == "L" or "APPSEC_SUPPLY_CHAIN_REDTEAM" in orch.state.get("specialists_triggered", []):
-            orch.run_phase_appsec(attempt=99)
-        orch.compile_evidence_pack(ready_for_signoff=True)
+        print("Rejection recorded. Free text authorizes no repair or execution.")
         return 0
 
     return 0
