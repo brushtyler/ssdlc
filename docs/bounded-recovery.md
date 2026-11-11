@@ -65,7 +65,9 @@ separate explicit transition, rather than editing policy/journal files.
 
 Existing tickets cannot acquire a fresh profile over historical accounting.
 I1 imported generations remain verification-only until a separately reviewed
-cumulative-limit reconciliation/authorization is supported. In particular this
+cumulative-limit reconciliation/authorization is supported through
+[issue #27](https://github.com/brushtyler/ssdlc/issues/27), which completes I2.
+PR #26 is its independently reviewable first increment for new runs. In particular this
 increment neither resumes issue #22 nor treats its existing ledger/unknown
 legacy caps as zero. This conservative compatibility refusal is deliberate;
 the original source, counters and limits remain preserved. Do not copy this
