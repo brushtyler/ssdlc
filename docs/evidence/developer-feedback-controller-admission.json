@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "issue": 39,
+  "increment": "Funded feedback after an exact operator controller admission",
+  "tested_base_commit": "7a001578db7f7b6b118a4a1ee0c4a7506c534079",
+  "implementation_files": {
+    "ssdlc_feedback_roles.py": "1bca4c99a66793a616bb51c232fabb6828197333a2d44f595bc2b7d9c0ea1380",
+    "tests/test_feedback_return.py": "af89d4f99a12eca26a36f06a1678a24cbd4e4982465dfd0418514e08601756ad",
+    "tests/test_feedback_roles.py": "49304f5579a63f978fc4d1a640cd99f96d82264103a5962719f7e9f7bb688530",
+    "docs/developer-feedback.md": "7f8228607dc73d3623814b1207b2d3dfddd3499389e758de30f140af14d5ca8a"
+  },
+  "regression": {
+    "tests": 113,
+    "seconds": 158.328,
+    "exit_code": 0,
+    "scope": "All test_feedback*.py modules; final implementation and tests"
+  },
+  "original_code_counterfactual": {
+    "test": "test_next_workflow_after_operator_upgrade_uses_exact_admission",
+    "result": "FAIL_EXPECTED",
+    "reason": "Original controller fingerprint still required before the next funded consultation",
+    "tests": 1,
+    "seconds": 3.267
+  },
+  "stopped_run_compatibility": {
+    "mode": "Read-only authority inspection; dispatch guard not exercised",
+    "result": "PASS",
+    "provider_calls": 0,
+    "runtime_mutated": false,
+    "grants_execution": false
+  },
+  "verified_cases": [
+    "Second captured failure after an exactly authorized controller upgrade can consult both independent roles within the original allowance",
+    "Original recording authority, historical calls, deadline and development attempts are preserved",
+    "Mismatched limits, profile or selected-projection receipt refuses consultation before funding or model execution",
+    "An admission row without a sealed selected native generation cannot replace the controller"
+  ],
+  "live_provider_calls": 0,
+  "historical_run_activated_or_restarted": false,
+  "limitations": [
+    "Full final-head suite and A5 run in GitHub CI",
+    "Completed-owner scope amendments still require issue38 owner revalidation; this fix does not authorize T12 target expansion",
+    "A changed running controller still requires an exact native admission"
+  ],
+  "omitted": [
+    "Private run paths, raw logs, prompts, credentials and accounting/authorization identifiers"
+  ]
+}

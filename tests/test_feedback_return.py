@@ -185,6 +185,70 @@ class RepairReturnTests(unittest.TestCase):
         activate(self.ticket, staged['preparation'], auth)
         self.assertEqual((self.ticket / 'feedback/task-journal.jsonl').read_bytes(), before)
 
+    def second_failure_after_controller_upgrade(self):
+        staged, auth = self.operator_stage()
+        activate(self.ticket, staged['preparation'], auth)
+        self.root = runtime_root(self.ticket)
+        recipe = json.loads((Path(staged['preparation']) / 'recipe.json').read_text())
+        self.snapshot = recipe['envelope']['binding']['controller']
+        self.identity = TaskJournal(self.root / '03-dev/tasks').peek()['candidate_runtime']
+        old_verify = self.verify
+        def next_verify(argv, cwd, timeout, workspace):
+            path = workspace / 'next.py'
+            if path.exists() and path.read_text() == 'value = 4\n':
+                return ('ERROR: test_next_failure (app.Compatibility.test_next_failure)\n'
+                        '----------------------------------------------------------------------\n'
+                        'Traceback (most recent call last):\n'
+                        '  File "app.py", line 1, in test_next_failure\n'
+                        'AttributeError: another missing helper\n\n'
+                        'Ran 1 test in 0.1s\n\nFAILED (errors=1)\n', '', 1)
+            return old_verify(argv, cwd, timeout, workspace)
+        self.verify = next_verify
+        def developer(task, attempt, prompt, workspace):
+            self.dev_calls.append(attempt)
+            store = LimitsStore(self.root)
+            invocation = store.reserve('03-dev', '03-dev', 'codex')
+            store.finish(invocation, 'returned')
+            (workspace / 'next.py').write_text('value = 4\n')
+            return dict(output='TASK_DEV_STATUS: COMPLETE', exit_code=0, quiescent=True,
+                        engine='codex', model='developer')
+        with self.assertRaisesRegex(TaskError, 'scope hypothesis'):
+            self.scheduler(self.root, developer).run(self.source['plan']['tasks'])
+        outer = json.loads((self.root / 'state.json').read_text())
+        outer['status'] = 'ESCALATED_TO_SUPERVISOR'; atomic_json(self.root / 'state.json', outer)
+        return staged
+
+    def test_next_workflow_after_operator_upgrade_uses_exact_admission(self):
+        self.second_failure_after_controller_upgrade()
+        before = copy.deepcopy(LimitsStore(self.root)._load(repair=False)[1])
+        recording = (self.ticket / 'feedback/authority.json').read_bytes()
+        calls = len(self.role_calls)
+        self.assertEqual(self.run_flow()['disposition'], 'REJECTED_NO_RETRY')
+        self.assertEqual(len(self.role_calls), calls + 2)
+        after = LimitsStore(self.root)._load(repair=False)[1]
+        self.assertEqual(len(after['invocations']), len(before['invocations']) + 2)
+        self.assertTrue(all(after['invocations'][k] == v for k, v in before['invocations'].items()))
+        self.assertEqual(after['deadline_at'], before['deadline_at'])
+        self.assertEqual((self.ticket / 'feedback/authority.json').read_bytes(), recording)
+        self.assertEqual(self.dev_calls, [1, 2])
+        self.assertEqual(TaskJournal(self.root / '03-dev/tasks').peek()['tasks']['T2']['attempts'], 2)
+
+    def test_next_workflow_refuses_mismatched_admission_before_consultation(self):
+        staged = self.second_failure_after_controller_upgrade()
+        store = FeedbackStore(self.ticket)
+        original = store.inspect()
+        calls = list(self.role_calls)
+        counters = LimitsStore(self.root)._load(repair=False)[1]
+        for field in ('limits_sha256', 'profile_sha256', 'projection_sha256'):
+            with self.subTest(field=field):
+                changed = copy.deepcopy(original)
+                changed['admitted_generations'][staged['proposal']['transition_id']][field] = '0' * 64
+                store._append('TEST_ADMISSION_CHANGED', changed)
+                with self.assertRaises(TaskError): self.run_flow()
+                self.assertEqual(self.role_calls, calls)
+                self.assertEqual(LimitsStore(self.root)._load(repair=False)[1], counters)
+                store._append('TEST_ADMISSION_RESTORED', original)
+
     def test_selector_crash_fences_dispatch_and_replays_without_models(self):
         staged, auth = self.operator_stage()
         def crash(point):

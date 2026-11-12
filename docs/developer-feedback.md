@@ -214,6 +214,14 @@ feedback head, exact repair files, controller/environment and preserved native
 accounting. It permits an explicitly approved controller revision, while
 refusing profile/grant changes or a different verification environment.
 
+Subsequent funded consultations recognize that controller revision through
+the exact native admission receipt. The host validates the selected sealed
+generation and completed reconciliation, then matches its projection, complete
+limits envelope (including the controller) and profile against the receipt.
+The original recording authority is preserved. An admission for another
+generation, a mismatched receipt or an unselected runtime cannot authorize a
+controller substitution. Role and global allowances remain cumulative.
+
 ```bash
 python3 orchestrator.py feedback-repair-prepare \
   --repo /path/to/project --ticket TICKET \

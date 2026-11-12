@@ -98,6 +98,22 @@ class FundedFeedbackRoleTests(unittest.TestCase):
         roles = FundedFeedbackRoles(self.fixture.store, other, guard=lambda: None)
         with self.assertRaisesRegex(FeedbackError, 'frozen native authority'):
             roles.run(self.row['request_id'], 'planner', self.metadata, self.runner)
+
+    def test_admission_row_without_native_selection_cannot_replace_controller(self):
+        other = LimitsStore(self.fixture.root / 'unselected', clock=lambda: 100)
+        other.authorize(self.profile, dict(ticket='ISSUE22', controller={'offline': 'substituted'},
+                                          allowed_phases=['03-dev', 'feedback']))
+        envelope = other._load(repair=False)[0]
+        state = self.fixture.store.inspect()
+        state['admitted_generations'] = {'0' * 32: dict(limits_sha256=digest(envelope),
+            profile_sha256=digest(envelope['policy']), projection_sha256='0' * 64)}
+        self.fixture.store._append('TEST_UNSELECTED_ADMISSION', state)
+        roles = FundedFeedbackRoles(self.fixture.store, other, guard=lambda: None)
+        with self.assertRaisesRegex(FeedbackError, 'frozen native authority'):
+            roles.run(self.row['request_id'], 'planner', self.metadata, self.runner)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(other._load(repair=False)[1]['invocations'], {})
+        self.assertEqual(self.fixture.store.inspect()['role_calls'], [])
         self.assertEqual(self.calls, [])
         self.assertEqual(self.fixture.store.inspect()['role_calls'], [])
 
