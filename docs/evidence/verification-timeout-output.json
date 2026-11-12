@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "change": "Preserve partial verifier stdout and stderr when a check times out",
+  "validation": {
+    "command": "PYTHONPATH=tests PYTHONDONTWRITEBYTECODE=1 python3 -m unittest replay.test_timeout_recovery replay.test_candidate_capture test_verification_timeout",
+    "tests": 42,
+    "elapsed_seconds": 19.623,
+    "result": "PASS",
+    "coverage": [
+      "Partial bytes and invalid UTF-8 remain readable in hashed check evidence",
+      "Partial text output remains in check evidence",
+      "Missing partial output still yields a failed check",
+      "Timeout exit code remains 124 and category remains ENVIRONMENT_DIAGNOSIS",
+      "Candidate capture is preserved with no automatic developer retry",
+      "Existing timeout and candidate-capture recovery regressions"
+    ]
+  },
+  "limitations": [
+    "This change does not increase verification timeouts or authorize recovery",
+    "This change does not establish completion of issue 22 or its full test suite"
+  ],
+  "provider_calls": 0
+}

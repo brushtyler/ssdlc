@@ -997,7 +997,16 @@ class TaskScheduler:
                 else:
                     out, err, rc = self.verifier(check['argv'], cwd, check['timeout_sec'])
             except subprocess.TimeoutExpired as exc:
-                out, err, rc = '', f'Verification timeout: {exc}', 124
+                # TimeoutExpired can carry bytes even when the subprocess was
+                # launched in text mode. Keep the partial evidence, including
+                # undecodable output, without treating it as a completed check.
+                out, err = exc.output or '', exc.stderr or ''
+                if isinstance(out, bytes):
+                    out = out.decode('utf-8', errors='replace')
+                if isinstance(err, bytes):
+                    err = err.decode('utf-8', errors='replace')
+                err += f'\nVerification timeout: {exc}'
+                rc = 124
             log = attempt_dir / f'check-{index}.log'
             if exclusive:
                 self._assert_evidence_dir(attempt_dir, task.get('task_id'), check['check_id'])
