@@ -32,4 +32,10 @@ Canonical JSON and a readable summary are written under `bounce-preview/<phase>/
 | 20 | Blocked or rejected |
 | 2 | Invalid CLI usage |
 
-Local `preview_counters` track created, reused, recovered and blocked runs without touching provider accounting. Logs contain selectors, revision, status, reason codes and counts, never finding text or provider payloads. Hashes are unkeyed integrity checks (see [Architecture](architecture.md#integrity-model-and-its-limits)).
+Local `preview_counters` track created, reused, recovered and blocked runs without touching provider accounting. Logs contain selectors, revision, status, reason codes and counts, never finding text or provider payloads.
+
+## Status and limits
+
+Step 3b.2 / PR #13 merged with **397 tests after review fixes**. This increment only prepares targeted bounce: it verifies recorded gate evidence and archives a deterministic preview with `execution_authorized=false`. The following remain pending: repair execution, cumulative recovery, revalidation integration, repeated global gates and advanced-target delivery. Provider accounting is tracked in GH issue #14 and is not implemented here.
+
+Hashes are unkeyed integrity checks, not authentication. Verification provides point-in-time integrity checks; no continuous containment is claimed. A coordinated external rewrite of the integrity chain is outside this protection. See [Architecture](architecture.md#integrity-model-and-its-limits).

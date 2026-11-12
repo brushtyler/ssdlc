@@ -1,20 +1,21 @@
 # Detached supervision
 
-Plain `run`, `plan` and `design` are foreground commands. Detached supervision runs the same entrypoints in the background, under a supervisor that records state, heartbeats and audit events. It is **single-host and Linux-only**, built on `/proc`, flock and pidfds.
+Plain `run`, `plan` and `design` are foreground commands. Detached supervision, introduced by the #16 milestone, runs the same entrypoints in the background, under a supervisor that records state, heartbeats and audit events. It is **single-host and Linux-only**, built on `/proc`, flock and pidfds.
 
 - It provides no distributed ownership.
 - It provides no authentication against a malicious process running under the same user.
 - Fingerprints, including the controller snapshot and the frozen configuration, are unkeyed drift checks, not signatures.
+- There is no GitHub adapter. Remote triggers (#1) and the GitHub lifecycle (#4) are separate issues, and provider accounting is tracked in #14.
 
 ## Commands
 
 ```bash
-python3 orchestrator.py start  --ticket T-1 --goal 'Implement the approved change' --repo . --json
+python3 orchestrator.py start --ticket T-1 --goal 'Implement the approved change' --repo . --json
 python3 orchestrator.py status --ticket T-1 --repo . --json
 python3 orchestrator.py status --recovery-matrix --json
 python3 orchestrator.py cancel --ticket T-1 --repo . --grace 5 --json
-python3 orchestrator.py resume --ticket T-1 --entrypoint run    --from-phase 03-dev --goal 'Implement the approved change' --repo . --json
-python3 orchestrator.py resume --ticket T-1 --entrypoint plan   --review-repairs 2 --repo . --json
+python3 orchestrator.py resume --ticket T-1 --entrypoint run --from-phase 03-dev --goal 'Implement the approved change' --repo . --json
+python3 orchestrator.py resume --ticket T-1 --entrypoint plan --review-repairs 2 --repo . --json
 python3 orchestrator.py resume --ticket T-1 --entrypoint design --rounds 4 --repo . --json
 ```
 
@@ -42,7 +43,7 @@ Upstream approvals, sealed artifact hashes and baseline compatibility still appl
 - Adoption fails closed if any process running under the same user has unreadable `/proc` metadata. A shared host may need a dedicated service user or container.
 
 **Restarting before the controller exists**
-- The operator must supply `--goal` or `--goal-file` again, plus the original `--test-cmd` if one was used.
+- It requires operator resupply of `--goal` or `--goal-file`, plus the original `--test-cmd` if one was used.
 - Raw inputs exist only in the launch pipe and in process memory, and cannot be recovered from a fingerprint.
 
 **Inputs and authority**
@@ -55,7 +56,7 @@ Upstream approvals, sealed artifact hashes and baseline compatibility still appl
 | Classification | Available action |
 | --- | --- |
 | transient_environment_provider | Bounded read-only preflight retry, consuming the persisted recovery allowance. |
-| authentication | Refresh out of band, then explicitly resume or restart. Presence alone is reported as `auth_unverified`; there is no native probe or refresh. |
+| authentication | Refresh out of band, then explicitly resume or restart. Presence alone is reported as `auth_unverified`; there is no shipped native probe or refresh adapter. |
 | integrity | Inspect and reconcile changed or corrupt evidence before an explicit resume. |
 | limits | Explicitly authorize a changed limit; limits are never raised automatically. |
 | code_defect | Task mode only, with a returned, terminal-bound failed check or stalled repair. Inspect the diagnostics; if attempts are exhausted, explicitly authorize a supported resume. |

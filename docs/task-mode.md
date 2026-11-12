@@ -176,6 +176,14 @@ With an explicit quality contract that opts in with `candidate_proof`, determini
 
 The bootstrap stops on review feedback instead of skipping rejected tasks. Approval requires passing global gates, a clean checkpoint and an unchanged, clean target. It then fast-forwards to the verified SHA and preserves the evidence.
 
+## Current limits
+
+- Strict file manifests and automated task checks are required. Scope changes only through explicit, reviewed amendments ([Scope amendments](scope-amendments.md), [Developer feedback](developer-feedback.md)); there is no automatic replanning.
+- Subgoals and automatic plan migrations are rejected. Per-task routing and subgoals are planned in `PLAN_TASK_ROUTING_AND_SUBGOALS.md`.
+- Targeted review bounce is preview-only ([Bounce preview](bounce-preview.md)).
+- Advisory schemas and provenance validation exist; proposal collection, export and `--from-proposal` are not implemented yet.
+- Global review, QA and AppSec still run through the existing pipeline. The complete independent review matrix is a later increment.
+
 ## Validation in Docker
 
 ```bash
