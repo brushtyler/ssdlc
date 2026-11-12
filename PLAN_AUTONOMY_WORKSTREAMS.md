@@ -87,7 +87,15 @@ remains stopped; it grants no new authority to that historical run. Explicit
 I2 feedback-profile admission preserves global caps/attempts/deadline; the first
 delegation policy escalates baseline-test coverage
 changes and unsupported completed-owner recovery rather than silently approving
-them. Issue #38 retains ownership of amendment hardening and owner revalidation.
+them. The #38 owner-revalidation extension binds actual completed owners and
+their check contracts, requires explicit coverage review, and runs fresh owner
+checks on the modified candidate before acceptance. Failure invalidates the
+owner closure and fences dispatch. Automatic delegation additionally requires
+the frozen `owner_revalidation` opt-in; existing recording authorities use an
+exact operator amendment/receipt, with explicit reconciliation of changed
+feedback evidence when necessary. Historical receipts, counters and deadlines
+remain intact. See `docs/developer-feedback.md` for the native contracts and
+remaining completed-task repair boundary.
 
 **A6b: design progress.** Keep the approved requirements catalogue and stable obligation references. Each round supplies a bounded ADR delta, open findings, attempted resolutions and evidence, with access to archived full context rather than repeatedly growing inline prompts. Progress means supported resolution or material new evidence against an obligation; changing hashes, wording or finding IDs alone is not progress. Two consecutive rounds without such progress trigger one bounded diagnosis/prototype step, within the frozen design and ticket invocation limits. Reuse an existing diagnosis allowance where applicable; otherwise reserve a separate named allowance at authorization, never allocate an implicit extra call. A prototype executes in a disposable worker and grants no implementation authority. If the next authorized round still makes no progress, or no allowance remains, stop with the unresolved cases and recommended split/amendment. Uncertainty or missing environment prerequisites do not trigger blind rewrites. The initial five-round design limit is retained unless explicitly changed; no automatic sixth round.
 

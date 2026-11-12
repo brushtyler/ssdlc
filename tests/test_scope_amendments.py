@@ -57,6 +57,10 @@ class ScopeAmendmentTests(unittest.TestCase):
         self.review = dict(subject_sha256=digest(subject(self.source, self.plan, self.reason)),
                            reviewer='independent offline reviewer', report=dict(verdict='APPROVED', findings=[]),
                            scope_diff={'T2': {'added': ['app.py'], 'removed': []}})
+        owners = subject(self.source, self.plan, self.reason).get('owner_revalidation')
+        if owners:
+            self.review['owner_coverage'] = dict(contract_sha256=digest(owners),
+                coverage_preserved=True, approved_test_changes=[])
 
     def scheduler(self, root, developer):
         envelope, _ = LimitsStore(root)._load(repair=False)

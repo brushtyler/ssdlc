@@ -26,6 +26,10 @@ CONTRACT = 'feedback-scope-delegation-v1'
 def validate_grant(grant):
     fields = {'schema_version', 'capability', 'allowed_files', 'max_amendments',
               'max_amendments_per_task', 'max_added_files', 'require_strong_independence'}
+    if isinstance(grant, dict) and 'owner_revalidation' in grant:
+        fields.add('owner_revalidation')
+        if grant['owner_revalidation'] is not True:
+            raise FeedbackError('Owner revalidation delegation must be explicitly enabled')
     if (not isinstance(grant, dict) or set(grant) != fields
             or type(grant['schema_version']) is not int or grant['schema_version'] != 1
             or grant['capability'] != CONTRACT or grant['require_strong_independence'] is not True
@@ -144,11 +148,14 @@ def require_capacity(state, row, profile):
         return
     validate_grant(grant)
     paths = row['request']['requested_files']
-    if any(row['path_classes'][path]['kind'] not in {'NEW_FILE', 'UNOWNED_SOURCE'} for path in paths):
+    kinds = {'NEW_FILE', 'UNOWNED_SOURCE'}
+    if grant.get('owner_revalidation'):
+        kinds |= {'COMPLETED_SOURCE', 'COMPLETED_TEST'}
+    if any(row['path_classes'][path]['kind'] not in kinds for path in paths):
         return  # Explicit consultations may still diagnose an operator-only case.
     if not set(paths) <= set(grant['allowed_files']):
         raise FeedbackError('Requested scope is outside frozen delegation; operator required')
-    prior = state['amendments']
+    prior = list(state['amendments']) + list(state.get('owner_amendments', []))
     own = next((a for a in prior if a['request_id'] == row['request_id']), None)
     count, additions = (0, 0) if own else (1, len(paths))
     if (len(prior) + count > grant['max_amendments']
@@ -173,7 +180,8 @@ def validate_proof(proof):
             or authority['policy']['require_strong_independence'] is not True):
         raise FeedbackError('Delegation recording authority changed')
     if (row['status'] != 'REVIEWED' or row['request']['cause'] != 'MISSING_TARGET'
-            or row.get('source_reconciliation_required', True) or class_disposition(row)
+            or row.get('source_reconciliation_required', True)
+            or class_disposition(row, owner_revalidation=grant.get('owner_revalidation', False))
             or row['proposal']['route'] != 'AMENDMENT' or row['review']['verdict'] != 'APPROVED'
             or row['review']['coverage_preserved'] is not True
             or row['review']['proposal_sha256'] != row['proposal_sha256']):
@@ -186,7 +194,7 @@ def validate_proof(proof):
     paths = row['proposal']['requested_files']
     if not paths or not set(paths) <= set(grant['allowed_files']):
         raise FeedbackError('Delegated paths exceed the frozen grant')
-    amendments = state['amendments']
+    amendments = list(state['amendments']) + list(state.get('owner_amendments', []))
     slots = [s for s in amendments if s['request_id'] == identity]
     if (len(slots) != 1 or slots[0]['status'] != 'RESERVED'
             or slots[0]['proposal_sha256'] != proposal_sha or slots[0]['paths'] != paths
@@ -195,6 +203,9 @@ def validate_proof(proof):
             or sum(len(s['paths']) for s in amendments) > grant['max_added_files']):
         raise FeedbackError('Delegated cumulative amendment quota exhausted or changed')
     current = proof['technical_subject']
+    if 'owner_revalidation' in current:
+        from ssdlc_owner_revalidation import validate_review
+        validate_review(current['owner_revalidation'], row['review'].get('owner_coverage'))
     anchor = row['accounting_anchor']
     from ssdlc_feedback_bindings import ACCOUNTING_REFS
     if (current['accounting_authority_sha256'] != digest(proof['envelope'])
@@ -343,6 +354,8 @@ def finalize(session, proposal, recipe, selected, *, fault=lambda point: None):
 
 def ensure_reconciled(ticket, projection, proposal):
     """Read-only native entrypoint fence, including crash after selector replace."""
+    from ssdlc_owner_revalidation import ensure_reconciled as owners_reconciled
+    owners_reconciled(ticket, projection, proposal)
     if proposal.get('authorization_contract') != CONTRACT:
         from ssdlc_feedback_return import ensure_reconciled as return_reconciled
         return_reconciled(ticket, projection, proposal)
@@ -380,7 +393,9 @@ def descendant_of(ticket, root, ancestor, *, pointer=None):
         intent = json.loads(_regular(store.root / identity, 'intent.json').read_text())
         proposal = intent['proposal']
         from ssdlc_feedback_return import CONTRACTS as RETURN_CONTRACTS
-        if proposal.get('authorization_contract') not in {CONTRACT, *RETURN_CONTRACTS}:
+        if (proposal.get('authorization_contract') not in {CONTRACT, *RETURN_CONTRACTS}
+                and not (proposal.get('authorization_contract') == 'scope-amendment-v1'
+                         and 'owner_feedback_sha256' in proposal)):
             return False
         ensure_reconciled(ticket, projection, proposal)
         recipe = json.loads(_regular(store.root / identity, 'recipe.json').read_text())

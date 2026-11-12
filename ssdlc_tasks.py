@@ -970,7 +970,7 @@ class TaskScheduler:
         self._assert_evidence_dir(path)
 
     def _verify(self, task: dict, record: dict, attempt_dir: Path, event='CHECK_FINISHED',
-                before_check=None, after_check=None, exclusive=False) -> list[dict]:
+                before_check=None, after_check=None, exclusive=False, reuse=None) -> list[dict]:
         checks = self._check_plan(task)
         results = []
         for index, check in enumerate(checks):
@@ -979,6 +979,18 @@ class TaskScheduler:
             cwd = confined(self.wt, check['cwd'])
             if before_check is not None:
                 before_check(index, check['check_id'])
+            if reuse is not None and digest(check) in reuse:
+                observed = copy.deepcopy(reuse[digest(check)])
+                _, reason = self._resolve_evidence(observed['log_ref'], observed['sha256'])
+                if reason:
+                    raise TaskError('Shared candidate verification evidence changed')
+                results.append(observed)
+                record['checks'] = results
+                self._save(event)
+                if after_check is not None:
+                    after_check(index, observed)
+                self.guard(); self.budget()
+                continue
             try:
                 if self.isolate_candidates:
                     out, err, rc = self._isolated_check(check, cwd)
@@ -1014,6 +1026,8 @@ class TaskScheduler:
             results.append({'check_id': check['check_id'], 'exit_code': rc, 'empty_suite': empty,
                             'log_ref': str(log.relative_to(self.directory)), 'sha256': file_hash(log)})
             record['checks'] = results
+            if reuse is not None:
+                reuse[digest(check)] = copy.deepcopy(results[-1])
             self._save(event)
             if after_check is not None:
                 after_check(index, results[-1])
@@ -1115,6 +1129,8 @@ class TaskScheduler:
                             or any(c['exit_code'] != 0 or c['empty_suite'] for c in attempt['checks'])
                             or attempt['head'] != self.state.get('expected_head') or not attempt['tree']):
                         problem('invalid_supporting_attempt', path=attempt['dir'])
+            from ssdlc_owner_revalidation import evidence_problems
+            problems.extend(evidence_problems(self, task_id, record))
         except (PlanError, OSError, RuntimeError, KeyError, TypeError, ValueError, UnicodeDecodeError):
             problem('malformed_record')
         return problems
@@ -1188,6 +1204,10 @@ class TaskScheduler:
             context['scope_hint'] = repair_hint(self, task, record)
         if self._scope_reconciled(record):
             context['scope_amendment'] = copy.deepcopy(record['scope_reconciliation'])
+            if 'owner_revalidation' in context['scope_amendment']:
+                from ssdlc_owner_revalidation import prompt_summary
+                context['scope_amendment']['owner_revalidation'] = prompt_summary(
+                    context['scope_amendment']['owner_revalidation'])
         context['history'] = [{k: item[k] for k in ('attempt', 'category', 'checks', 'diff_ref', 'diff_sha256')}
                               for item in failures]
         remaining = 24000
@@ -1599,6 +1619,10 @@ class TaskScheduler:
             self._save('CAPTURE_VERIFICATION_STARTED')
             verification_dir.mkdir(exist_ok=False)
         results = self._verify(task, record, verification_dir) if not blocker else []
+        if not blocker and all(r['exit_code'] == 0 and not r['empty_suite'] for r in results):
+            from ssdlc_owner_revalidation import verify as verify_owners
+            if not verify_owners(self, task, record, verification_dir, changed):
+                blocker = 'OWNER_REVALIDATION_FAILED'
         self._assert_tree()
         if (self._protected() != record['protected_snapshot'] or self._changed() != changed
                 or self._source_signature(changed) != source_signature
@@ -1614,6 +1638,8 @@ class TaskScheduler:
             if stage:
                 git(self.wt, 'add', '--', *stage)
         tree = git(self.wt, 'write-tree')
+        from ssdlc_owner_revalidation import stamp as stamp_owner_checks
+        stamp_owner_checks(record, tree)
         diff = git(self.wt, 'diff', '--cached', '--binary')
         (attempt_dir / 'implementation.diff').write_text(diff)
         if not blocker and all(r['exit_code'] == 0 and not r['empty_suite'] for r in results):
@@ -1671,6 +1697,9 @@ class TaskScheduler:
         inputs = digest({'plan': self.plan, 'quality': self.quality, 'context': self.context})
         peeked = self.journal.peek()
         if peeked is not None:
+            if peeked.get('owner_revalidation_blocked'):
+                raise DevelopmentBlocked('OWNER_REVALIDATION_FAILED',
+                    'Owner coverage or checks failed; preserve evidence and use explicit completed-task recovery')
             invalid = [tid for tid, rec in peeked['tasks'].items() if rec.get('status') == 'INVALIDATED']
             if invalid:
                 raise TaskError('Invalidated work cannot be run until a future revalidation API exists: '

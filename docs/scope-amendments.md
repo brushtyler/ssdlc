@@ -1,5 +1,15 @@
 # Explicit scope amendments after a checkpoint
 
+Added targets that were changed by a completed task now carry the native
+[owner-revalidation contract](developer-feedback.md#completed-owner-scope-recovery-38).
+Preview lists the owners and check obligations; preparation requires explicit
+owner coverage review. The scheduler verifies those owners on the amended
+candidate before accepting the introducing task. Existing feedback requests
+can be bound through `--feedback-request`, with exact operator authorization
+and no repeated model calls. A changed overall feedback-evidence hash requires
+the separately declared `--reconcile-feedback-evidence` path; semantic inputs
+and recorded request evidence must remain unchanged.
+
 Offline validation and its limits are recorded in
 [the sanitized validation summary](evidence/post-checkpoint-scope-validation.json).
 
