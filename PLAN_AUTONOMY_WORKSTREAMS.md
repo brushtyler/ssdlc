@@ -82,9 +82,10 @@ A6a compatibility is explicit: I1 implements only pre-checkpoint import. The pos
 Issue #39 adds the developer-to-planner/reviewer feedback loop in three increments:
 F1 recording and conservative diagnosis, F2 funded delegation/native activation,
 and F3 supervisor/GitHub integration. The implementation contract and current
-boundaries are in `docs/developer-feedback.md`. Offline F1 development is brought
-forward while #22 remains stopped; it grants no new authority to that historical
-run. The first proposed delegation policy escalates baseline-test coverage
+boundaries are in `docs/developer-feedback.md`. The F1–F3 opt-in implementation is developed and verified offline while #22
+remains stopped; it grants no new authority to that historical run. Explicit
+I2 feedback-profile admission preserves global caps/attempts/deadline; the first
+delegation policy escalates baseline-test coverage
 changes and unsupported completed-owner recovery rather than silently approving
 them. Issue #38 retains ownership of amendment hardening and owner revalidation.
 

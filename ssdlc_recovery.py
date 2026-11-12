@@ -15,6 +15,9 @@ STOPS = {
 
 
 def validate_feedback_profile(policy):
+    if 'feedback_workflow' in policy:
+        from ssdlc_feedback_workflow import workflow
+        workflow(policy)
     if 'feedback_delegation' in policy:
         from ssdlc_feedback_delegation import validate_grant
         validate_grant(policy['feedback_delegation'])

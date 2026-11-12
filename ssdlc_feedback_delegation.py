@@ -161,11 +161,10 @@ def validate_proof(proof):
     state, identity = proof['state'], proof['request_id']
     row = state['requests'][identity]
     authority = proof['recording_authority']
-    from ssdlc_feedback import validate_policy, exact_authorization
+    from ssdlc_feedback import validate_policy, validate_recording_authority
     validate_policy(authority['policy'])
-    expected = dict(schema_version=1, policy_sha256=digest(authority['policy']), authorized=True, source_fenced=True)
+    validate_recording_authority(authority['policy'], authority['authorization'])
     if (authority['status'] != 'ACTIVE' or state['policy_sha256'] != digest(authority['policy'])
-            or not exact_authorization(authority['authorization'], expected)
             or authority['policy']['require_strong_independence'] is not True):
         raise FeedbackError('Delegation recording authority changed')
     if (row['status'] != 'REVIEWED' or row['request']['cause'] != 'MISSING_TARGET'
@@ -328,7 +327,9 @@ def finalize(session, proposal, recipe, selected, *, fault=lambda point: None):
                 or digest(inventory(runtime / 'worktree')) != recipe['runtime_worktree_sha256']):
             raise FeedbackError('Unreconciled delegated runtime changed')
         slot.update(status='APPLIED', transition_id=transition)
-        row.update(status='APPLIED', transition_id=transition)
+        row.update(status='APPLIED', transition_id=transition, applied_at=store.clock(),
+                   amendment_subject_sha256=digest(proof['technical_subject']),
+                   new_plan_sha256=proof['technical_subject']['new_plan_sha256'])
         state.setdefault('admitted_generations', {})[transition] = admission
         fault('before_feedback_reconciliation')
         store._append('FEEDBACK_NATIVE_AMENDMENT_APPLIED', state)
@@ -355,3 +356,29 @@ def admitted(state, source):
     return bool(entry and entry['limits_sha256'] == digest(source['envelope'])
                 and entry['profile_sha256'] == digest(source['envelope']['policy'])
                 and entry['projection_sha256'] == digest(source['projection']))
+
+
+def descendant_of(ticket, root, ancestor, *, pointer=None):
+    from ssdlc_transitions import TransitionStore
+    ticket, root, ancestor = Path(ticket), Path(root), Path(ancestor)
+    store = TransitionStore(ticket / 'execution')
+    pointer = pointer or json.loads(_regular(store.root, 'active.json').read_text())
+    seen = set()
+    while root != ancestor:
+        identity = pointer['transition_id']
+        if identity in seen or len(seen) >= 1000 or root != ticket / 'execution-runtimes' / identity:
+            return False
+        seen.add(identity)
+        projection = store.load_pointer(pointer)
+        intent = json.loads(_regular(store.root / identity, 'intent.json').read_text())
+        proposal = intent['proposal']
+        if proposal.get('authorization_contract') != CONTRACT:
+            return False
+        ensure_reconciled(ticket, projection, proposal)
+        recipe = json.loads(_regular(store.root / identity, 'recipe.json').read_text())
+        root = Path(recipe['source_root'])
+        pointer = proposal['parent_selector']
+        parent = store.load_pointer(pointer)
+        if root != ticket / 'execution-runtimes' / parent['transition_id']:
+            return False
+    return True

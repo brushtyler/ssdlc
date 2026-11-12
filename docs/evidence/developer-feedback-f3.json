@@ -1,0 +1,115 @@
+{
+  "schema_version": 1,
+  "issue": 39,
+  "increment": "F3 first opt-in policy: native workflow, supervisor, host GH projections and explicit I2 admission",
+  "tested_base_commit": "f117fe1e636b7523f30ead64120badfe37e49a61",
+  "implementation_files": {
+    "orchestrator.py": "c80942d1f22380e1a199904362a4f01e5791d63ed491f1f884c31dfe02236d66",
+    "schemas/recovery-limits.schema.json": "efbdfbe26e1b3d8c4b31b75aea1b7051fb1f0a2e85913f748abcd5f010bb5d99",
+    "ssdlc_feedback.py": "82f79aeeb02d650f0d9a41e22af3a899c161dd01b72ef89b227d45b5d8c44e2c",
+    "ssdlc_feedback_admission.py": "7079a27407f9a948edd13fe65c4cb5bea40af15c21e89d6aeddda4f034113969",
+    "ssdlc_feedback_delegation.py": "79de3fea0a72267546932aaaadd6a85575f9ce13e727e8e92cb6b41fbdbd4205",
+    "ssdlc_feedback_delivery.py": "6519b36126986cb38c2c211aeb3b9a1823c8e773724cab195f77a54dca435cfc",
+    "ssdlc_feedback_roles.py": "65e2c3ae136ba20fa8147078834aac947389da9f84affcb3550a1936aaa7343d",
+    "ssdlc_feedback_workflow.py": "035f6194cca81680c436b5e6f1f36e87877afb3e2a2de53f6908e891c6d08655",
+    "ssdlc_recovery.py": "1d256f18b8eb21c1bc3e89cf3b9877c1aea81c3897eb0d22aca398ae6c377918",
+    "ssdlc_scope_amendments.py": "e320f4080b6309daeb60be3dd554b0da6ffbcc1ab958859fea4099c1a58ad3e9",
+    "ssdlc_supervisor.py": "7d371593d99d47cfa5d8aaf02871e0ef1e521c8e26316e512b06291c05668556",
+    "ssdlc_tasks.py": "a86b1a64caf326d1a63066cd3be255d453fd927514d815c4cb2024e3eb23b667",
+    "ssdlc_transitions.py": "32531bb556b055b3a671760348d74ec4784ffa2d6c97600c9b9b8144ea5ecb98",
+    "tests/test_feedback_admission.py": "41eb775298664d124712eca768f944ba4a9c4aedfd0a7e59f128e81d956eeaf8",
+    "tests/test_feedback_boundaries.py": "1bbf492c52723d561d37988f151bac4722be59ed9e434321664a8af5fd9c937b",
+    "tests/test_feedback_delivery.py": "460e8fa48a9b108c69f3da74afe092b90c4be07b8624b9714f83618ad3b8044e",
+    "tests/test_feedback_workflow.py": "c825b1d5152143b9ad5b464363436a6f546ff6e06326cef6973810de25b3aa25"
+  },
+  "full_suite": {
+    "tests": 1052,
+    "test_seconds": 474.344,
+    "wall_seconds": 475.183,
+    "exit_code": 0,
+    "scope": "Complete implementation before final explicit prepaid clone-root pin; that final isolated change is covered by the direct regression below and full head CI"
+  },
+  "final_clone_root_isolation_regression": {
+    "tests": 1,
+    "seconds": 1.578,
+    "exit_code": 0,
+    "case": "Unrelated ancestor .ssdlc directory must not broaden feedback source mount or expose host configuration"
+  },
+  "workflow_and_evidence_regression": {
+    "tests": 14,
+    "seconds": 31.425,
+    "exit_code": 0
+  },
+  "publication_regression": {
+    "tests": 8,
+    "exit_code": 0
+  },
+  "isolated_a5": {
+    "cases": 12,
+    "failed_cases": 0,
+    "scope": "Semantic engine/checkpoint and expected-stop benchmark; not live model quality or ready-PR delivery certification"
+  },
+  "container_cli_metadata": {
+    "kind": "metadata-only, no credentials or inference",
+    "engines": [
+      {
+        "engine": "codex",
+        "exit_code": 0,
+        "version": "0.167.1"
+      },
+      {
+        "engine": "claude",
+        "exit_code": 0,
+        "version": "2.1.322"
+      },
+      {
+        "engine": "agy",
+        "exit_code": 0,
+        "version": "1.5.6"
+      }
+    ],
+    "status": "complete"
+  },
+  "live_provider_inference_calls": 0,
+  "historical_issue22_changed": false,
+  "real_in_contract_tests": [
+    "Native task/accounting journals and captured candidate receipts",
+    "Git checkpoints, worktrees and source restore",
+    "Kernel locks, native selector publication and canonical quota reconciliation",
+    "Native scheduler boundary and orchestrator runtime adoption",
+    "Fresh Evidence Pack summary registration/current checksums on repeated compilation"
+  ],
+  "simulated_in_contract_tests": [
+    "Role responses and provider usage in workflow fixtures",
+    "External controller/Docker observations in contract tests",
+    "Remote GitHub comments, identity and uncertain POST outcomes"
+  ],
+  "verified_cases": [
+    "Bootstrap recording authority from explicit frozen grant without fabricated human attestation",
+    "Funded CLI consultation uses one reservation and retains supervisor events",
+    "Captured response resumes without repeating inference; uncertain outcome refuses retry",
+    "Invalid CLI JSON preserves bounded raw output/hash and observed cost",
+    "Captured all-outside failure stops before the next developer reservation/preflight",
+    "Approved scope amendment rebinds orchestrator and consumes the next normal development attempt",
+    "Supervisor follows only reconciled sealed descendants; observes pending parent without dispatch authority",
+    "Existing I2 admission requires exact operator authorization and preserves scope/global limits/time/attempts",
+    "Host GH projection excludes paths/task names/raw AI text; uncertain old POST blocks new publication",
+    "Foreign/changed comments, deleted authors, malformed remote JSON and timeouts do not authorize repost",
+    "Prerequisite cycles refused; child execution and unsupported return never alter native DAG",
+    "Requirement conflict can consult funded PO but still needs operator",
+    "Host timing/usage/coverage/provenance summary; unknown historical telemetry remains unknown"
+  ],
+  "first_policy_boundaries": [
+    "Baseline and completed tests require operator coverage decision",
+    "Completed ownership recovery remains #38",
+    "No implicit child GH issue/run/DAG insertion or supported return; native intake/transition required",
+    "No replacement of an already initialized incompatible feedback ledger",
+    "No budget/deadline extension, auto-merge or silent historical22 migration",
+    "Live provider authentication/model quality and rollout comparison require separate authorized evaluation"
+  ],
+  "omitted": [
+    "Private runtime paths, payloads, receipts and source bindings",
+    "Raw provider/check logs and full prompts",
+    "Credentials, account identifiers and local configuration"
+  ]
+}

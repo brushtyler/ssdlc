@@ -164,7 +164,7 @@ def subject(source, plan, reason):
 
 
 def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_snapshot,
-            guard=lambda: None, clock=time.time, fault=lambda point: None, held_locks=(), delegation=None):
+            guard=lambda: None, clock=time.time, fault=lambda point: None, held_locks=(), delegation=None, profile_update=None):
     """Stage a reviewed amendment, retaining all prior generations and counters."""
     from ssdlc_preparations import unfinished, register, update, pending, clear_pending
     from ssdlc_candidates import inventory
@@ -175,9 +175,11 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
     with transition_lock(ticket / 'ticket.lock', held_locks):
         if unfinished(ticket, namespace='execution'):
             raise TransitionError('Earlier preparation requires native discard')
-        source = inspect(ticket, allow_host_hints=delegation is not None)
+        source = inspect(ticket, allow_host_hints=delegation is not None or profile_update is not None)
         with transition_lock(source['root'] / '03-dev/tasks/scheduler.lock', held_locks):
             guard()
+            if profile_update is not None and delegation is not None:
+                raise TransitionError('Profile admission cannot use scope delegation')
             if delegation is not None:
                 from ssdlc_feedback_delegation import build_proof, FencedSession
                 from ssdlc_feedback import FeedbackStore
@@ -189,14 +191,18 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                 feedback = FeedbackStore(ticket)
                 reason = feedback.inspect()['requests'][request_id]['proposal']['reason_code']
                 review = build_proof(session, source, plan, reason, feedback, request_id)
-            reviewed = subject(source, plan, reason)
-            if delegation is None and (not isinstance(review, dict) or set(review) != {'subject_sha256', 'reviewer', 'report', 'scope_diff'}
+            if profile_update is not None:
+                from ssdlc_feedback_admission import subject as admission_subject
+                reviewed = admission_subject(source, plan, profile_update, reason)
+            else:
+                reviewed = subject(source, plan, reason)
+            if delegation is None and profile_update is None and (not isinstance(review, dict) or set(review) != {'subject_sha256', 'reviewer', 'report', 'scope_diff'}
                     or not isinstance(review['reviewer'], str) or not review['reviewer'].strip()
                     or review['subject_sha256'] != digest(reviewed)):
                 raise TransitionError('Independent review must bind the exact amendment subject')
             validator = TaskPlanValidator(source['root'] / 'worktree', source['context'][CONTEXT[0]],
                                           source['quality'], source['root'])
-            if delegation is None:
+            if delegation is None and profile_update is None:
                 validate_amendment(source['plan'], plan, json.dumps(review['report']), validator.validate,
                                    validator.requirement_catalogue['required_ids'], source['quality'],
                                    declared_scope=review['scope_diff'])
@@ -227,13 +233,19 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                 current.update(candidate_runtime=runtime_identity, historical_capture_bindings=source['capture_bindings'],
                                inputs_sha256=digest(dict(plan=plan, quality=source['quality'], context=source['context'])))
                 row = current['tasks'][source['task_id']]
-                reconciliation = dict(task_id=source['task_id'], failure_sha256=digest(row['failed_attempts'][-1]),
-                                      plan_sha256=digest(plan), subject_sha256=digest(reviewed), reason=reason)
-                if 'scope_reconciliation' in row:
-                    row.setdefault('scope_reconciliation_history', []).append(row['scope_reconciliation'])
-                row['scope_reconciliation'] = reconciliation
+                if profile_update is None:
+                    reconciliation = dict(task_id=source['task_id'], failure_sha256=digest(row['failed_attempts'][-1]),
+                                          plan_sha256=digest(plan), subject_sha256=digest(reviewed), reason=reason)
+                    if 'scope_reconciliation' in row:
+                        row.setdefault('scope_reconciliation_history', []).append(row['scope_reconciliation'])
+                    row['scope_reconciliation'] = reconciliation
                 scope = {tid: r['scope_reconciliation'] for tid, r in current['tasks'].items() if 'scope_reconciliation' in r}
                 envelope, counters = copy.deepcopy(source['envelope']), copy.deepcopy(source['counters'])
+                if profile_update is not None:
+                    envelope['policy'] = copy.deepcopy(profile_update)
+                    phases = envelope['binding'].setdefault('allowed_phases', [])
+                    if 'feedback' not in phases:
+                        phases.append('feedback')
                 envelope['binding'].update(controller=controller_snapshot, reconciliation_id=identity,
                     historical_capture_bindings_sha256=digest(source['capture_bindings']), scope_reconciliations=scope,
                     historical_invocations=copy.deepcopy(counters['invocations']),
@@ -288,6 +300,9 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                 if delegation is not None:
                     from ssdlc_feedback_delegation import CONTRACT
                     proposal.update(authorization_contract=CONTRACT, delegation_sha256=digest(review))
+                if profile_update is not None:
+                    from ssdlc_feedback_admission import CONTRACT as PROFILE_CONTRACT
+                    proposal.update(authorization_contract=PROFILE_CONTRACT, profile_sha256=digest(profile_update))
                 atomic_json(prepared / 'proposal.json', proposal)
                 guard(); sync_tree(runtime); sync_tree(prepared)
                 pending(ticket, identity, namespace='execution')
@@ -307,8 +322,9 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
     proposal, recipe = _read(preparation, 'proposal.json'), _read(preparation, 'recipe.json')
     from ssdlc_feedback_delegation import CONTRACT, FencedSession, finalize
     delegated = proposal.get('authorization_contract') == CONTRACT
+    profile_admission = proposal.get('authorization_contract') == 'feedback-profile-admission-v1'
     if (preparation != ticket / 'execution' / ('prepared-' + proposal['transition_id'])
-            or proposal.get('authorization_contract') not in {'scope-amendment-v1', CONTRACT}
+            or proposal.get('authorization_contract') not in {'scope-amendment-v1', CONTRACT, 'feedback-profile-admission-v1'}
             or delegated and (not isinstance(delegation, FencedSession) or delegation.ticket != ticket
                               or delegation.root != Path(recipe['source_root']))
             or not delegated and delegation is not None):
@@ -328,7 +344,7 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
             update(ticket, proposal['transition_id'], namespace='execution', status='ACTIVE')
             clear_pending(ticket, proposal['transition_id'], namespace='execution')
             return selected
-        source = inspect(ticket, allow_host_hints=delegated)
+        source = inspect(ticket, allow_host_hints=delegated or profile_admission)
         with transition_lock(source['root'] / '03-dev/tasks/scheduler.lock', held_locks):
             if delegated:
                 from ssdlc_feedback_delegation import build_proof
@@ -341,6 +357,10 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
                 proof['fence'] = recipe['review']['fence']
                 if proof != recipe['review']:
                     raise TransitionError('Delegated feedback changed after preparation')
+            if profile_admission:
+                from ssdlc_feedback_admission import subject as admission_subject
+                if admission_subject(source, source['plan'], recipe['envelope']['policy'], recipe['subject']['reason']) != recipe['subject']:
+                    raise TransitionError('Profile admission source changed')
             if (source['parent_selector'] != proposal['parent_selector'] or source['files'] != proposal['source_files']
                     or str(source['root']) != recipe['source_root'] or source['worktree_sha256'] != recipe['source_worktree_sha256']):
                 raise TransitionError('Parent generation changed after amendment review')
@@ -350,6 +370,8 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
             seal = _read(preparation, 'runtime-seal.json')
             if _files(runtime) != seal: raise TransitionError('Prepared runtime changed')
             envelope, counters = LimitsStore(runtime, clock)._load(repair=False)
+            if profile_admission and digest(envelope['policy']) != proposal['profile_sha256']:
+                raise TransitionError('Admitted feedback profile changed')
             tasks = TaskJournal(runtime / '03-dev/tasks').peek()
             if (envelope != recipe['envelope'] or counters != recipe['counters'] or tasks != recipe['journal_state']
                     or _read(runtime, 'state.json')['ledger'] != recipe['ledger']

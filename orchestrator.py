@@ -22,6 +22,7 @@ import datetime as dt
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -167,6 +168,23 @@ def _bounded_entrypoint(fn):
     return wrapped
 
 
+@contextlib.contextmanager
+def _prepaid_feedback(limits, invocation, role, engine):
+    """Borrow one existing reservation; the feedback recorder owns its finish."""
+    if (role not in {'feedback-diagnosis','feedback-planner','feedback-reviewer','feedback-po'}
+            or getattr(_dispatch_local, 'prepaid', None) is not None or getattr(_dispatch_local, 'depth', 0)):
+        raise TaskError('Nested prepaid dispatch is forbidden')
+    old_limits = getattr(_dispatch_local, 'limits', None)
+    token = dict(limits=limits, invocation=invocation, role=role, engine=engine, consumed=False)
+    _dispatch_local.limits, _dispatch_local.prepaid = limits, token
+    try:
+        yield
+        if not token['consumed']:
+            raise TaskError('Prepaid feedback adapter did not dispatch')
+    finally:
+        _dispatch_local.prepaid, _dispatch_local.limits = None, old_limits
+
+
 def _supervised_dispatch(fn):
     signature = inspect.signature(fn)
     @functools.wraps(fn)
@@ -197,12 +215,23 @@ def _supervised_dispatch(fn):
                          if requested == r or requested.startswith(r + '-')), requested)
             phase = next((p for p in sorted(policy['phase_invocations'], key=len, reverse=True)
                           if requested == p or requested.startswith(p + '-')), requested)
-        reservation = limits.reserve(role, phase, engine) if limits is not None else None
+        prepaid = getattr(_dispatch_local, 'prepaid', None)
+        if prepaid is not None:
+            row = limits._load(repair=False)[1]['invocations'].get(prepaid['invocation'])
+            if (prepaid['consumed'] or prepaid['limits'] is not limits or prepaid['engine'] != engine
+                    or row is None or row['status'] != 'reserved' or row['engine'] != engine
+                    or row['role'] != prepaid['role'] or row['phase'] != 'feedback'):
+                raise TaskError('Prepaid feedback reservation does not match dispatch')
+            prepaid['consumed'] = True
+            role, phase = prepaid['role'], 'feedback'
+            fields['phase'] = phase
+        reservation = (prepaid['invocation'] if prepaid else limits.reserve(role, phase, engine)) if limits is not None else None
         dispatch_id = uuid.uuid4().hex
         if supervised and not _supervision_event('dispatch_started', dispatch_id=dispatch_id, engine=engine, **fields):
             if limits is not None:
                 from ssdlc_recovery import NotDispatched
-                limits.finish(reservation, 'not_dispatched')
+                if prepaid is None:
+                    limits.finish(reservation, 'not_dispatched')
                 raise NotDispatched('INTEGRITY', 'Supervisor dispatch intent unavailable; engine not launched')
             from ssdlc_supervisor import SupervisorIntegrityError
             raise SupervisorIntegrityError('filesystem_integrity')
@@ -212,14 +241,14 @@ def _supervised_dispatch(fn):
             result = fn(*args, **kwargs)
         except BaseException as exc:
             _supervision_event('dispatch_finished', dispatch_id=dispatch_id, outcome='raised', exc_type=type(exc).__name__)
-            if limits is not None:
+            if limits is not None and prepaid is None:
                 from ssdlc_recovery import NotDispatched, QuiescentTimeout
                 outcome = ('not_dispatched' if isinstance(exc, NotDispatched) else
                            'terminated' if isinstance(exc, QuiescentTimeout) else 'uncertain')
                 limits.finish(reservation, outcome)
             raise
         else:
-            if limits is not None:
+            if limits is not None and prepaid is None:
                 from ssdlc_recovery import observed_usage
                 limits.finish(reservation, 'returned', observed_usage(engine, fn.__name__, result))
             _supervision_fault('dispatch.after_engine_before_finished')
@@ -960,7 +989,7 @@ class EngineRunner:
           - Enforces --security-opt no-new-privileges:true, --pids-limit, --memory, and --cpus.
           - Strips AI API keys when pass_ai_keys=False (e.g., when running untrusted unit tests).
         """
-        repo_root = EngineRunner._find_repo_root(cwd)
+        repo_root = cwd.resolve() if getattr(_dispatch_local, 'prepaid', None) else EngineRunner._find_repo_root(cwd)
         if auth_profile not in (None, "agy"):
             raise TaskError("Unsupported role authentication profile")
         runtime_dir = repo_root / ".ssdlc" / ".runtime"
@@ -1005,6 +1034,8 @@ class EngineRunner:
         # read-only protection as a normal checkout's .git directory.
         git_mounts = set()
         for checkout in (repo_root, ssdlc_home):
+            if getattr(_dispatch_local, 'prepaid', None) and checkout == ssdlc_home:
+                continue  # Feedback never needs the toolkit's private Git database.
             if (checkout / '.git').is_file():
                 common = Path(git(checkout, 'rev-parse', '--path-format=absolute', '--git-common-dir')).resolve()
                 if common not in git_mounts:
@@ -1055,10 +1086,11 @@ class EngineRunner:
         # Auto-mount host subscriptions into container as read-only (zero host pollution)
         # Claude Max auth
         host_claude_json = Path.home() / ".claude.json"
-        if pass_ai_keys and safe_is_file(host_claude_json):
+        if pass_ai_keys and safe_is_file(host_claude_json) and not getattr(_dispatch_local, 'prepaid', None):
             docker_cmd.extend(["-v", f"{host_claude_json}:/root/.claude.json:ro"])
         host_claude_cred = Path.home() / ".claude" / ".credentials.json"
-        if pass_ai_keys and safe_is_file(host_claude_cred):
+        if (pass_ai_keys and safe_is_file(host_claude_cred)
+                and (not getattr(_dispatch_local, 'prepaid', None) or _dispatch_local.prepaid['engine'] == 'claude')):
             docker_cmd.extend([
                 "-v", f"{host_claude_cred}:/root/.claude/.credentials.json:ro",
                 "--tmpfs", "/root/.cache/claude-cli-nodejs:rw",
@@ -1069,7 +1101,8 @@ class EngineRunner:
 
         # Codex Plus/Pro auth
         host_codex_auth = Path.home() / ".codex" / "auth.json"
-        if pass_ai_keys and safe_is_file(host_codex_auth):
+        if (pass_ai_keys and safe_is_file(host_codex_auth)
+                and (not getattr(_dispatch_local, 'prepaid', None) or _dispatch_local.prepaid['engine'] == 'codex')):
             docker_cmd.extend(["-v", f"{host_codex_auth}:/root/.codex/auth.json:ro"])
         host_codex_ver = Path.home() / ".codex" / "version.json"
         if pass_ai_keys and safe_is_file(host_codex_ver):
@@ -1093,7 +1126,7 @@ class EngineRunner:
                 shutil.copy2(host_token, token)
             os.chmod(token, 0o600)
             docker_cmd.extend(["-v", f"{agy_home}:/root/.gemini:rw"])
-        elif pass_ai_keys and safe_exists(host_gemini):
+        elif pass_ai_keys and safe_exists(host_gemini) and not getattr(_dispatch_local, 'prepaid', None):
             docker_cmd.extend([
                 "-v", f"{host_gemini}:/root/.gemini:ro",
                 "--tmpfs", "/root/.gemini/antigravity-cli/brain:rw",
@@ -1128,9 +1161,18 @@ class EngineRunner:
             )
 
         for env_key in base_env_keys:
+            if getattr(_dispatch_local, 'prepaid', None) and env_key in {'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'XDG_CACHE_HOME'}:
+                continue
             val = os.environ.get(env_key)
             if val:
                 docker_cmd.extend(["-e", f"{env_key}={val}"])
+        if getattr(_dispatch_local, 'prepaid', None):
+            if writable_worktree is not None:
+                raise TaskError('Prepaid feedback cannot mount writable source')
+            if (ssdlc_home / '.ssdlc').exists():
+                docker_cmd.extend(['--tmpfs', '/opt/ssdlc/.ssdlc:rw,size=16m'])
+            docker_cmd.extend(['-e', 'CODEX_HOME=/root/.codex', '-e', 'CLAUDE_CONFIG_DIR=/root/.claude',
+                               '-e', 'XDG_CACHE_HOME=/root/.cache'])
 
         name = docker_cmd[docker_cmd.index("--name") + 1]
         marker = "__SSDLC_RESOURCE_" + name + "__"
@@ -2592,6 +2634,7 @@ class SSDLCOrchestrator:
             historical_task_floors=(limits._load(repair=False)[0]['binding'].get('task_floors', {}) if limits else {}),
             historical_capture_authority=history_authority,
             scope_reconciliations=(limits._load(repair=False)[0]['binding'].get('scope_reconciliations', {}) if limits else {}),
+            feedback_enabled=bool(limits and limits._load(repair=False)[0]['policy'].get('feedback_workflow')),
             max_attempts=(getattr(_dispatch_local, "limits")._load(repair=False)[0]["policy"]["development_attempts"]
                           if getattr(_dispatch_local, "limits", None) is not None else int(os.environ.get("SSDLC_MAX_DEV_RETRIES", "3"))),
             isolate_candidates=True,
@@ -2603,7 +2646,44 @@ class SSDLCOrchestrator:
         self.state["current_step"] = "task-development"
         self.state["status"] = "IN_PROGRESS"
         self._save_state()
-        result = scheduler.run(ordered, feedback, recover_protocol_task=recover_protocol_task)
+        try:
+            result = scheduler.run(ordered, feedback, recover_protocol_task=recover_protocol_task)
+        except DevelopmentBlocked as exc:
+            if (exc.category != 'SCOPE_REQUIRED' or limits is None
+                    or not limits._load(repair=False)[0]['policy'].get('feedback_workflow')):
+                raise
+            self.state.update(status='ESCALATED_TO_SUPERVISOR', current_step='feedback')
+            self._save_state()
+            from ssdlc_feedback_workflow import run_feedback
+            from ssdlc_locks import current_lock
+            owner = current_lock(self.ticket_lock_path)
+            if owner is None:
+                raise DevelopmentBlocked('INTEGRITY', 'Automatic feedback requires canonical execution ownership')
+            try:
+                response = run_feedback(self.ticket_lock_path.parent, self.repo_root, Path(__file__).resolve().parent,
+                    controller['snapshot'], scheduler.runtime_identity, held_locks=(owner,))
+            except TaskError as failure:
+                if (self.ticket_lock_path.parent / 'execution/pending.json').exists():
+                    failure.feedback_source_preserved = True
+                else:
+                    try:
+                        selected = runtime_root(self.ticket_lock_path.parent)
+                        if selected != self.ssdlc_root:
+                            failure.feedback_source_preserved = True
+                            self._adopt_feedback_runtime(selected)
+                    except TaskError:
+                        failure.feedback_source_preserved = True
+                raise
+            if response['disposition'] != 'APPLIED':
+                self._publish_feedback()
+                raise DevelopmentBlocked('SCOPE_REQUIRED', 'Feedback stopped: ' + response['disposition'])
+            try:
+                self._adopt_feedback_runtime(Path(response['runtime']))
+            except TaskError as failure:
+                failure.feedback_source_preserved = True
+                raise
+            self._publish_feedback()
+            return self._run_task_development(feedback)
         self.state["tasks_status"] = result["tasks"]
         self.state["task_verified_head"] = result["expected_head"]
         diff = self.dir_dev / "implementation.diff"
@@ -3300,6 +3380,34 @@ class SSDLCOrchestrator:
 
     def _read_optional(self, path: Path, fallback: str = "(Skipped in Tier S)") -> str:
         return path.read_text(encoding="utf-8") if path.exists() else fallback
+
+    def _adopt_feedback_runtime(self, root):
+        from ssdlc_feedback_delegation import descendant_of
+        ticket = self.repo_root / '.ssdlc' / self.ticket_id
+        if runtime_root(ticket) != root or not descendant_of(ticket, root, self.ssdlc_root):
+            raise TaskError('Feedback runtime has no admitted native lineage')
+        self.ssdlc_root = root
+        for name, phase in [('recon','00-recon'),('po','01-po'),('design','02-design'),('dev','03-dev'),
+                            ('review','04-review'),('qa','05-qa'),('appsec','05b-appsec'),('ops','06-ops'),('docs','07-docs')]:
+            path = root / phase; path.mkdir(exist_ok=True)
+            setattr(self, 'dir_' + name, path)
+        self.worktree_dir, self.state_file = root / 'worktree', root / 'state.json'
+        self.state = self._load_or_init_state()
+        from ssdlc_recovery import LimitsStore
+        _dispatch_local.limits = LimitsStore(root)
+        self._gate_terminal = None
+
+    def _publish_feedback(self):
+        from ssdlc_feedback import FeedbackStore
+        from ssdlc_feedback_delivery import ProjectionOutbox, RemoteUncertain
+        profile = getattr(_dispatch_local, 'limits')._load(repair=False)[0]['policy']
+        config = profile.get('feedback_workflow', {})
+        if 'github' not in config:
+            return
+        try:
+            ProjectionOutbox(self.ticket_lock_path.parent).publish(FeedbackStore(self.ticket_lock_path.parent), profile)
+        except (RemoteUncertain, OSError, ValueError):
+            print('[feedback] GitHub publication unconfirmed; reconcile the host outbox before publishing again.', flush=True)
 
     @_supervised_phase('03-dev')
     def run_phase_dev(self, feedback: str = "", attempt: int = 1) -> Tuple[Path, List[str]]:
@@ -4471,17 +4579,40 @@ class SSDLCOrchestrator:
         self.state["status"] = "AWAITING_SUPERVISOR_SIGNOFF" if ready_for_signoff else "ESCALATED_TO_SUPERVISOR"
         self._save_state()
 
-        total_cost = sum(item.get("cost_usd", 0.0) for item in self.state["ledger"])
-        total_dur = sum(item.get("duration_sec", 0.0) for item in self.state["ledger"])
+        def observed(row, key):
+            value = row.get(key)
+            return value if type(value) in (int,float) and math.isfinite(value) and value >= 0 else None
+        total_cost = sum(observed(item,'cost_usd') or 0 for item in self.state['ledger'])
+        total_dur = sum(observed(item,'duration_sec') or 0 for item in self.state['ledger'])
+        unknown_cost_rows = sum(observed(item,'cost_usd') is None for item in self.state['ledger'])
 
         ledger_rows = []
         for item in self.state["ledger"]:
+            cost = observed(item,'cost_usd'); duration = observed(item,'duration_sec')
+            cost_text = f'${cost:.4f}' if cost is not None else 'unknown'
+            duration_text = f'{duration}s' if duration is not None else 'unknown'
             ledger_rows.append(
-                f"| `{item['phase']}` | {item['role']} | `{item['engine']}:{item['model']}` | `{item.get('reasoning_effort', 'medium')}` | `{item.get('trace_user', '')}` | **{item['status']}** | {item['duration_sec']}s | ${item['cost_usd']:.4f} |"
+                f"| `{item.get('phase','historical-unknown')}` | {item.get('role','Historical (unclassified)')} | "
+                f"`{item.get('engine','unknown')}:{item.get('model','unknown')}` | `{item.get('reasoning_effort','unknown')}` | "
+                f"`{item.get('trace_user','')}` | **{item.get('status','unknown')}** | {duration_text} | {cost_text} |"
             )
+
+        completion_disclosures = self._completion_disclosures()
+        canonical_ticket = self.repo_root / '.ssdlc' / self.ticket_id
+        if (canonical_ticket / 'feedback/authority.json').exists():
+            from ssdlc_feedback import FeedbackStore
+            from ssdlc_feedback_delivery import projection, ProjectionOutbox, metrics
+            summary = dict(feedback=projection(FeedbackStore(canonical_ticket)),
+                           metrics=metrics(FeedbackStore(canonical_ticket)),
+                           publication=ProjectionOutbox(canonical_ticket).summary(), amendment_alone_grants_signoff=False)
+            path = self.ssdlc_root / 'feedback-summary.json'
+            atomic_json(path, summary); self.record_artifact('feedback-summary.json', path)
+            completion_disclosures += '\nFeedback provenance and counters: [feedback-summary.json](./feedback-summary.json).\n'
 
         artifact_rows = []
         for name, meta in sorted(self.state["artifacts"].items()):
+            if name == "EVIDENCE_PACK.md":
+                continue  # The pack cannot contain its own current digest.
             artifact_rows.append(
                 f"| [`{name}`](./{meta['path']}) | `{meta['sha256'][:16]}...` | {meta.get('size_bytes', 'not recorded')} B | {meta.get('recorded_at', 'not recorded')} |"
             )
@@ -4495,7 +4626,6 @@ class SSDLCOrchestrator:
         iso = self.state.get("isolation", {})
         vers = self.state.get("cli_versions", {})
 
-        completion_disclosures = self._completion_disclosures()
         pack_md = f"""# SSDLC Supervisor Evidence Pack — `{self.project_id}` / `{self.ticket_id}`
 
 - **Project ID**: `{self.project_id}`
@@ -4507,7 +4637,7 @@ class SSDLCOrchestrator:
 - **Base Commit**: `{self.state['base_commit']}`
 - **Isolated Worktree Branch**: `{self.state['dev_branch']}`
 - **Total Duration**: `{total_dur:.1f}s`
-- **Tracked OpenRouter Cost**: `${total_cost:.4f} USD`
+- **Reported Ledger Cost (known numeric values)**: `${total_cost:.4f} USD`; rows with unknown cost: `{unknown_cost_rows}`
 {completion_disclosures}
 ---
 
@@ -4701,6 +4831,8 @@ To **REJECT** and send feedback back to the team:
             try:
                 return self._run_pipeline(goal, test_cmd, tier, from_phase)
             except TaskError as exc:
+                if getattr(exc, 'feedback_source_preserved', False):
+                    raise
                 _supervision_event('failure', category=getattr(exc, 'category', 'TASK_EXECUTION'), exc_type=type(exc).__name__)
                 failed_phase = self.state.get('current_phase')
                 failed_step = self.state.get('current_step')
@@ -5173,6 +5305,8 @@ def _foreground_main(argv=None) -> int:
     if args.subcommand == "run":
         sync_remote = args.sync_remote
         issue_id = getattr(args, "issue", None)
+        from ssdlc_feedback_workflow import recover_preparation
+        recover_preparation(repo_path, args.ticket)
         orch = SSDLCOrchestrator(repo_path, args.ticket, sync_remote=sync_remote, issue_id=issue_id)
         effective_tier = args.tier or os.environ.get("SSDLC_DEFAULT_TIER", "auto")
         orch.run_pipeline(
@@ -5214,6 +5348,9 @@ def _supervised_exit_code(value) -> int:
 
 def main(argv=None) -> int:
     words = sys.argv[1:] if argv is None else argv
+    if words and words[0].startswith('feedback-profile-'):
+        from ssdlc_feedback_admission import main as admission_main
+        return admission_main(words)
     if words and words[0].startswith('feedback-'):
         from ssdlc_feedback import main as feedback_main
         return feedback_main(words)
