@@ -380,11 +380,23 @@ class Dispatcher:
     def _do_apply_review(self, pr):
         self._apply_verdict(pr, pr.reviews[-1], announce=False)
 
+    def _reviewer_key(self, pr):
+        """The PR's recorded reviewer, else the configured one; never the PR's implementer, even
+        after a configuration change. None when no such agent is configured."""
+        implementer = pr.meta['implementer']
+        for key in (pr.meta['reviewer'], self.cfg.reviewer):
+            if key in self.cfg.agents and key != implementer:
+                return key
+        return None
+
     def _do_review(self, pr):
         cfg = self.cfg
-        reviewer_key = pr.meta.get('reviewer', cfg.reviewer)
-        if reviewer_key == pr.meta.get('implementer') or reviewer_key not in cfg.agents:
-            reviewer_key = cfg.reviewer
+        reviewer_key = self._reviewer_key(pr)
+        if reviewer_key is None:
+            return self._escalate(
+                pr.number, f'Nessun reviewer configurato diverso dall\'implementer della PR '
+                           f'(`{pr.meta["implementer"]}`): la review non può essere indipendente.',
+                remove=[cfg.labels.review])
         agent = cfg.agent(reviewer_key)
         name = f'pr-{pr.number}'
         path = self.ws.existing_branch(name, pr.head_ref)
@@ -428,7 +440,12 @@ class Dispatcher:
             self.log('  branch changed after the review; sending it back to review')
             self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.changes])
             return
-        agent = cfg.agent(pr.meta.get('implementer', cfg.implementer))
+        if pr.meta['implementer'] not in cfg.agents:
+            return self._escalate(
+                pr.number, f'L\'implementer della PR (`{pr.meta["implementer"]}`) non è più '
+                           'configurato: serve una decisione su chi corregge.',
+                remove=[lb.changes])
+        agent = cfg.agent(pr.meta['implementer'])
         issue, _ = self._issue_context(pr.issue)
         prompt = _template('fix', repo=cfg.repo, pr_number=pr.number, issue_number=pr.issue,
                            issue_title=issue['title'], issue_body=issue.get('body') or '',
