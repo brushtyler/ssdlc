@@ -164,7 +164,8 @@ def subject(source, plan, reason):
 
 
 def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_snapshot,
-            guard=lambda: None, clock=time.time, fault=lambda point: None, held_locks=(), delegation=None, profile_update=None):
+            guard=lambda: None, clock=time.time, fault=lambda point: None, held_locks=(), delegation=None, profile_update=None,
+            repair_return=None, repair_session=None):
     """Stage a reviewed amendment, retaining all prior generations and counters."""
     from ssdlc_preparations import unfinished, register, update, pending, clear_pending
     from ssdlc_candidates import inventory
@@ -175,11 +176,26 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
     with transition_lock(ticket / 'ticket.lock', held_locks):
         if unfinished(ticket, namespace='execution'):
             raise TransitionError('Earlier preparation requires native discard')
-        source = inspect(ticket, allow_host_hints=delegation is not None or profile_update is not None)
+        source = inspect(ticket, allow_host_hints=delegation is not None or profile_update is not None or repair_return is not None)
         with transition_lock(source['root'] / '03-dev/tasks/scheduler.lock', held_locks):
             guard()
             if profile_update is not None and delegation is not None:
                 raise TransitionError('Profile admission cannot use scope delegation')
+            if repair_return is not None and (profile_update is not None or delegation is not None):
+                raise TransitionError('An unchanged-scope return cannot amend grants or targets')
+            return_proof = None
+            if repair_return is not None:
+                from ssdlc_feedback_return import subject as return_subject, proof as return_proof_for
+                operator = repair_return['operator']
+                if type(operator) is not bool:
+                    raise TransitionError('Repair-return authorization mode must be explicit')
+                if not operator:
+                    from ssdlc_feedback_delegation import FencedSession
+                    if (not isinstance(repair_session, FencedSession) or repair_session.ticket != ticket
+                            or repair_session.root != source['root'] or repair_session.runtime != runtime_identity
+                            or repair_session.snapshot != controller_snapshot):
+                        raise TransitionError('Delegated repair return requires the live native owner')
+                    repair_session.check()
             if delegation is not None:
                 from ssdlc_feedback_delegation import build_proof, FencedSession
                 from ssdlc_feedback import FeedbackStore
@@ -191,18 +207,24 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                 feedback = FeedbackStore(ticket)
                 reason = feedback.inspect()['requests'][request_id]['proposal']['reason_code']
                 review = build_proof(session, source, plan, reason, feedback, request_id)
-            if profile_update is not None:
+            if repair_return is not None:
+                reviewed = return_subject(source, plan, reason, repair_return['request_id'],
+                                          repair_return['repair_files'], operator=operator)
+                return_proof = return_proof_for(source, reviewed)
+                if not operator:
+                    return_proof['fence'] = repair_session.check()
+            elif profile_update is not None:
                 from ssdlc_feedback_admission import subject as admission_subject
                 reviewed = admission_subject(source, plan, profile_update, reason)
             else:
                 reviewed = subject(source, plan, reason)
-            if delegation is None and profile_update is None and (not isinstance(review, dict) or set(review) != {'subject_sha256', 'reviewer', 'report', 'scope_diff'}
+            if delegation is None and profile_update is None and repair_return is None and (not isinstance(review, dict) or set(review) != {'subject_sha256', 'reviewer', 'report', 'scope_diff'}
                     or not isinstance(review['reviewer'], str) or not review['reviewer'].strip()
                     or review['subject_sha256'] != digest(reviewed)):
                 raise TransitionError('Independent review must bind the exact amendment subject')
             validator = TaskPlanValidator(source['root'] / 'worktree', source['context'][CONTEXT[0]],
                                           source['quality'], source['root'])
-            if delegation is None and profile_update is None:
+            if delegation is None and profile_update is None and repair_return is None:
                 validate_amendment(source['plan'], plan, json.dumps(review['report']), validator.validate,
                                    validator.requirement_catalogue['required_ids'], source['quality'],
                                    declared_scope=review['scope_diff'])
@@ -288,6 +310,8 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                               runtime_worktree_sha256=digest(inventory(runtime / 'worktree')), runtime_identity=runtime_identity,
                               counters=counters, envelope=envelope, journal_state=current, subject=reviewed, review=review,
                               ledger=outer['ledger'], old_policy_sha256=digest(source['envelope']))
+                if return_proof is not None:
+                    recipe['repair_return'] = return_proof
                 atomic_json(prepared / 'recipe.json', recipe)
                 atomic_json(prepared / 'projection.json', projected)
                 atomic_json(prepared / 'runtime-seal.json', _files(runtime))
@@ -303,6 +327,10 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                 if profile_update is not None:
                     from ssdlc_feedback_admission import CONTRACT as PROFILE_CONTRACT
                     proposal.update(authorization_contract=PROFILE_CONTRACT, profile_sha256=digest(profile_update))
+                if return_proof is not None:
+                    from ssdlc_feedback_return import CONTRACT as RETURN_CONTRACT, OPERATOR_CONTRACT
+                    proposal.update(authorization_contract=OPERATOR_CONTRACT if operator else RETURN_CONTRACT,
+                                    repair_return_sha256=digest(return_proof))
                 atomic_json(prepared / 'proposal.json', proposal)
                 guard(); sync_tree(runtime); sync_tree(prepared)
                 pending(ticket, identity, namespace='execution')
@@ -315,7 +343,7 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
 
 
 def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=time.time, fault=lambda point: None,
-             held_locks=(), delegation=None):
+             held_locks=(), delegation=None, repair_session=None):
     from ssdlc_candidates import inventory
     from ssdlc_preparations import update, clear_pending
     ticket, preparation = _ticket(ticket), _ticket(preparation)
@@ -323,17 +351,26 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
     from ssdlc_feedback_delegation import CONTRACT, FencedSession, finalize
     delegated = proposal.get('authorization_contract') == CONTRACT
     profile_admission = proposal.get('authorization_contract') == 'feedback-profile-admission-v1'
+    from ssdlc_feedback_return import CONTRACTS as RETURN_CONTRACTS, CONTRACT as RETURN_CONTRACT
+    repair_return = proposal.get('authorization_contract') in RETURN_CONTRACTS
+    repair_delegated = proposal.get('authorization_contract') == RETURN_CONTRACT
     if (preparation != ticket / 'execution' / ('prepared-' + proposal['transition_id'])
-            or proposal.get('authorization_contract') not in {'scope-amendment-v1', CONTRACT, 'feedback-profile-admission-v1'}
+            or proposal.get('authorization_contract') not in {'scope-amendment-v1', CONTRACT, 'feedback-profile-admission-v1', *RETURN_CONTRACTS}
             or delegated and (not isinstance(delegation, FencedSession) or delegation.ticket != ticket
                               or delegation.root != Path(recipe['source_root']))
             or not delegated and delegation is not None):
         raise TransitionError('Activation requires the recorded scope preparation')
+    if repair_delegated and (not isinstance(repair_session, FencedSession)
+            or repair_session.ticket != ticket or repair_session.root != Path(recipe['source_root'])
+            or repair_session.runtime != recipe['runtime_identity']):
+        raise TransitionError('Delegated repair activation requires its live native owner')
     validate_authorization(authorization, proposal)
     with transition_lock(ticket / 'ticket.lock', held_locks):
         guard()
         if delegated:
             delegation.check()
+        if repair_delegated:
+            repair_session.check()
         store = TransitionStore(ticket / 'execution', fault)
         selected, projected = store.load(), _read(preparation, 'projection.json')
         if selected['transition_id'] == proposal['transition_id']:
@@ -341,10 +378,13 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
             _selected_execution_root(ticket, selected)
             if delegated:
                 finalize(delegation, proposal, recipe, selected, fault=fault)
+            if repair_return:
+                from ssdlc_feedback_return import finalize as finalize_return
+                finalize_return(ticket, proposal, recipe, selected)
             update(ticket, proposal['transition_id'], namespace='execution', status='ACTIVE')
             clear_pending(ticket, proposal['transition_id'], namespace='execution')
             return selected
-        source = inspect(ticket, allow_host_hints=delegated or profile_admission)
+        source = inspect(ticket, allow_host_hints=delegated or profile_admission or repair_return)
         with transition_lock(source['root'] / '03-dev/tasks/scheduler.lock', held_locks):
             if delegated:
                 from ssdlc_feedback_delegation import build_proof
@@ -361,6 +401,14 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
                 from ssdlc_feedback_admission import subject as admission_subject
                 if admission_subject(source, source['plan'], recipe['envelope']['policy'], recipe['subject']['reason']) != recipe['subject']:
                     raise TransitionError('Profile admission source changed')
+            if repair_return:
+                from ssdlc_feedback_return import subject as return_subject, validate_proof
+                reviewed = recipe['subject']
+                if (return_subject(source, source['plan'], reviewed['reason'], reviewed['request_id'],
+                                   reviewed['repair_files'], operator=reviewed['operator']) != reviewed
+                        or digest(recipe['repair_return']) != proposal['repair_return_sha256']):
+                    raise TransitionError('Repair-return source or feedback decision changed')
+                validate_proof(recipe['repair_return'])
             if (source['parent_selector'] != proposal['parent_selector'] or source['files'] != proposal['source_files']
                     or str(source['root']) != recipe['source_root'] or source['worktree_sha256'] != recipe['source_worktree_sha256']):
                 raise TransitionError('Parent generation changed after amendment review')
@@ -384,9 +432,16 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
             artifacts = {name: _regular(preparation, name).read_bytes() for name in proposal['artifacts']}
             if delegated:
                 delegation.check()
+            if repair_delegated:
+                repair_session.check()
             result = store.publish(source['root'], proposal, authorization, source['projection'], projected, artifacts)
             if delegated:
                 finalize(delegation, proposal, recipe, result, fault=fault)
+            if repair_return:
+                from ssdlc_feedback_return import finalize as finalize_return
+                fault('repair_return_selector_published')
+                finalize_return(ticket, proposal, recipe, result)
+                fault('repair_return_reconciled')
             update(ticket, proposal['transition_id'], namespace='execution', status='ACTIVE')
             clear_pending(ticket, proposal['transition_id'], namespace='execution')
             return result

@@ -131,3 +131,21 @@ class FeedbackDeliveryTests(unittest.TestCase):
         with patch('ssdlc_feedback_delivery.subprocess.run',side_effect=subprocess.TimeoutExpired('PRIVATE_AUTH_SENTINEL',30)):
             with self.assertRaises(RemoteUncertain) as failure: backend.actor()
         self.assertNotIn('PRIVATE_AUTH_SENTINEL',str(failure.exception))
+
+    def test_comment_pages_work_without_slurp_and_include_older_receipts(self):
+        backend = GitHubComments()
+        pages = [[dict(id=i) for i in range(100)], [dict(id=100)]]
+        with patch.object(backend, '_api', side_effect=pages) as api:
+            comments = backend.list(self.profile['feedback_workflow']['github'])
+        self.assertEqual([r['id'] for r in comments], list(range(101)))
+        self.assertEqual(api.call_count, 2)
+        self.assertTrue(api.call_args_list[0].args[0][0].endswith('?per_page=100&page=1'))
+        self.assertTrue(api.call_args_list[1].args[0][0].endswith('?per_page=100&page=2'))
+        self.assertNotIn('--slurp', str(api.call_args_list))
+
+    def test_incomplete_bounded_page_history_refuses_publication_observation(self):
+        backend = GitHubComments()
+        with patch.object(backend, '_api', return_value=[dict(id=i) for i in range(100)]) as api:
+            with self.assertRaisesRegex(RemoteUncertain, 'observation bound'):
+                backend.list(self.profile['feedback_workflow']['github'])
+        self.assertEqual(api.call_count, 100)

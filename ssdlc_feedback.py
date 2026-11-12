@@ -21,7 +21,7 @@ class FeedbackError(TaskError):
     pass
 
 
-ROUTES = {'AMENDMENT', 'PREREQUISITE', 'ADVISORY', 'REJECTED', 'INCONCLUSIVE'}
+ROUTES = {'AMENDMENT', 'IN_SCOPE_REPAIR', 'PREREQUISITE', 'ADVISORY', 'REJECTED', 'INCONCLUSIVE'}
 CAUSES = {'MISSING_TARGET', 'MISSING_PREREQUISITE', 'IMPROVEMENT',
           'REQUIREMENT_CONFLICT', 'INCONCLUSIVE'}
 ROLES = {'diagnosis', 'planner', 'reviewer', 'po'}
@@ -358,7 +358,10 @@ class FeedbackStore:
 
     def propose(self, identity, proposal, planner, source):
         actor(planner)
-        _object(proposal, ('route', 'requested_files', 'reason_code'))
+        fields = ('route', 'requested_files', 'reason_code')
+        if isinstance(proposal, dict) and proposal.get('route') == 'IN_SCOPE_REPAIR':
+            fields += ('repair_files',)
+        _object(proposal, fields)
         if proposal['route'] not in ROUTES:
             raise FeedbackError('Unknown feedback route')
         _identity(proposal['reason_code']); _unique(proposal['requested_files'], literal_path)
@@ -374,6 +377,11 @@ class FeedbackStore:
             if row['rounds'] >= policy['max_rounds']:
                 raise FeedbackError('Feedback round allowance exhausted')
             files = proposal['requested_files']
+            if proposal['route'] == 'IN_SCOPE_REPAIR':
+                from ssdlc_feedback_return import validate_repair_files
+                validate_repair_files(source, proposal['repair_files'])
+                if files or row['request']['cause'] != 'MISSING_TARGET':
+                    raise FeedbackError('In-scope repair cannot change scope or requirements')
             if not set(files) <= set(row['request']['requested_files']):
                 raise FeedbackError('Planner expanded the requested scope')
             if proposal['route'] == 'AMENDMENT':
@@ -430,6 +438,8 @@ class FeedbackStore:
         state = self.inspect()
         row = state['requests'][identity]
         authority, _ = self._read()
+        if any(r['request_id'] == identity for r in state.get('repair_returns', [])):
+            return 'IN_SCOPE_RETURN_APPLIED'
         if row['status'] == 'APPLIED':
             return 'APPLIED'
         if row.get('source_reconciliation_required', True):
@@ -455,7 +465,8 @@ class FeedbackStore:
                     item['request_id'] == identity and item['proposal_sha256'] == row['proposal_sha256']
                     for item in state['amendments']):
                 return 'OPERATOR_DECISION'
-        return {'AMENDMENT': 'NATIVE_AMENDMENT_REQUIRED', 'PREREQUISITE': 'BLOCKED_PREREQUISITE',
+        return {'AMENDMENT': 'NATIVE_AMENDMENT_REQUIRED', 'IN_SCOPE_REPAIR': 'NATIVE_REPAIR_RETURN_REQUIRED',
+                'PREREQUISITE': 'BLOCKED_PREREQUISITE',
                 'ADVISORY': 'BACKLOG_ONLY', 'REJECTED': 'REJECTED_NO_RETRY',
                 'INCONCLUSIVE': 'OPERATOR_DECISION'}[row['proposal']['route']]
 
@@ -555,7 +566,9 @@ class FeedbackStore:
                     for key, row in sorted(state['requests'].items())],
                     role_calls=len(state['role_calls']), amendments=len(state['amendments']),
                     amendments_reserved=sum(item['status'] == 'RESERVED' for item in state['amendments']),
-                    amendments_applied=sum(item['status'] == 'APPLIED' for item in state['amendments']))
+                    amendments_applied=sum(item['status'] == 'APPLIED' for item in state['amendments']),
+                    repair_returns=len(state.get('repair_returns', [])),
+                    operator_repair_returns=sum(r['operator'] for r in state.get('repair_returns', [])))
 
 
 def exact_authorization(value, expected):

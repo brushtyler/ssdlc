@@ -5348,6 +5348,9 @@ def _supervised_exit_code(value) -> int:
 
 def main(argv=None) -> int:
     words = sys.argv[1:] if argv is None else argv
+    if words and words[0].startswith('feedback-repair-'):
+        from ssdlc_feedback_return import main as repair_main
+        return repair_main(words)
     if words and words[0].startswith('feedback-profile-'):
         from ssdlc_feedback_admission import main as admission_main
         return admission_main(words)
