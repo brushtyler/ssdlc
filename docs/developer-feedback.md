@@ -705,6 +705,47 @@ The independent reviewer must still assess semantic coverage; matching a hash
 does not prove it. Hash-only reviews and previous authorizations remain valid
 when no new capability is requested.
 
+### Exhausted I2 task and scope capacity
+
+An existing I2 generation with an active feedback ledger cannot reuse the
+historical I1-to-I2 import or the initial feedback-profile admission to extend
+its limits. For an exhausted failed owner-scope task, the operator can now
+prepare an `operator-owner-recovery-v1` proposal using
+`--operator-recovery-profile /private/profile.json` on both scope preview and
+prepare, with the exact `--feedback-request` and coverage review. The existing
+evidence-reconciliation and manual-owner-limit flags remain explicit inputs.
+
+The supplied profile must equal the host-calculated minimal extension:
+
+| Field | Permitted change |
+| --- | --- |
+| `development_attempts` | Exactly one higher than the old default, only when the selected task has consumed that old limit. This is the profile default for unfinished tasks, not a hidden per-task override. Completed tasks are not dispatched again. |
+| Delegated `allowed_files` | Append only the literal paths added by this exact scope amendment; preserve all old entries. |
+| `max_amendments` | Raise only if needed for the observed cumulative amendment count plus this one. |
+| `max_added_files` | Raise only if needed for the observed cumulative additions plus these exact paths. |
+| Every other field | Unchanged, including automatic per-task allowance, independence, feedback roles/workflow, invocation caps, money, timeouts, wall time and historical usage reserves. |
+
+The proposal binds the old/new profile hashes and exact delta. Activation needs
+the usual fenced scope authorization, plus `profile_sha256`,
+`operator_recovery_sha256` and `authorize_extensions: true`. A manual per-task
+owner exception, if required, still needs its own allowance hash. Ordinary scope
+authorization and delegated AI decisions cannot grant this capability.
+
+The same native staging, sealing, selector publication and receipt transaction
+are used. No candidate code executes during preparation and no provider is
+called. The old recording authority, requests, decisions, consultations,
+attempts, captured candidates, invocation facts and absolute deadline remain
+historical facts. The new owner receipt records the profile delta and admits
+the exact descendant; a missing receipt fences execution until exact replay.
+The native scheduler resumes the retained candidate at the next attempt and
+runs fresh owner checks. Public projections and metrics count operator owner
+recoveries separately. Profiles without this capability retain their original
+behavior; existing limits are never increased during an active invocation.
+
+This narrow recovery does not authorize monetary, deadline, role, environment
+or quality-policy changes, completed-task repair, plan reordering, task split or
+new requirements. It also does not change live-unknown accounting policy (#43).
+
 ### Owner recovery boundaries
 
 | Interruption | Native behavior |

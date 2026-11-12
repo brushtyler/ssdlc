@@ -41,8 +41,9 @@ def source_binding(root, refs):
 
 
 def validate_authorization(authorization, proposal):
+    from ssdlc_operator_recovery import CONTRACT as RECOVERY_CONTRACT
     if ('owner_allowance_sha256' in proposal
-            and proposal.get('authorization_contract') != 'scope-amendment-v1'):
+            and proposal.get('authorization_contract') not in {'scope-amendment-v1', RECOVERY_CONTRACT}):
         raise TransitionError('Manual owner allowances cannot use delegated authorization')
     if proposal.get('authorization_contract') == 'feedback-in-scope-return-v1':
         from ssdlc_feedback_return import validate_authorization as repair
@@ -56,10 +57,17 @@ def validate_authorization(authorization, proposal):
         raise TransitionError('Transition requires exact, fenced operator authorization')
     if 'owner_allowance_sha256' in proposal:
         expected.add('owner_allowance_sha256')
-        if (proposal.get('authorization_contract') != 'scope-amendment-v1'
+        if (proposal.get('authorization_contract') not in {'scope-amendment-v1', RECOVERY_CONTRACT}
                 or 'owner_feedback_sha256' not in proposal
                 or authorization.get('owner_allowance_sha256') != proposal['owner_allowance_sha256']):
             raise TransitionError('Manual owner allowance requires its exact separate operator authorization')
+    if proposal.get('authorization_contract') == RECOVERY_CONTRACT:
+        expected |= {'profile_sha256', 'operator_recovery_sha256', 'authorize_extensions'}
+        if (authorization.get('profile_sha256') != proposal.get('profile_sha256')
+                or authorization.get('operator_recovery_sha256') != proposal.get('operator_recovery_sha256')
+                or authorization.get('authorize_extensions') is not True
+                or 'owner_feedback_sha256' not in proposal):
+            raise TransitionError('Operator recovery requires exact explicit profile/attempt/scope extension authorization')
     if proposal.get('authorization_contract') == 'feedback-profile-admission-v1':
         expected |= {'profile_sha256'}
         if authorization.get('profile_sha256') != proposal.get('profile_sha256') or proposal.get('scope_diff') != {}:
@@ -213,7 +221,8 @@ class TransitionStore:
         pointer = self.root / 'active.json'
         if pointer.exists() and self._read(self.root, 'active.json') != selected:
             if (proposal.get('authorization_contract') not in {'scope-amendment-v1', 'feedback-scope-delegation-v1',
-                    'feedback-profile-admission-v1', 'feedback-in-scope-return-v1', 'feedback-operator-repair-return-v1'}
+                    'feedback-profile-admission-v1', 'operator-owner-recovery-v1',
+                    'feedback-in-scope-return-v1', 'feedback-operator-repair-return-v1'}
                     or proposal.get('parent_selector') != self._read(self.root, 'active.json')):
                 raise TransitionError('Another generation is already selected')
             self.load()  # Validate the exact parent, not merely its pointer bytes.

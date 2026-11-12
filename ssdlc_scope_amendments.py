@@ -87,6 +87,7 @@ def inspect(ticket, *, allow_host_hints=False):
         if file_hash(_regular(root, meta['path'])) != meta['sha256']:
             raise TransitionError('Registered source evidence changed')
     old = TaskScheduler(worktree, root / '03-dev/tasks', plan, quality, context, None, None,
+                        max_attempts=envelope['policy']['development_attempts'],
                         isolate_candidates=True, recover_timeouts=True, runtime_identity=state['candidate_runtime'],
                         historical_capture_authority=envelope['binding'].get('historical_capture_bindings_sha256'),
                         historical_task_floors=envelope['binding'].get('task_floors'),
@@ -181,7 +182,7 @@ def subject(source, plan, reason, *, feedback_request_id=None, reconcile_feedbac
 def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_snapshot,
             guard=lambda: None, clock=time.time, fault=lambda point: None, held_locks=(), delegation=None, profile_update=None,
             repair_return=None, repair_session=None, feedback_request_id=None, reconcile_feedback_evidence=False,
-            operator_owner_limit=None):
+            operator_owner_limit=None, operator_recovery_profile=None):
     """Stage a reviewed amendment, retaining all prior generations and counters."""
     from ssdlc_preparations import unfinished, register, update, pending, clear_pending
     from ssdlc_candidates import inventory
@@ -195,6 +196,9 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
         source = inspect(ticket, allow_host_hints=delegation is not None or profile_update is not None or repair_return is not None)
         with transition_lock(source['root'] / '03-dev/tasks/scheduler.lock', held_locks):
             guard()
+            if operator_recovery_profile is not None and (feedback_request_id is None or
+                    any(x is not None for x in (delegation, profile_update, repair_return))):
+                raise TransitionError('Operator recovery cannot borrow another transition capability')
             if operator_owner_limit is not None and feedback_request_id is None:
                 raise TransitionError('Operator owner allowance requires its exact feedback request')
             if feedback_request_id is not None and any(x is not None for x in (delegation, profile_update, repair_return)):
@@ -233,6 +237,12 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                 return_proof = return_proof_for(source, reviewed)
                 if not operator:
                     return_proof['fence'] = repair_session.check()
+            elif operator_recovery_profile is not None:
+                from ssdlc_operator_recovery import subject as recovery_subject
+                reviewed = recovery_subject(source, plan, reason, profile=operator_recovery_profile,
+                    feedback_request_id=feedback_request_id,
+                    reconcile_feedback_evidence=reconcile_feedback_evidence,
+                    operator_owner_limit=operator_owner_limit)
             elif profile_update is not None:
                 from ssdlc_feedback_admission import subject as admission_subject
                 reviewed = admission_subject(source, plan, profile_update, reason)
@@ -265,7 +275,8 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
             limits = LimitsStore(source['root'], clock)
             limits.check(source['counters'], source['envelope']['policy'])
             limits.require_capacity('03-dev', '03-dev')
-            if source['journal']['tasks'][source['task_id']]['attempts'] >= source['envelope']['policy']['development_attempts']:
+            attempt_profile = operator_recovery_profile or source['envelope']['policy']
+            if source['journal']['tasks'][source['task_id']]['attempts'] >= attempt_profile['development_attempts']:
                 raise RecoveryStop('LIMIT_REACHED', 'Scope amendment cannot grant another development attempt')
             identity = uuid.uuid4().hex
             register(ticket, repo, source['root'], identity, source['journal']['expected_head'], namespace='execution')
@@ -306,6 +317,9 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                     phases = envelope['binding'].setdefault('allowed_phases', [])
                     if 'feedback' not in phases:
                         phases.append('feedback')
+                if operator_recovery_profile is not None:
+                    envelope['policy'] = copy.deepcopy(operator_recovery_profile)
+                    current['attempt_limit'] = operator_recovery_profile['development_attempts']
                 envelope['binding'].update(controller=controller_snapshot, reconciliation_id=identity,
                     historical_capture_bindings_sha256=digest(source['capture_bindings']), scope_reconciliations=scope,
                     historical_invocations=copy.deepcopy(counters['invocations']),
@@ -332,6 +346,7 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                 atomic_json(runtime / 'state.json', outer)
                 scheduler = TaskScheduler(runtime / 'worktree', runtime / '03-dev/tasks', plan, source['quality'], source['context'],
                     None, None, isolate_candidates=True, recover_timeouts=True, runtime_identity=runtime_identity,
+                    max_attempts=envelope['policy']['development_attempts'],
                     historical_capture_authority=digest(source['capture_bindings']), scope_reconciliations=scope)
                 current['ignored_paths'] = scheduler._ignored()
                 for record in current['tasks'].values():
@@ -365,6 +380,11 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                 if profile_update is not None:
                     from ssdlc_feedback_admission import CONTRACT as PROFILE_CONTRACT
                     proposal.update(authorization_contract=PROFILE_CONTRACT, profile_sha256=digest(profile_update))
+                if operator_recovery_profile is not None:
+                    from ssdlc_operator_recovery import CONTRACT as RECOVERY_CONTRACT
+                    proposal.update(authorization_contract=RECOVERY_CONTRACT,
+                        profile_sha256=digest(operator_recovery_profile),
+                        operator_recovery_sha256=digest(reviewed['operator_recovery']))
                 if return_proof is not None:
                     from ssdlc_feedback_return import CONTRACT as RETURN_CONTRACT, OPERATOR_CONTRACT
                     proposal.update(authorization_contract=OPERATOR_CONTRACT if operator else RETURN_CONTRACT,
@@ -390,17 +410,20 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
     from ssdlc_preparations import update, clear_pending
     ticket, preparation = _ticket(ticket), _ticket(preparation)
     proposal, recipe = _read(preparation, 'proposal.json'), _read(preparation, 'recipe.json')
+    from ssdlc_operator_recovery import CONTRACT as RECOVERY_CONTRACT, validate_binding as validate_recovery
+    validate_recovery(proposal, recipe)
     if 'owner_feedback' in recipe['subject'] or 'owner_allowance_sha256' in proposal:
         from ssdlc_owner_revalidation import validate_allowance_binding
         validate_allowance_binding(proposal, recipe['subject'].get('owner_feedback', {}))
     from ssdlc_feedback_delegation import CONTRACT, FencedSession, finalize
     delegated = proposal.get('authorization_contract') == CONTRACT
     profile_admission = proposal.get('authorization_contract') == 'feedback-profile-admission-v1'
+    operator_recovery = proposal.get('authorization_contract') == RECOVERY_CONTRACT
     from ssdlc_feedback_return import CONTRACTS as RETURN_CONTRACTS, CONTRACT as RETURN_CONTRACT
     repair_return = proposal.get('authorization_contract') in RETURN_CONTRACTS
     repair_delegated = proposal.get('authorization_contract') == RETURN_CONTRACT
     if (preparation != ticket / 'execution' / ('prepared-' + proposal['transition_id'])
-            or proposal.get('authorization_contract') not in {'scope-amendment-v1', CONTRACT, 'feedback-profile-admission-v1', *RETURN_CONTRACTS}
+            or proposal.get('authorization_contract') not in {'scope-amendment-v1', CONTRACT, RECOVERY_CONTRACT, 'feedback-profile-admission-v1', *RETURN_CONTRACTS}
             or delegated and (not isinstance(delegation, FencedSession) or delegation.ticket != ticket
                               or delegation.root != Path(recipe['source_root']))
             or not delegated and delegation is not None):
@@ -434,11 +457,16 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
         source = inspect(ticket, allow_host_hints=delegated or profile_admission or repair_return)
         with transition_lock(source['root'] / '03-dev/tasks/scheduler.lock', held_locks):
             if 'owner_feedback_sha256' in proposal:
-                expected = subject(source, _read(ticket / 'execution-runtimes' / proposal['transition_id'],
+                subject_builder = subject
+                extra = {}
+                if operator_recovery:
+                    from ssdlc_operator_recovery import subject as subject_builder
+                    extra['profile'] = recipe['envelope']['policy']
+                expected = subject_builder(source, _read(ticket / 'execution-runtimes' / proposal['transition_id'],
                     '02-design/plan.json'), recipe['subject']['reason'],
                     feedback_request_id=recipe['subject']['owner_feedback']['request_id'],
                     reconcile_feedback_evidence='source_reconciliation' in recipe['subject']['owner_feedback'],
-                    operator_owner_limit=recipe['subject']['owner_feedback'].get('operator_allowance', {}).get('manual_limit'))
+                    operator_owner_limit=recipe['subject']['owner_feedback'].get('operator_allowance', {}).get('manual_limit'), **extra)
                 if expected != recipe['subject']:
                     raise TransitionError('Owner feedback changed after coverage review')
             if delegated:
@@ -473,7 +501,7 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
             seal = _read(preparation, 'runtime-seal.json')
             if _files(runtime) != seal: raise TransitionError('Prepared runtime changed')
             envelope, counters = LimitsStore(runtime, clock)._load(repair=False)
-            if profile_admission and digest(envelope['policy']) != proposal['profile_sha256']:
+            if (profile_admission or operator_recovery) and digest(envelope['policy']) != proposal['profile_sha256']:
                 raise TransitionError('Admitted feedback profile changed')
             tasks = TaskJournal(runtime / '03-dev/tasks').peek()
             if (envelope != recipe['envelope'] or counters != recipe['counters'] or tasks != recipe['journal_state']
@@ -529,6 +557,8 @@ def main(argv=None):
                 help='Explicitly review changed registered evidence with identical plan/task/capture/counters/worktree')
             command.add_argument('--operator-owner-limit', type=int,
                 help='Exact next manual owner amendment for this task; does not extend automatic/global/file allowances')
+            command.add_argument('--operator-recovery-profile',
+                help='Exact operator-reviewed next-attempt/scope profile; money, clock and invocation caps cannot change')
         if name == 'prepare': command.add_argument('--review', required=True)
         if name in {'activate', 'discard'}: command.add_argument('--preparation', required=True)
         if name == 'activate': command.add_argument('--authorization', required=True)
@@ -544,9 +574,14 @@ def main(argv=None):
                 source = inspect(ticket)
                 with ticket_lock(source['root'] / '03-dev/tasks/scheduler.lock'):
                     if args.command.endswith('preview'):
-                        value = subject(source, read(args.plan), args.reason, feedback_request_id=args.feedback_request,
+                        subject_builder = subject
+                        extra = {}
+                        if args.operator_recovery_profile:
+                            from ssdlc_operator_recovery import subject as subject_builder
+                            extra['profile'] = read(args.operator_recovery_profile)
+                        value = subject_builder(source, read(args.plan), args.reason, feedback_request_id=args.feedback_request,
                                         reconcile_feedback_evidence=args.reconcile_feedback_evidence,
-                                        operator_owner_limit=args.operator_owner_limit)
+                                        operator_owner_limit=args.operator_owner_limit, **extra)
                         result = dict(subject=value, subject_sha256=digest(value), execution_authorized=False)
                     else:
                         result = dict(task_id=source['task_id'], source_generation=source['projection']['transition_id'],
@@ -581,7 +616,8 @@ def main(argv=None):
                                  runtime_identity=runtime_identity, controller_snapshot=snapshot, guard=guard,
                                  feedback_request_id=args.feedback_request,
                                  reconcile_feedback_evidence=args.reconcile_feedback_evidence,
-                                 operator_owner_limit=args.operator_owner_limit)
+                                 operator_owner_limit=args.operator_owner_limit,
+                                 operator_recovery_profile=read(args.operator_recovery_profile) if args.operator_recovery_profile else None)
                 result = dict(preparation=result['preparation'], proposal_sha256=digest(result['proposal']),
                               transition_id=result['proposal']['transition_id'], execution_authorized=False)
             else:
