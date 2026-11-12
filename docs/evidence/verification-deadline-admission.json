@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "capability": "operator-verification-repair-deadline-v1",
+  "validation": {
+    "specific_tests": {
+      "command": "python3 -m unittest discover -s tests -p test_verification_repair.py",
+      "tests": 14,
+      "elapsed_seconds": 27.760,
+      "result": "PASS"
+    },
+    "full_suite": {
+      "command": "python3 -m unittest discover -s tests",
+      "environment": "Python 3.12 in Docker; source mounted read-only; isolated caches; AI keys not passed",
+      "tests": 1131,
+      "unique_test_ids": 1131,
+      "elapsed_seconds": 689.569,
+      "result": "PASS"
+    },
+    "A5_benchmark": {
+      "corpus": "i2-recovery-v2",
+      "cases": 12,
+      "failed_cases": 0,
+      "result": "PASS"
+    },
+    "coverage": [
+      "Expired source may stage an unselected proposal only if its new deadline and all existing capacity checks permit execution",
+      "Original started_at, historical accounting anchor, failed attempts, invocations and source bytes remain unchanged",
+      "Wall allowance increases by exactly the positive integral-second deadline delta",
+      "Native run_phase_dev restores the preserved implementation under the extended bound and revalidates owners",
+      "Missing separate deadline authorization and expired proposed deadlines are refused",
+      "Ordinary verification-repair consent cannot authorize a wall-time change or other profile extensions",
+      "Changed live deadline and malformed extension chain fail integrity checks",
+      "Real stopped-source CLI preview matches the prepared review subject and dispatches zero providers"
+    ]
+  },
+  "limitations": [
+    "This capability is paired with the existing reviewed captured-timeout fixture repair; it is not a general deadline-only migration",
+    "It does not renew separate expired feedback-recording authority or increase its automatic quotas",
+    "Offline validation and preview do not activate the historical run or establish its readiness"
+  ],
+  "provider_calls": 0,
+  "historical_run_modified": false
+}

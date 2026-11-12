@@ -169,3 +169,32 @@ reconciled; replay creates neither a second receipt nor another extension.
 
 This repairs execution capacity and reviewed scope. It neither establishes code
 correctness nor replaces final review, QA, AppSec or integration evidence.
+
+### Separately authorized deadline extension
+
+`operator-verification-repair-deadline-v1` adds a distinct deadline capability to
+the same reviewed timeout/fixture repair. It can prepare and activate after the
+old execution deadline has expired, provided the new proposed deadline is still
+in the future and every other capacity and integrity check passes. It cannot
+recover an uncertain invocation, replenish money or reset task history.
+
+Pass `--verification-repair-deadline UNIX_SECONDS` to preview and prepare along
+with the quality and profile arguments above. The new profile raises
+`wall_seconds` by exactly `new_deadline - old_deadline`, in integral seconds,
+in addition to the already reviewed one-step default attempt increase. All
+other profile fields stay identical. A new deadline cannot borrow v1 consent.
+Authorization additionally requires the proposal's
+`deadline_extension_sha256` and `authorize_deadline_extension: true`.
+
+The original `started_at` and historical accounting anchor remain immutable.
+A bound extension chain and a new limits-journal event record the old/new
+deadline and wall allowance. Staging validates the proposed counters without
+making them executable; only exact activation selects the new generation.
+An already expired proposed deadline is refused. Replay does not extend it
+again, and a changed extension chain or live deadline fails integrity checks.
+
+This changes the native execution deadline. It does not renew a separate,
+expired feedback-recording policy: its authority, expiry, requests and funded
+role history remain unchanged. Such a recording policy still requires its own
+admission before further automatic consultations; deterministic checks and
+authorized native development use the new execution deadline.

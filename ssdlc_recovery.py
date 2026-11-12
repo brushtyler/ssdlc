@@ -159,7 +159,11 @@ class LimitsStore:
             raise DevelopmentBlocked('INTEGRITY', 'Persistent bounded execution mode changed or disappeared')
         binding = envelope.get('binding', {})
         if binding.get('historical_sha256'):
-            anchor = binding['accounting_anchor']
+            from ssdlc_deadline_extensions import accounting_anchor
+            try:
+                anchor = accounting_anchor(envelope)
+            except (TaskError, KeyError, TypeError, ValueError):
+                raise DevelopmentBlocked('INTEGRITY', 'Bound deadline extension chain changed') from None
             if any(state.get(key) != value for key, value in anchor.items()):
                 raise DevelopmentBlocked('INTEGRITY', 'Historical deadline/budget/diagnosis anchor changed')
             if digest(state.get('historical')) != binding['historical_sha256']:
@@ -218,6 +222,10 @@ class LimitsStore:
 
     def require_capacity(self, role, phase):
         envelope, state = self._load(repair=False)
+        return self.check_capacity(envelope, state, role, phase)
+
+    def check_capacity(self, envelope, state, role, phase):
+        """Pure capacity validation, also used on an unselected proposal."""
         p = envelope['policy']
         self.check(state, p)
         allowed = envelope['binding'].get('allowed_phases')

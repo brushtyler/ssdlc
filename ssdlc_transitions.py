@@ -72,12 +72,17 @@ def validate_authorization(authorization, proposal):
         expected |= {'profile_sha256'}
         if authorization.get('profile_sha256') != proposal.get('profile_sha256') or proposal.get('scope_diff') != {}:
             raise TransitionError('Feedback profile admission requires exact unchanged scope and profile authorization')
-    if proposal.get('authorization_contract') == 'operator-verification-repair-v1':
+    if proposal.get('authorization_contract') in {'operator-verification-repair-v1', 'operator-verification-repair-deadline-v1'}:
         expected |= {'profile_sha256', 'quality_contract_sha256', 'verification_repair_sha256', 'authorize_extensions'}
         if (any(authorization.get(key) != proposal.get(key) for key in
                 ('profile_sha256', 'quality_contract_sha256', 'verification_repair_sha256'))
                 or authorization.get('authorize_extensions') is not True):
             raise TransitionError('Verification repair requires exact explicit timeout, scope and attempt authorization')
+        if proposal['authorization_contract'] == 'operator-verification-repair-deadline-v1':
+            expected |= {'deadline_extension_sha256', 'authorize_deadline_extension'}
+            if (authorization.get('deadline_extension_sha256') != proposal.get('deadline_extension_sha256')
+                    or authorization.get('authorize_deadline_extension') is not True):
+                raise TransitionError('Deadline extension requires its exact separate explicit authorization')
     if proposal.get('authorization_contract') == 'feedback-operator-repair-return-v1':
         expected |= {'repair_return_sha256'}
         if (authorization.get('repair_return_sha256') != proposal.get('repair_return_sha256')
@@ -229,6 +234,7 @@ class TransitionStore:
             if (proposal.get('authorization_contract') not in {'scope-amendment-v1', 'feedback-scope-delegation-v1',
                     'feedback-profile-admission-v1', 'operator-owner-recovery-v1',
                     'operator-verification-repair-v1',
+                    'operator-verification-repair-deadline-v1',
                     'feedback-in-scope-return-v1', 'feedback-operator-repair-return-v1'}
                     or proposal.get('parent_selector') != self._read(self.root, 'active.json')):
                 raise TransitionError('Another generation is already selected')
