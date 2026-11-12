@@ -266,7 +266,7 @@ class CoverageGuardTests(unittest.TestCase):
 
 
 class OwnerFeedbackTests(unittest.TestCase):
-    def initialize(self, enabled):
+    def initialize(self, enabled, *, attempt_cap=3, owner_limit=2):
         import test_reconciliation as reconciliation
         from test_feedback_delegation import grant
         from test_feedback_workflow import config
@@ -275,6 +275,7 @@ class OwnerFeedbackTests(unittest.TestCase):
             original(f)
             policy = f.request['profile']
             policy['feedback_delegation'] = grant()
+            policy['feedback_delegation']['max_amendments_per_task'] = owner_limit
             policy['feedback_delegation']['allowed_files'].append('app.py')
             if enabled: policy['feedback_delegation']['owner_revalidation'] = True
             policy['feedback_workflow'] = config()
@@ -286,11 +287,12 @@ class OwnerFeedbackTests(unittest.TestCase):
                     result = developer(*args)
                     if 'SCOPE_REQUIRED' in result['output']:
                         result['output'] = 'TASK_FEEDBACK_JSON: ' + json.dumps(dict(cause='MISSING_TARGET',
-                            obligation_refs=args[0]['ac_refs'] + args[0]['sec_refs'], requested_files=['app.py'])) + '\nTASK_DEV_STATUS: SCOPE_REQUIRED'
+                            obligation_refs=args[0]['ac_refs'] + args[0]['sec_refs'],
+                            requested_files=getattr(self,'requested_paths',['app.py']))) + '\nTASK_DEV_STATUS: SCOPE_REQUIRED'
                     return result
                 return super().scheduler(root, wrapped)
         self.f = f = TypedScope()
-        with patch.object(reconciliation.ReconciliationTests, 'setUp', funded): f.initialize()
+        with patch.object(reconciliation.ReconciliationTests, 'setUp', funded): f.initialize(attempt_cap=attempt_cap)
         self.addCleanup(f.doCleanups)
         self.calls = []
         self.wrong_coverage = False

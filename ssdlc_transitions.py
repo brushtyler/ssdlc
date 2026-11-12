@@ -41,6 +41,9 @@ def source_binding(root, refs):
 
 
 def validate_authorization(authorization, proposal):
+    if ('owner_allowance_sha256' in proposal
+            and proposal.get('authorization_contract') != 'scope-amendment-v1'):
+        raise TransitionError('Manual owner allowances cannot use delegated authorization')
     if proposal.get('authorization_contract') == 'feedback-in-scope-return-v1':
         from ssdlc_feedback_return import validate_authorization as repair
         return repair(authorization, proposal)
@@ -51,6 +54,12 @@ def validate_authorization(authorization, proposal):
                 'source_fenced', 'old_controller_sha256', 'new_controller_sha256'}
     if not isinstance(authorization, dict):
         raise TransitionError('Transition requires exact, fenced operator authorization')
+    if 'owner_allowance_sha256' in proposal:
+        expected.add('owner_allowance_sha256')
+        if (proposal.get('authorization_contract') != 'scope-amendment-v1'
+                or 'owner_feedback_sha256' not in proposal
+                or authorization.get('owner_allowance_sha256') != proposal['owner_allowance_sha256']):
+            raise TransitionError('Manual owner allowance requires its exact separate operator authorization')
     if proposal.get('authorization_contract') == 'feedback-profile-admission-v1':
         expected |= {'profile_sha256'}
         if authorization.get('profile_sha256') != proposal.get('profile_sha256') or proposal.get('scope_diff') != {}:

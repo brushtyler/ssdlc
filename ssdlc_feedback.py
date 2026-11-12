@@ -436,11 +436,12 @@ class FeedbackStore:
             if review['verdict'] == 'APPROVED' and not review['coverage_preserved']:
                 raise FeedbackError('Approval cannot weaken obligation coverage')
             if 'owner_coverage' in review:
-                from ssdlc_owner_revalidation import scope_contract, validate_review
+                from ssdlc_owner_revalidation import scope_contract, validate_review, validate_patches
                 value = scope_contract(source, row['proposal']['requested_files'])
                 if row['proposal']['route'] != 'AMENDMENT' or value is None:
                     raise FeedbackError('Owner coverage requires an owned-file amendment')
                 validate_review(value, review['owner_coverage'])
+                validate_patches(value, review['owner_coverage'], source['root'] / 'worktree')
             row.update(status='REVIEWED', reviewer=copy.deepcopy(reviewer), review=copy.deepcopy(review),
                        independence=quality, reviewed_at=self.clock())
             row['decisions'].append(dict(proposal=copy.deepcopy(row['proposal']), review=copy.deepcopy(review)))
@@ -588,6 +589,7 @@ class FeedbackStore:
                     amendments_reserved=sum(item['status'] == 'RESERVED' for item in state['amendments']),
                     amendments_applied=sum(item['status'] == 'APPLIED' for item in state['amendments']) + len(state.get('owner_amendments', [])),
                     operator_owner_amendments=len(state.get('owner_amendments', [])),
+                    operator_owner_allowances=sum('operator_allowance' in r for r in state.get('owner_amendments', [])),
                     repair_returns=len(state.get('repair_returns', [])),
                     operator_repair_returns=sum(r['operator'] for r in state.get('repair_returns', [])))
 

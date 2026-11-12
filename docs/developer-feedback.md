@@ -663,11 +663,47 @@ inputs, not automatically approved by the CLI.
 If final stop reporting changed the request's overall source-evidence hash,
 the bridge refuses it by default. `--reconcile-feedback-evidence` is a separate
 operator input to both preview and prepare. It admits only an identical parent,
-plan, complete task state, failure, capture, counters, limits envelope and
-worktree; request evidence must still match its recorded hashes. The subject
+plan, complete task state, failure, capture, limits envelope and worktree;
+request evidence must still match its recorded hashes. Historical counters and
+the native accounting journal prefix must remain intact. The only permitted
+counter advance is the exact set of funded, captured, returned consultations
+for that request, with matching actor, role, envelope and observed usage. An
+unrelated invocation, changed historical usage or missing response refuses the
+reconciliation. The subject
 explicitly records the old/current source hashes and the independent review of
 current registered evidence. It does not claim that an earlier decision covers
 that changed evidence. The automatic feedback route has no such waiver.
+
+### A separately authorized manual owner amendment
+
+If the frozen per-task amendment limit is exhausted, the operator bridge can
+propose `--operator-owner-limit N` on both preview and prepare. `N` must be
+exactly the observed amendment count for this task plus one, greater than the
+frozen per-task limit, and within the original global amendment cap. Global
+amendment and added-file caps still apply. This exception requires a bound owner
+request and cannot authorize an automated/delegated transition.
+
+The proposal includes `owner_allowance_sha256`. The normal exact, fenced
+operator authorization must additionally contain that same hash. This approves
+one exact manual amendment; it does not edit the frozen profile, grant an
+automatic retry, restore development attempts or increase invocation, monetary
+or time limits. The receipt records the exception, including the frozen grant
+digest and observed count. Publication before receipt remains fenced; exact
+activation replay completes it without a second debit. A rejected feedback
+decision stays rejected and its consultations stay consumed. Public projections
+and metrics separately count these manual exceptions.
+
+The independent coverage review may optionally include a `patch` string on an
+`approved_test_changes` entry, alongside its existing exact path, old/new hashes
+and reason. At most four unified patches, totaling 4096 bytes of JSON-encoded
+patch text, are accepted. Each must name only its declared file. Before
+preparation or automated review acceptance, the host applies each patch in a
+disposable Git directory and verifies its resulting hash. This never executes
+candidate code or changes the candidate. The full bounded patch text is then
+included in developer context so an approved fixture change is reproducible.
+The independent reviewer must still assess semantic coverage; matching a hash
+does not prove it. Hash-only reviews and previous authorizations remain valid
+when no new capability is requested.
 
 ### Owner recovery boundaries
 
