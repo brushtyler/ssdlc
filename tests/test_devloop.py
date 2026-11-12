@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 from devloop import agents, config, markdown, review, schema
 from devloop.dispatcher import Action, Dispatcher, PullRequest, Snapshot, plan
-from devloop.github import summarize_checks
+from devloop.github import GitHub, GitHubError, normalize_checks, summarize_checks
 
 CFG = config.load_config()
 SHA1, SHA2 = 'a' * 40, 'b' * 40
@@ -226,7 +226,72 @@ class ChecksTests(unittest.TestCase):
         self.assertEqual(summarize_checks([
             {'name': 'a', 'bucket': 'fail', 'link': 'https://github.com/o/r/actions/runs/42/job/7'},
             {'name': 'b', 'bucket': 'pending'}]), ('fail', ['a'], ['42']))
-        self.assertEqual(summarize_checks([{'name': 'a', 'bucket': 'skipping'}])[0], 'pass')
+        self.assertEqual(summarize_checks([{'name': 'a', 'bucket': 'pass'}])[0], 'pass')
+
+    def test_normalize_check_runs_and_statuses(self):
+        runs = [{'name': 'ok', 'status': 'completed', 'conclusion': 'skipped', 'details_url': ''},
+                {'name': 'wip', 'status': 'in_progress', 'conclusion': None, 'details_url': ''},
+                {'name': 'bad', 'status': 'completed', 'conclusion': 'timed_out',
+                 'details_url': 'https://github.com/o/r/actions/runs/9/job/1'}]
+        statuses = [{'context': 'ext', 'state': 'error', 'target_url': None}]
+        self.assertEqual([c['bucket'] for c in normalize_checks(runs, statuses)],
+                         ['pass', 'pending', 'fail', 'fail'])
+        self.assertEqual(summarize_checks(normalize_checks(runs, statuses)),
+                         ('fail', ['bad', 'ext'], ['9']))
+        self.assertEqual(summarize_checks(normalize_checks(runs[:2], [])), ('pending', [], []))
+
+
+class GitHubAdapterTests(unittest.TestCase):
+    """The adapter must work with old `gh` releases: no `gh pr checks --json`, no `gh * edit`."""
+
+    def make(self, responses):
+        self.calls = []
+
+        def fake_run(argv, **kw):
+            self.calls.append((argv, kw.get('input')))
+            for needle, (rc, out, err) in responses:
+                if needle in ' '.join(argv):
+                    return SimpleNamespace(returncode=rc, stdout=out, stderr=err)
+            return SimpleNamespace(returncode=0, stdout='{}', stderr='')
+        return GitHub('o/r', run=fake_run)
+
+    def test_checks_use_rest_for_the_given_commit(self):
+        gh = self.make([
+            ('check-runs', (0, '{"name":"t","status":"completed","conclusion":"success",'
+                               '"details_url":""}\n', '')),
+            # The combined status is "pending" when a commit has no statuses at all.
+            (f'commits/{SHA1}/status', (0, '{"state":"pending","statuses":[]}', ''))])
+        self.assertEqual(gh.checks(SHA1), ('pass', [], []))
+        self.assertTrue(all(argv[1] == 'api' for argv, _ in self.calls))
+        self.assertTrue(any(f'commits/{SHA1}/check-runs' in ' '.join(a) for a, _ in self.calls))
+
+    def test_no_checks_at_all(self):
+        gh = self.make([('check-runs', (0, '', '')),
+                        ('/status', (0, '{"state":"pending","statuses":[]}', ''))])
+        self.assertEqual(gh.checks(SHA1), ('none', [], []))
+
+    def test_label_and_comment_writes_use_rest(self):
+        gh = self.make([('labels/agent%3Achanges', (1, '{"message":"Label does not exist"}',
+                                                     'gh: Label does not exist (HTTP 404)'))])
+        gh.edit_labels(5, add=['agent:review'], remove=['agent:changes'])
+        gh.comment(5, 'hello')
+        argvs = [' '.join(a) for a, _ in self.calls]
+        self.assertTrue(all(a.startswith('gh api') for a in argvs))
+        self.assertIn('-X POST repos/o/r/issues/5/labels -f labels[]=agent:review', argvs[0])
+        self.assertIn('-X DELETE repos/o/r/issues/5/labels/agent%3Achanges', argvs[1])
+        self.assertEqual(self.calls[2][1], 'hello')
+
+    def test_other_label_removal_errors_surface(self):
+        gh = self.make([('labels/agent%3Achanges', (1, '', 'HTTP 403: forbidden'))])
+        with self.assertRaises(GitHubError):
+            gh.edit_labels(5, remove=['agent:changes'])
+
+    def test_create_pr_then_labels(self):
+        gh = self.make([('repos/o/r/pulls', (0, '{"number": 61, "html_url": "u"}', ''))])
+        self.assertEqual(gh.create_pr(base='main', head='agent/issue-7', title='t', body='b',
+                                      labels=['agent:review']), 'u')
+        self.assertEqual(self.calls[0][1], 'b')
+        self.assertIn('repos/o/r/issues/61/labels', ' '.join(self.calls[1][0]))
 
 
 # Dispatcher ------------------------------------------------------------------
@@ -255,7 +320,7 @@ class PlanTests(unittest.TestCase):
             ready(5), ready(3, labeler='stranger'), ready(9, ['prerequisito']),
             ready(2, ['bloccata']), ready(4, ['agent:needs-human'])])
         self.assertEqual(self.kinds(snap), [('implement', 9), ('implement', 5)])
-        snap.prs = [pr(number=100, labels=['agent:ready-to-merge'])]
+        snap.prs = [pr(number=100, labels=['agent:ready-to-merge'], reviews=[norm(raw_review())])]
         self.assertEqual(self.kinds(snap), [('implement', 9)])
         snap.prs.append(pr(number=101, issue=8, labels=['agent:needs-human']))
         self.assertEqual(self.kinds(snap), [])
@@ -275,6 +340,27 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(self.kinds(Snapshot([pr(reviews=[done], head=SHA2)], [], [])),
                          [('review', 100)])
 
+    def test_recorded_approval_waits_for_current_ci(self):
+        done = norm(raw_review())
+        self.assertEqual(self.kinds(Snapshot([pr(reviews=[done], checks='fail')], [], [])),
+                         [('ci_failed', 100)])
+        self.assertEqual(self.kinds(Snapshot([pr(reviews=[done], checks='pending')], [], [])), [])
+        changes = norm(raw_review('request_changes', [finding()]))
+        self.assertEqual(self.kinds(Snapshot([pr(reviews=[changes], checks='pending')], [], [])),
+                         [('apply_review', 100)])
+
+    def test_ready_prs_are_rechecked_against_the_approved_commit(self):
+        done = norm(raw_review())
+        ready_pr = dict(labels=['agent:ready-to-merge'], reviews=[done])
+        self.assertEqual(self.kinds(Snapshot([pr(**ready_pr)], [], [])), [])
+        self.assertEqual(self.kinds(Snapshot([pr(**ready_pr, checks='pending')], [], [])), [])
+        self.assertEqual(self.kinds(Snapshot([pr(**ready_pr, head=SHA2, checks='fail')], [], [])),
+                         [('revoke', 100)])
+        self.assertEqual(self.kinds(Snapshot([pr(**ready_pr, checks='fail')], [], [])),
+                         [('ci_failed', 100)])
+        self.assertEqual(self.kinds(Snapshot([pr(labels=['agent:ready-to-merge'])], [], [])),
+                         [('revoke', 100)])
+
     def test_stale_working_issue_and_action_cap(self):
         snap = Snapshot(prs=[pr(number=100 + i, issue=i, labels=['agent:changes']) for i in range(4)],
                         ready_issues=[], working_issues=[50, 1])
@@ -284,10 +370,18 @@ class PlanTests(unittest.TestCase):
 
 
 class FakeGH:
-    def __init__(self):
+    def __init__(self, head=SHA1, ci='pass'):
         self.labels = {}
         self.comments = []
         self.created = []
+        self.head = head
+        self.ci = ci
+
+    def pr_head(self, number):
+        return self.head
+
+    def checks(self, sha):
+        return self.ci, [], []
 
     def issue(self, number):
         return {'number': number, 'title': f'Issue {number}', 'body': 'Do the thing.',
@@ -431,6 +525,41 @@ class DispatcherTests(unittest.TestCase):
                 body = self.gh.comments[0][1]
                 self.assertTrue(body.startswith('> [!NOTE]\n> **Agent:** Claude Code (CLI v9.9)'))
                 self.assertEqual(markdown.read_markers(body, 'review')[0]['verdict'], raw['verdict'])
+
+    def test_approval_is_not_promoted_when_head_or_ci_changed_meanwhile(self):
+        for head, ci in ((SHA2, 'pass'), (SHA1, 'pending'), (SHA1, 'fail')):
+            with self.subTest(head=head, ci=ci):
+                d = self.make(FakeRunner(raw_review()))
+                self.gh.head, self.gh.ci = head, ci
+                p = pr()
+                self.gh.labels[100] = set(p.labels)
+                d._do_review(p)
+                self.assertEqual(self.gh.labels[100], {'agent:review'})
+                self.assertEqual(len(self.gh.comments), 1)  # the review itself is still recorded
+
+    def test_replayed_approval_rechecks_before_promotion(self):
+        d = self.make(FakeRunner())
+        self.gh.head = SHA2
+        p = pr(reviews=[norm(raw_review())])
+        self.gh.labels[100] = set(p.labels)
+        d._do_apply_review(p)
+        self.assertEqual(self.gh.labels[100], {'agent:review'})
+
+    def test_revoke_sends_a_moved_ready_pr_back_to_review(self):
+        d = self.make(FakeRunner())
+        p = pr(labels=['agent:ready-to-merge'], reviews=[norm(raw_review())], head=SHA2)
+        self.gh.labels[100] = set(p.labels)
+        d._do_revoke(p)
+        self.assertEqual(self.gh.labels[100], {'agent:review'})
+        self.assertIn('**Agent:** devloop dispatcher', self.gh.comments[0][1])
+        self.assertIn(SHA1[:12], self.gh.comments[0][1])
+
+    def test_ci_failure_after_approval_clears_readiness(self):
+        d = self.make(FakeRunner())
+        p = pr(labels=['agent:ready-to-merge'], reviews=[norm(raw_review())], checks='fail')
+        self.gh.labels[100] = set(p.labels)
+        d._do_ci_failed(p)
+        self.assertEqual(self.gh.labels[100], {'agent:changes'})
 
     def test_review_round_limit_escalates(self):
         rounds = [dict(norm(raw_review('request_changes', [finding()]), round_no=i), round=i)

@@ -7,6 +7,10 @@ Issue  agent:ready ─► agent:working ─► PR opened
 PR     agent:review ─► (CI fail | request_changes) ─► agent:changes ─► agent:review ─► …
                    └─► approve ─► agent:ready-to-merge   (a human merges)
        any step can escalate to agent:needs-human.
+
+Readiness is bound to the approved commit: a PR is promoted only if its head is still the
+reviewed commit and CI passed, and a ready PR whose head moves goes back to review (or to
+agent:changes when CI fails on it).
 """
 
 import string
@@ -77,19 +81,30 @@ def plan(snapshot, cfg):
         if number not in pr_issues:
             actions.append(Action('stale', number, 'agent:working without an open devloop PR'))
     for pr in snapshot.prs:
-        if lb.needs_human in pr.labels or lb.ready_to_merge in pr.labels:
+        if lb.needs_human in pr.labels:
+            continue
+        latest = pr.reviews[-1] if pr.reviews else None
+        if lb.ready_to_merge in pr.labels:
+            # Readiness belongs to the approved commit: re-check it on every tick.
+            approved = latest is not None and latest['verdict'] == 'approve'
+            if not approved or latest['head_sha'] != pr.head_sha:
+                actions.append(Action('revoke', pr.number, 'head is not the approved commit'))
+            elif pr.checks == 'fail':
+                actions.append(Action('ci_failed', pr.number, 'CI failed after approval'))
             continue
         if lb.changes in pr.labels:
             actions.append(Action('fix', pr.number))
         elif lb.review in pr.labels:
-            latest = pr.reviews[-1] if pr.reviews else None
             answered = latest is not None and any(f['round'] == latest['round'] for f in pr.fixes)
-            if latest and latest['head_sha'] == pr.head_sha and not answered:
+            replay = latest is not None and latest['head_sha'] == pr.head_sha and not answered
+            if replay and latest['verdict'] != 'approve':
                 actions.append(Action('apply_review', pr.number, 'verdict already recorded'))
             elif pr.checks == 'pending':
                 continue
             elif pr.checks == 'fail':
                 actions.append(Action('ci_failed', pr.number))
+            elif replay:
+                actions.append(Action('apply_review', pr.number, 'approval already recorded'))
             else:
                 actions.append(Action('review', pr.number))
     free = cfg.max_open_prs - len(snapshot.prs)
@@ -175,12 +190,12 @@ class Dispatcher:
             pr = self._devloop_pr(raw)
             if pr is None:
                 continue
-            if pr.labels & {lb.review, lb.changes}:
+            if pr.labels & {lb.review, lb.changes, lb.ready_to_merge}:
                 comments = self.gh.pr_comments(pr.number)
                 pr.reviews = sorted(self._trusted_markers(comments, 'review'), key=lambda r: r['round'])
                 pr.fixes = self._trusted_markers(comments, 'fix')
-            if lb.review in pr.labels:
-                pr.checks, pr.failed_checks, pr.failed_runs = self.gh.checks(pr.number)
+            if pr.labels & {lb.review, lb.ready_to_merge}:
+                pr.checks, pr.failed_checks, pr.failed_runs = self.gh.checks(pr.head_sha)
             prs.append(pr)
         ready = []
         for raw in self.gh.issues_with_label(lb.ready):
@@ -220,7 +235,8 @@ class Dispatcher:
         reason = f'Il passo `{action.kind}` è fallito: {exc}.{where}'
         try:
             if pr is not None:
-                self._escalate(pr.number, reason, remove=[lb.review, lb.changes])
+                self._escalate(pr.number, reason,
+                               remove=[lb.review, lb.changes, lb.ready_to_merge])
             else:
                 self._escalate(action.number, reason, remove=[lb.working, lb.ready])
         except GitHubError as gh_exc:
@@ -260,11 +276,26 @@ class Dispatcher:
         self.gh.comment(number, body)
         self.gh.edit_labels(number, add=[self.cfg.labels.needs_human], remove=remove)
 
+    def _approval_current(self, pr, review):
+        """Re-read head and CI just before promoting: approval holds only for the reviewed commit
+        with CI passed or absent. Otherwise the PR stays in review for the next tick."""
+        head = self.gh.pr_head(pr.number)
+        if head != review['head_sha']:
+            self.log(f'  not promoted: head moved to {head[:12]} after the review')
+            return False
+        state = self.gh.checks(head)[0]
+        if state not in ('pass', 'none'):
+            self.log(f'  not promoted: CI is {state}')
+            return False
+        return True
+
     def _apply_verdict(self, pr, review, announce):
         lb = self.cfg.labels
-        transient = [lb.review, lb.changes]
+        transient = [lb.review, lb.changes, lb.ready_to_merge]
         if review['verdict'] == 'approve':
-            self.gh.edit_labels(pr.number, add=[lb.ready_to_merge], remove=transient)
+            if self._approval_current(pr, review):
+                self.gh.edit_labels(pr.number, add=[lb.ready_to_merge],
+                                    remove=[lb.review, lb.changes])
         elif review['verdict'] == 'needs_human':
             self.gh.edit_labels(pr.number, add=[lb.needs_human], remove=transient)
         elif review['round'] >= self.cfg.max_review_rounds:
@@ -274,9 +305,18 @@ class Dispatcher:
                     'finding bloccanti ancora aperti.'))
             self.gh.edit_labels(pr.number, add=[lb.needs_human], remove=transient)
         else:
-            self.gh.edit_labels(pr.number, add=[lb.changes], remove=[lb.review])
+            self.gh.edit_labels(pr.number, add=[lb.changes], remove=[lb.review, lb.ready_to_merge])
 
     # Actions -------------------------------------------------------------
+    def _do_revoke(self, pr):
+        lb = self.cfg.labels
+        latest = pr.reviews[-1] if pr.reviews else None
+        approved = latest['head_sha'][:12] if latest and latest['verdict'] == 'approve' else None
+        reason = (f'Il commit `{pr.head_sha[:12]}` non è quello approvato (`{approved}`)'
+                  if approved else 'Non risulta una review devloop approvata')
+        self.gh.comment(pr.number, dispatcher_header() + '\n## Approvazione revocata\n\n'
+                        + reason + '. La PR torna in review.\n')
+        self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.ready_to_merge])
     def _do_stale(self, number):
         lb = self.cfg.labels
         self._escalate(number, 'Implementazione interrotta: la issue era in lavorazione ma non '

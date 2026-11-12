@@ -1,10 +1,19 @@
-"""Thin wrapper over the `gh` CLI. All GitHub state devloop relies on goes through here."""
+"""Thin wrapper over the `gh` CLI. All GitHub state devloop relies on goes through here.
+
+Checks, labels, comments and pull request creation use the REST API through `gh api`, which
+behaves the same across `gh` versions. Porcelain commands are used only for reads whose `--json`
+output is long-standing (`issue list/view`, `pr list/view`).
+"""
 
 import json
 import re
 import subprocess
+from urllib.parse import quote
 
 _RUN_ID = re.compile(r'/actions/runs/(\d+)')
+_FAILED_CONCLUSIONS = {'failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure',
+                       'stale'}
+_FAILED_STATUSES = {'failure', 'error'}
 
 
 class GitHubError(RuntimeError):
@@ -24,6 +33,9 @@ class GitHub:
 
     def _json(self, *args):
         return json.loads(self._gh(*args).stdout or 'null')
+
+    def _json_lines(self, *args):
+        return [json.loads(line) for line in self._gh(*args).stdout.splitlines() if line.strip()]
 
     # Reads ---------------------------------------------------------------
     def issues_with_label(self, label):
@@ -50,17 +62,20 @@ class GitHub:
     def pr_comments(self, number):
         return self._json('pr', 'view', str(number), '-R', self.repo, '--json', 'comments')['comments']
 
-    def checks(self, number):
-        """``(state, failed_names, failed_run_ids)``; state is pass, fail, pending or none."""
-        done = self._gh('pr', 'checks', str(number), '-R', self.repo, '--json', 'name,bucket,link',
-                        check=False)
-        try:
-            checks = json.loads(done.stdout)
-        except json.JSONDecodeError:
-            if 'no checks' in done.stderr.lower():
-                return 'none', [], []
-            raise GitHubError(f'gh pr checks {number}: {done.stderr.strip()[:500]}')
-        return summarize_checks(checks)
+    def pr_head(self, number):
+        """The PR's current head commit, read fresh."""
+        return self._json('api', f'repos/{self.repo}/pulls/{number}')['head']['sha']
+
+    def checks(self, sha):
+        """``(state, failed_names, failed_run_ids)`` for commit ``sha``.
+
+        ``state`` is pass, fail, pending or none. Both check runs (Actions) and commit statuses
+        count.
+        """
+        runs = self._json_lines('api', '--paginate', f'repos/{self.repo}/commits/{sha}/check-runs',
+                                '--jq', '.check_runs[] | {name, status, conclusion, details_url}')
+        statuses = self._json('api', f'repos/{self.repo}/commits/{sha}/status')
+        return summarize_checks(normalize_checks(runs, statuses.get('statuses') or []))
 
     def failed_log(self, run_id, max_lines=80):
         done = self._gh('run', 'view', str(run_id), '-R', self.repo, '--log-failed', check=False)
@@ -68,37 +83,61 @@ class GitHub:
 
     # Writes --------------------------------------------------------------
     def edit_labels(self, number, add=(), remove=()):
-        args = ['issue', 'edit', str(number), '-R', self.repo]
-        for label in add:
-            args += ['--add-label', label]
-        for label in remove:
-            args += ['--remove-label', label]
-        if add or remove:
+        if add:
+            args = ['api', '-X', 'POST', f'repos/{self.repo}/issues/{number}/labels']
+            for label in add:
+                args += ['-f', f'labels[]={label}']
             self._gh(*args)
+        for label in remove:
+            done = self._gh('api', '-X', 'DELETE',
+                            f'repos/{self.repo}/issues/{number}/labels/{quote(label, safe="")}',
+                            check=False)
+            # Removing a label that is not there is a no-op, not an error.
+            if done.returncode != 0 and 'Label does not exist' not in done.stdout + done.stderr:
+                raise GitHubError(f'remove label {label} from #{number}: {done.stderr.strip()[:500]}')
 
     def comment(self, number, body):
-        self._gh('issue', 'comment', str(number), '-R', self.repo, '--body-file', '-', stdin=body)
+        self._gh('api', '-X', 'POST', f'repos/{self.repo}/issues/{number}/comments',
+                 '-F', 'body=@-', stdin=body)
 
     def create_pr(self, *, base, head, title, body, labels=()):
-        args = ['pr', 'create', '-R', self.repo, '--base', base, '--head', head,
-                '--title', title, '--body-file', '-']
-        for label in labels:
-            args += ['--label', label]
-        return self._gh(*args, stdin=body).stdout.strip()
+        created = json.loads(self._gh(
+            'api', '-X', 'POST', f'repos/{self.repo}/pulls', '-f', f'title={title}',
+            '-f', f'head={head}', '-f', f'base={base}', '-F', 'body=@-', stdin=body).stdout)
+        self.edit_labels(created['number'], add=labels)
+        return created['html_url']
 
     def ensure_label(self, name, color, description):
         self._gh('label', 'create', name, '-R', self.repo, '--color', color,
                  '--description', description, '--force')
 
 
+def normalize_checks(check_runs, statuses):
+    """Check runs and commit statuses as ``{name, bucket, link}`` (bucket: pass, fail, pending)."""
+    checks = []
+    for run in check_runs:
+        if run.get('status') != 'completed':
+            bucket = 'pending'
+        elif run.get('conclusion') in _FAILED_CONCLUSIONS:
+            bucket = 'fail'
+        else:
+            bucket = 'pass'
+        checks.append({'name': run.get('name'), 'bucket': bucket, 'link': run.get('details_url')})
+    for status in statuses:
+        state = status.get('state')
+        bucket = 'fail' if state in _FAILED_STATUSES else 'pending' if state == 'pending' else 'pass'
+        checks.append({'name': status.get('context'), 'bucket': bucket,
+                       'link': status.get('target_url')})
+    return checks
+
+
 def summarize_checks(checks):
-    buckets = [c.get('bucket') for c in checks]
     if not checks:
         return 'none', [], []
-    failed = [c for c in checks if c.get('bucket') in ('fail', 'cancel')]
+    failed = [c for c in checks if c.get('bucket') == 'fail']
     if failed:
         run_ids = sorted({m.group(1) for c in failed if (m := _RUN_ID.search(c.get('link') or ''))})
         return 'fail', [c['name'] for c in failed], run_ids
-    if any(b == 'pending' for b in buckets):
+    if any(c.get('bucket') == 'pending' for c in checks):
         return 'pending', [], []
     return 'pass', [], []

@@ -16,7 +16,12 @@ plans the next steps and runs them. A crashed tick is resumed by the next one.
 | CI | Checks pending | Wait; failing checks become a review round sent back as `agent:changes` |
 | Review | CI passed or absent | A **different** agent posts a structured verdict (see below) |
 | Fix | `agent:changes` | The implementer fixes or disputes each open finding, then back to `agent:review` |
+| Approve | Verdict `approve` | `agent:ready-to-merge`, only if the PR head is still the reviewed commit and CI passed (both re-read just before promotion) |
 | Merge | `agent:ready-to-merge` | **A human merges.** devloop never merges |
+
+Readiness belongs to the approved commit. Every tick re-checks ready PRs: if the head is no
+longer the approved commit the approval is revoked and the PR goes back to `agent:review`, and if
+CI fails on the approved commit the failure becomes a review round (`agent:changes`).
 
 Any step can stop at `agent:needs-human` with a comment explaining why: the agent declared itself
 blocked, tests still fail after the retry, the reviewer asked for a decision, the round limit
@@ -108,3 +113,5 @@ dispatcher does every commit, push and GitHub write.
 - **Failures escalate immediately.** A timeout or a transient CLI error goes to
   `agent:needs-human` rather than being retried.
 - **Single host, sequential.** One tick runs actions one at a time.
+- **`gh` compatibility.** Checks, labels, comments and PR creation go through the REST API
+  (`gh api`), so devloop does not depend on newer porcelain flags such as `gh pr checks --json`.
