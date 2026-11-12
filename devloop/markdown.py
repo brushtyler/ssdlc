@@ -1,4 +1,13 @@
-"""GitHub text: the AGENTS.md attribution header, hidden markers, review rendering."""
+"""GitHub text: the AGENTS.md attribution header, hidden markers, review rendering.
+
+Markers are the dispatcher's control records, and they share a GitHub account with text written
+by models (summaries, findings, notes, PR bodies, logs). Two rules keep the two apart:
+
+- every published body goes through ``publishable``, which neutralizes HTML comments in the
+  text, so the text cannot contain a marker at all;
+- ``read_marker`` accepts one marker per body, only as its last line, only of the expected kind
+  and only with a valid structure.
+"""
 
 import base64
 import json
@@ -46,16 +55,65 @@ def marker(kind, payload):
     return f'<!-- devloop:{kind}:v1 {base64.b64encode(data).decode()} -->'
 
 
-def read_markers(text, kind):
-    found = []
-    for match in _MARKER.finditer(text or ''):
-        if match.group('kind') != kind:
-            continue
-        try:
-            found.append(json.loads(base64.b64decode(match.group('payload'), validate=True)))
-        except (ValueError, json.JSONDecodeError):
-            continue
-    return found
+def neutralize(text):
+    """Text that cannot open an HTML comment, and therefore cannot carry a marker."""
+    return (text or '').replace('<!--', '&lt;!--')
+
+
+def publishable(body, kind=None, payload=None):
+    """The only way devloop builds a body for GitHub: neutralized text plus, optionally, the
+    controller's marker as the last line."""
+    body = neutralize(body).rstrip('\n') + '\n'
+    if kind is not None:
+        body += '\n' + marker(kind, payload) + '\n'
+    return body
+
+
+def _is_int(value, minimum=0):
+    return isinstance(value, int) and not isinstance(value, bool) and value >= minimum
+
+
+def _list_of_dicts(value):
+    return isinstance(value, list) and all(isinstance(item, dict) for item in value)
+
+
+def _valid_review(r):
+    return (r.get('verdict') in _VERDICT_TEXT and _is_int(r.get('round'), 1)
+            and isinstance(r.get('head_sha'), str) and isinstance(r.get('summary'), str)
+            and r.get('source') in ('agent', 'ci')
+            and all(_list_of_dicts(r.get(k)) for k in ('blocking_findings',
+                                                        'non_blocking_findings',
+                                                        'previous_findings'))
+            and all(isinstance(f.get('id'), str) for f in r['blocking_findings']))
+
+
+def _valid_fix(f):
+    return (_is_int(f.get('round'), 1) and isinstance(f.get('head_sha'), str)
+            and _list_of_dicts(f.get('responses')))
+
+
+def _valid_pr(m):
+    return _is_int(m.get('issue'), 1) and all(isinstance(m.get(k), str)
+                                              for k in ('implementer', 'reviewer'))
+
+
+_VALID = {'review': _valid_review, 'fix': _valid_fix, 'pr': _valid_pr}
+
+
+def read_marker(text, kind):
+    """The record of ``kind`` carried by ``text``, or None.
+
+    Only the last non-empty line counts, so a marker quoted or embedded in the text is ignored.
+    """
+    lines = (text or '').strip().splitlines()
+    match = _MARKER.fullmatch(lines[-1].strip()) if lines else None
+    if not match or match.group('kind') != kind:
+        return None
+    try:
+        data = json.loads(base64.b64decode(match.group('payload'), validate=True))
+    except (ValueError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) and _VALID[kind](data) else None
 
 
 _VERDICT_TEXT = {
@@ -108,7 +166,7 @@ def render_review(review, head):
         parts += ['', '<details><summary>Controlli eseguiti</summary>', '']
         parts += [f'- {c}' for c in review['checks_performed']]
         parts += ['', '</details>']
-    return head + '\n' + '\n'.join(parts) + '\n\n' + marker('review', review) + '\n'
+    return publishable(head + '\n' + '\n'.join(parts), 'review', review)
 
 
 def render_fix(fix, head, round_no):
@@ -119,11 +177,11 @@ def render_fix(fix, head, round_no):
             note = r['note'].replace('|', '\\|').replace('\n', ' ')
             parts.append(f'| {r["finding_id"]} | {_ACTION_TEXT[r["action"]]} | {note} |')
     payload = {'round': round_no, 'head_sha': fix['head_sha'], 'responses': fix['responses']}
-    return head + '\n' + '\n'.join(parts) + '\n\n' + marker('fix', payload) + '\n'
+    return publishable(head + '\n' + '\n'.join(parts), 'fix', payload)
 
 
 def render_escalation(reason, detail=''):
     body = dispatcher_header() + '\n## Serve un intervento umano\n\n' + reason.strip() + '\n'
     if detail:
         body += '\n```text\n' + detail.strip()[-6000:].replace('```', "'''") + '\n```\n'
-    return body
+    return publishable(body)

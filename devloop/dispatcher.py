@@ -20,7 +20,7 @@ from pathlib import Path
 
 from .agents import AgentError
 from .github import GitHubError
-from .markdown import (dispatcher_header, marker, read_markers, render_escalation, render_fix,
+from .markdown import (dispatcher_header, publishable, read_marker, render_escalation, render_fix,
                        render_review)
 from .review import ci_failure_review, normalize_review, open_findings
 from .workspace import WorkspaceError
@@ -168,10 +168,13 @@ class Dispatcher:
 
     # Snapshot ------------------------------------------------------------
     def _trusted_markers(self, comments, kind):
+        """Records of ``kind`` from trusted users' comments: at most one per comment."""
         found = []
         for comment in comments:
             if (comment.get('author') or {}).get('login') in self.cfg.trusted_users:
-                found += read_markers(comment.get('body', ''), kind)
+                record = read_marker(comment.get('body', ''), kind)
+                if record is not None:
+                    found.append(record)
         return found
 
     def _devloop_pr(self, raw):
@@ -179,13 +182,13 @@ class Dispatcher:
             return None
         if not raw['headRefName'].startswith(self.cfg.branch_prefix):
             return None
-        metas = read_markers(raw.get('body', ''), 'pr')
-        if not metas or not isinstance(metas[-1].get('issue'), int):
+        meta = read_marker(raw.get('body', ''), 'pr')
+        if meta is None:
             return None
-        return PullRequest(number=raw['number'], issue=metas[-1]['issue'],
+        return PullRequest(number=raw['number'], issue=meta['issue'],
                            head_ref=raw['headRefName'], head_sha=raw['headRefOid'],
                            title=raw['title'], body=raw.get('body', ''),
-                           labels=label_names(raw['labels']), meta=metas[-1])
+                           labels=label_names(raw['labels']), meta=meta)
 
     def snapshot(self):
         lb = self.cfg.labels
@@ -276,8 +279,8 @@ class Dispatcher:
         return message
 
     def _blocked(self, number, agent, reason, remove):
-        body = (self.runner.header(agent) + '\n## Lavoro bloccato\n\n' + reason.strip() + '\n')
-        self.gh.comment(number, body)
+        self.gh.comment(number, publishable(self.runner.header(agent) + '\n## Lavoro bloccato\n\n'
+                                            + reason.strip()))
         self.gh.edit_labels(number, add=[self.cfg.labels.needs_human], remove=remove)
 
     def _approval_current(self, pr, review):
@@ -328,7 +331,8 @@ class Dispatcher:
         else:
             title = 'Approvazione revocata'
             reason = 'Non risulta una review devloop approvata. La PR torna in review'
-        self.gh.comment(pr.number, dispatcher_header() + f'\n## {title}\n\n' + reason + '.\n')
+        self.gh.comment(pr.number,
+                        publishable(dispatcher_header() + f'\n## {title}\n\n' + reason + '.'))
         self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.ready_to_merge])
 
     def _do_stale(self, number):
@@ -356,8 +360,8 @@ class Dispatcher:
         self.ws.commit_all(path, self._commit_message(agent, result['commit_message'], number))
         self.ws.push(path, branch, replace=True)
         meta = {'issue': number, 'implementer': agent.key, 'reviewer': cfg.reviewer}
-        body = (self.runner.header(agent) + '\n' + result['pr_body'].strip()
-                + f'\n\nCloses #{number}\n\n' + marker('pr', meta) + '\n')
+        body = publishable(self.runner.header(agent) + '\n' + result['pr_body'].strip()
+                           + f'\n\nCloses #{number}', 'pr', meta)
         url = self.gh.create_pr(base=cfg.base_branch, head=branch, title=result['pr_title'],
                                 body=body, labels=[lb.review])
         self.gh.edit_labels(number, remove=[lb.working])

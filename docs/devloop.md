@@ -52,6 +52,12 @@ Findings get stable ids (`R<round>-<n>`). The fix step answers each one (`fixed`
 `not_applicable`), and the next round sees those answers. The comment shows the review in
 readable form and carries the full record in a hidden base64 marker for the next tick.
 
+Markers are control records, while the rest of each comment is text written by a model, and both
+are published by the same account. So the dispatcher neutralizes HTML comments in all published
+text, and reads a marker only from the last line of a comment, of the expected kind and with a
+valid structure. Text from an implementer or a reviewer cannot record a review, a fix or a PR
+link.
+
 ## Attribution
 
 Every text devloop publishes starts with the header that [AGENTS.md](../AGENTS.md) requires. The
