@@ -30,22 +30,30 @@ class FundedFeedbackRoles:
 
     def _authority(self):
         self.guard()
+        projection = None
         if (self.feedback.ticket / 'execution/active.json').exists():
             from ssdlc_reconciliation import resolve_execution
+            from ssdlc_transitions import TransitionStore
             if resolve_execution(self.feedback.ticket) != self.limits.root:
                 raise FeedbackError('Consultation requires the currently selected native generation')
+            projection = TransitionStore(self.feedback.ticket / 'execution').load()
         raw = _regular(self.limits.root, 'limits/task-journal.jsonl').read_bytes()
         if not raw.endswith(b'\n'):
             raise FeedbackError('Incomplete native accounting requires reconciliation before consultation')
         authority, feedback_state = self.feedback._read()
         envelope, counters = self.limits._load(repair=False)
         p = authority['policy']
-        descendants = feedback_state.get('admitted_generations', {}).values()
-        admitted = any(a['limits_sha256'] == digest(envelope)
-                       and a['profile_sha256'] == digest(envelope['policy']) for a in descendants)
-        if (p['limits_sha256'] != digest(envelope) and not admitted
+        from ssdlc_feedback_delegation import admitted as admitted_generation
+        # resolve_execution validates the sealed transition and reconciliation.
+        # Its exact admission binds the envelope (including the controller),
+        # unchanged profile and selected projection; a recording row alone is
+        # not permission to substitute a controller or consult another runtime.
+        admitted = projection is not None and admitted_generation(feedback_state,
+            dict(envelope=envelope, projection=projection))
+        if ((p['limits_sha256'] != digest(envelope)
+                or p['controller_sha256'] != digest(execution_contract(envelope['binding']['controller'])))
+                and not admitted
                 or p['ticket'] != envelope['binding']['ticket']
-                or p['controller_sha256'] != digest(execution_contract(envelope['binding']['controller']))
                 or p['expires_at'] > counters['deadline_at']):
             raise FeedbackError('Feedback consultation differs from frozen native authority')
         return envelope, counters
