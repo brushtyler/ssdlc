@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "issue": 39,
+  "increment": "F4: independently reviewed in-scope repair returns and exact operator recovery",
+  "tested_base_commit": "c9e502ae24d18521cc09feb072127838e52a4a7a",
+  "implementation_files": {
+    "orchestrator.py": "0f479074a570d4dd1ee9160632e6e5af2612622c56f644098a6497b39c3a5472",
+    "ssdlc_feedback.py": "66d702b8e25d54ce64f5835b5c6ebfa2672f1c6dc2988df3a35ef63e4a0e05b6",
+    "ssdlc_feedback_delegation.py": "41565b3c09cd893656881b649264c491e89a16d0f5c661bb70ac28a04c0fa9da",
+    "ssdlc_feedback_delivery.py": "8de1253c34a3a4d0446f6050f76e3f3230a9c92f1f24f11467994a6097c69c06",
+    "ssdlc_feedback_return.py": "2b1ed6207cf594b004ced62641d6f59c08c76dc4fde3ccfb8b1a226bd778caf5",
+    "ssdlc_feedback_workflow.py": "36b60920c44407474182a185084a92dc2f9d6116b820958e72492f929df93948",
+    "ssdlc_scope_amendments.py": "a53fe44c3b82861417ac5b1a2834fcb110472a9bd1e9c4ba1f101e1a458bc04c",
+    "ssdlc_transitions.py": "95c28a7ddeaf7516b7c900356d516c283a08d1c53ef10b2bcf79e82b90ecdb9d",
+    "tests/test_feedback_return.py": "8c5f9965484340430028863624bf4ffd5772df7a0b91d176d84745be37934d82",
+    "tests/test_feedback_delivery.py": "f502e91f9875c236c95fe1f2b1ee609bcef0beb8317ef48b9b10ef066295e773"
+  },
+  "full_suite": {
+    "tests": 1066,
+    "test_seconds": 524.337,
+    "exit_code": 0,
+    "scope": "Complete implementation before final explicit parent/source/controller comparison guards; final guard covered by focused regression below and full head CI"
+  },
+  "final_return_regression": {
+    "tests": 12,
+    "seconds": 25.514,
+    "exit_code": 0,
+    "scope": "Final source including recomputed-hash tampering, cross-parent authority refusal, real capture/accounting, operator admission and cold recovery"
+  },
+  "scope_regression": {
+    "tests": 19,
+    "seconds": 39.206,
+    "exit_code": 0
+  },
+  "publication_regression": {
+    "tests": 10,
+    "seconds": 0.042,
+    "exit_code": 0
+  },
+  "isolated_a5": {
+    "cases": 12,
+    "failed_cases": 0,
+    "scope": "Semantic checkpoint/expected-stop benchmark; not live model quality or full issue22 delivery certification"
+  },
+  "github_read_only_observation": {
+    "client_version": "2.46.0",
+    "explicit_page_read": "PASS",
+    "comments_observed": 6,
+    "posts": 0,
+    "live_model_calls": 0
+  },
+  "actual_stopped_generation_preview": {
+    "task": "T11",
+    "mode": "read-only compatibility inspection",
+    "original_feedback_route": "REJECTED",
+    "repair_target_count": 1,
+    "scope_added_files": 0,
+    "plan_changed": false,
+    "feedback_journal_changed": false,
+    "staged_or_activated": false,
+    "provider_calls": 0
+  },
+  "live_provider_calls_for_this_increment": 0,
+  "historical_issue22_runtime_changed_by_offline_fix": false,
+  "real_in_contract_tests": [
+    "Native task/accounting journals and candidate capture receipts",
+    "Git checkpoints and disposable worktrees",
+    "Kernel locks, native selector publication and entrypoint reconciliation fencing",
+    "Preserved attempts, invocation facts, deadline, scope and historical rejected decision"
+  ],
+  "simulated_in_contract_tests": [
+    "Role responses and provider usage",
+    "External controller and Docker observations",
+    "Remote publication receipts, uncertain writes and pagination boundary fixtures"
+  ],
+  "verified_cases": [
+    "Typed IN_SCOPE_REPAIR repairs only existing task targets after captured CHECK_FAILURE and independent funded approval",
+    "Generic REJECTED remains terminal and never silently authorizes retry",
+    "Native unchanged-plan return retains failed candidate and consumes the next ordinary task attempt",
+    "Outside/protected/path-alias targets, terminal failures, altered decisions/accounting/fencing and cross-parent proof reuse are refused",
+    "Exact operator return preserves an already-rejected native F3 decision, profile, quotas and captured consultations across an approved controller revision",
+    "Selector-to-receipt crash fences dispatch and recovers without new inference; replay adds no duplicate receipt",
+    "New GitHub reads support gh without --slurp; complete bounded history required before any POST"
+  ],
+  "boundaries": [
+    "Existing retry and global limits remain authoritative; exhausted attempts are not extended",
+    "A changed repeated cause still requires explicit reconciliation",
+    "Operator recovery supports native F3 recording authority and requires exact proposal approval",
+    "No prerequisite/DAG insertion, completed-owner revalidation, auto-merge, profile extension or historical reset",
+    "Integration with latest main and final issue22 review/QA/security gates remain pending"
+  ],
+  "omitted": [
+    "Private paths, authority hashes, raw feedback/usage/check logs and prompts",
+    "Credentials, account identifiers and local configuration"
+  ]
+}

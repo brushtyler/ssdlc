@@ -17,10 +17,16 @@ class RemoteUncertain(FeedbackError):
 def projection(store):
     value = store.public_projection()
     clean = {key: value[key] for key in ('schema_version', 'role_calls', 'amendments', 'amendments_reserved', 'amendments_applied')}
+    for key in ('repair_returns', 'operator_repair_returns'):
+        if key in value:
+            if type(value[key]) is not int or value[key] < 0:
+                raise FeedbackError('Noncanonical public repair count refused')
+            clean[key] = value[key]
     clean['requests'] = []
     statuses = {'REQUESTED','PROPOSED','REVIEWED','APPLIED'}
     dispositions = {'WAITING','APPLIED','OPERATOR_DECISION','OWNER_REVALIDATION_REQUIRED','LIMIT_REACHED',
-                    'NATIVE_AMENDMENT_REQUIRED','BLOCKED_PREREQUISITE','BACKLOG_ONLY','REJECTED_NO_RETRY'}
+                    'NATIVE_AMENDMENT_REQUIRED','BLOCKED_PREREQUISITE','BACKLOG_ONLY','REJECTED_NO_RETRY',
+                    'NATIVE_REPAIR_RETURN_REQUIRED','IN_SCOPE_RETURN_APPLIED'}
     quotas = {None,'TICKET_AMENDMENTS_EXHAUSTED','TASK_AMENDMENTS_EXHAUSTED','ADDED_FILES_EXHAUSTED'}
     for row in value['requests']:
         if (not re.fullmatch('[a-f0-9]{64}', row['request_id']) or row['status'] not in statuses
@@ -57,6 +63,8 @@ def metrics(store):
             duration_seconds=end-start if start is not None and end is not None and end >= start else None,
             usage=call.get('receipt', {}).get('response', {}).get('usage')))
     return dict(requests=requests, consultations=calls, role_count=len(calls),
+                repair_returns=len(state.get('repair_returns', [])),
+                operator_repair_returns=sum(r['operator'] for r in state.get('repair_returns', [])),
                 source='host timestamps and captured usage; unknown values remain null',
                 operator_decisions_required=sum(r['disposition'] in {'OPERATOR_DECISION','OWNER_REVALIDATION_REQUIRED'} for r in requests))
 
@@ -87,11 +95,18 @@ class GitHubComments:
         return value
 
     def list(self, target):
-        pages = self._api([f"repos/{target['repo']}/issues/{target['issue']}/comments", '--paginate', '--slurp'])
-        if (not isinstance(pages, list) or any(not isinstance(page,list)
-                or any(not isinstance(row,dict) for row in page) for page in pages)):
-            raise RemoteUncertain('GitHub comments could not be decoded')
-        return [row for page in pages for row in page]
+        # gh 2.46 supports --paginate but not --slurp. Read explicit bounded
+        # pages so one JSON document is decoded per call on both old/new CLIs.
+        comments = []
+        for number in range(1, 101):
+            page = self._api([f"repos/{target['repo']}/issues/{target['issue']}/comments?per_page=100&page={number}"])
+            if (not isinstance(page, list) or len(page) > 100
+                    or any(not isinstance(row, dict) for row in page)):
+                raise RemoteUncertain('GitHub comments could not be decoded')
+            comments.extend(page)
+            if len(page) < 100:
+                return comments
+        raise RemoteUncertain('Complete GitHub comment history exceeds the observation bound; no publication')
 
     def post(self, target, body):
         return self._api([f"repos/{target['repo']}/issues/{target['issue']}/comments", '--method', 'POST'], {'body': body})

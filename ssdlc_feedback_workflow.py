@@ -123,8 +123,11 @@ def role_actor(config, request_id, role):
 
 
 def role_prompt(source, row, role):
-    response = ('Return JSON {route: AMENDMENT|PREREQUISITE|ADVISORY|REJECTED|INCONCLUSIVE, '
-                'requested_files: [literal paths], reason_code: bounded identifier}.' if role == 'planner' else
+    response = ('Return JSON {route: AMENDMENT|IN_SCOPE_REPAIR|PREREQUISITE|ADVISORY|REJECTED|INCONCLUSIVE, '
+                'requested_files: [literal paths], reason_code: bounded identifier}. '
+                'If the cause can be repaired within existing task targets after CHECK_FAILURE, choose '
+                'IN_SCOPE_REPAIR, requested_files: [], and add repair_files: [nonempty existing task targets]. '
+                'REJECTED is terminal and never means return to developer. Do not change completed tests to hide a regression.' if role == 'planner' else
                 'Return JSON {proposal_sha256: exact hash, verdict: APPROVED|REJECTED|INCONCLUSIVE, '
                 'coverage_preserved: boolean, reason_code: bounded identifier}.' if role == 'reviewer' else
                 'Return JSON {recommendation: OPERATOR_REQUIRED, reason_code: bounded identifier}.')
@@ -256,10 +259,11 @@ def run_feedback(ticket, repo, controller, snapshot, identity, *, held_locks=(),
         value = json.loads(_regular(pending.parent, pending.name).read_text())
         preparation = ticket / 'execution' / ('prepared-' + value['transition_id'])
         proposal = json.loads(_regular(preparation, 'proposal.json').read_text())
-        if proposal['authorization_contract'] != CONTRACT:
+        from ssdlc_feedback_return import CONTRACT as RETURN_CONTRACT, activate as activate_return
+        if proposal['authorization_contract'] not in {CONTRACT, RETURN_CONTRACT}:
             raise FeedbackError('Unrelated native preparation requires explicit reconciliation')
         with fenced(ticket, controller, snapshot, identity, held_locks=held_locks, preparation=preparation) as owner:
-            activate(owner, preparation)
+            (activate_return if proposal['authorization_contract'] == RETURN_CONTRACT else activate)(owner, preparation)
         return dict(disposition='APPLIED', runtime=str(runtime_root(ticket)))
     recover_returns(ticket, controller, snapshot, identity, held_locks)
     with fenced(ticket, controller, snapshot, identity, held_locks=held_locks) as owner:
@@ -302,6 +306,11 @@ def run_feedback(ticket, repo, controller, snapshot, identity, *, held_locks=(),
             store.review(row['request_id'], consult('reviewer'), role_actor(config, row['request_id'], 'reviewer'),
                          inspect(ticket, allow_host_hints=True))
         disposition = store.disposition(row['request_id'])
+        if disposition == 'NATIVE_REPAIR_RETURN_REQUIRED':
+            from ssdlc_feedback_return import prepare as prepare_return, activate as activate_return
+            staged = prepare_return(owner, repo, row['request_id'])
+            activate_return(owner, staged['preparation'])
+            return dict(disposition='APPLIED', request_id=row['request_id'], runtime=str(runtime_root(ticket)))
         if disposition == 'NATIVE_AMENDMENT_REQUIRED':
             row = store.inspect()['requests'][row['request_id']]
             plan = copy.deepcopy(source['plan']); plan['plan_revision'] += 1
@@ -327,16 +336,17 @@ def recover_preparation(repo, ticket_id):
     value = json.loads(_regular(pending.parent, pending.name).read_text())
     preparation = ticket / 'execution' / ('prepared-' + value['transition_id'])
     proposal = json.loads(_regular(preparation, 'proposal.json').read_text())
-    if proposal.get('authorization_contract') != CONTRACT:
+    from ssdlc_feedback_return import CONTRACT as RETURN_CONTRACT, activate as activate_return
+    if proposal.get('authorization_contract') not in {CONTRACT, RETURN_CONTRACT}:
         return False
     recipe = json.loads(_regular(preparation, 'recipe.json').read_text())
-    if workflow(recipe['review']['envelope']['policy']) is None:
+    if workflow(recipe['envelope']['policy']) is None:
         return False
     controller = Path(__file__).resolve().parent
     snapshot = controller_snapshot(controller)
     identity = dict(controller_sha256=digest(execution_contract(snapshot)), environment=observe_environment())
     with fenced(ticket, controller, snapshot, identity, preparation=preparation) as owner:
-        activate(owner, preparation)
+        (activate_return if proposal['authorization_contract'] == RETURN_CONTRACT else activate)(owner, preparation)
     return True
 
 
@@ -350,9 +360,13 @@ def observation_root(ticket, ancestor):
     preparation = ticket / 'execution' / ('prepared-' + pending['transition_id'])
     proposal = json.loads(_regular(preparation, 'proposal.json').read_text())
     recipe = json.loads(_regular(preparation, 'recipe.json').read_text())
-    if proposal['authorization_contract'] != CONTRACT:
+    from ssdlc_feedback_return import CONTRACT as RETURN_CONTRACT, authorization as return_authorization, validate_authorization as validate_return
+    if proposal['authorization_contract'] not in {CONTRACT, RETURN_CONTRACT}:
         raise FeedbackError('Observation fallback requires a native feedback transition')
-    validate_authorization(authorization(proposal, recipe['review']), proposal)
+    if proposal['authorization_contract'] == RETURN_CONTRACT:
+        validate_return(return_authorization(proposal, recipe['repair_return']), proposal)
+    else:
+        validate_authorization(authorization(proposal, recipe['review']), proposal)
     for ref, sha in proposal['artifacts'].items():
         if file_hash(_regular(preparation, ref)) != sha:
             raise FeedbackError('Pending observation evidence changed')

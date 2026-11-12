@@ -86,10 +86,15 @@ def fenced(ticket, controller, snapshot, runtime_identity, *, held_locks=(), pre
             preparation = Path(preparation).absolute()
             proposal = json.loads(_regular(preparation, 'proposal.json').read_text())
             recipe = json.loads(_regular(preparation, 'recipe.json').read_text())
+            from ssdlc_feedback_return import CONTRACT as RETURN_CONTRACT, validate_authorization as validate_return
             if (preparation != ticket / 'execution' / ('prepared-' + proposal['transition_id'])
-                    or proposal['authorization_contract'] != CONTRACT):
+                    or proposal['authorization_contract'] not in {CONTRACT, RETURN_CONTRACT}):
                 raise FeedbackError('Delegated replay requires its native preparation')
-            validate_authorization(authorization(proposal, recipe['review']), proposal)
+            if proposal['authorization_contract'] == RETURN_CONTRACT:
+                from ssdlc_feedback_return import authorization as return_authorization
+                validate_return(return_authorization(proposal, recipe['repair_return']), proposal)
+            else:
+                validate_authorization(authorization(proposal, recipe['review']), proposal)
             root = Path(recipe['source_root'])
             if root.parent != ticket / 'execution-runtimes' or root.is_symlink():
                 raise FeedbackError('Delegated source is outside native generations')
@@ -339,6 +344,8 @@ def finalize(session, proposal, recipe, selected, *, fault=lambda point: None):
 def ensure_reconciled(ticket, projection, proposal):
     """Read-only native entrypoint fence, including crash after selector replace."""
     if proposal.get('authorization_contract') != CONTRACT:
+        from ssdlc_feedback_return import ensure_reconciled as return_reconciled
+        return_reconciled(ticket, projection, proposal)
         return
     store = FeedbackStore(ticket)
     state = store.inspect()
@@ -372,7 +379,8 @@ def descendant_of(ticket, root, ancestor, *, pointer=None):
         projection = store.load_pointer(pointer)
         intent = json.loads(_regular(store.root / identity, 'intent.json').read_text())
         proposal = intent['proposal']
-        if proposal.get('authorization_contract') != CONTRACT:
+        from ssdlc_feedback_return import CONTRACTS as RETURN_CONTRACTS
+        if proposal.get('authorization_contract') not in {CONTRACT, *RETURN_CONTRACTS}:
             return False
         ensure_reconciled(ticket, projection, proposal)
         recipe = json.loads(_regular(store.root / identity, 'recipe.json').read_text())

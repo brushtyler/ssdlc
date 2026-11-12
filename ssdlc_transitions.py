@@ -41,6 +41,9 @@ def source_binding(root, refs):
 
 
 def validate_authorization(authorization, proposal):
+    if proposal.get('authorization_contract') == 'feedback-in-scope-return-v1':
+        from ssdlc_feedback_return import validate_authorization as repair
+        return repair(authorization, proposal)
     if proposal.get('authorization_contract') == 'feedback-scope-delegation-v1':
         from ssdlc_feedback_delegation import validate_authorization as delegated
         return delegated(authorization, proposal)
@@ -52,6 +55,11 @@ def validate_authorization(authorization, proposal):
         expected |= {'profile_sha256'}
         if authorization.get('profile_sha256') != proposal.get('profile_sha256') or proposal.get('scope_diff') != {}:
             raise TransitionError('Feedback profile admission requires exact unchanged scope and profile authorization')
+    if proposal.get('authorization_contract') == 'feedback-operator-repair-return-v1':
+        expected |= {'repair_return_sha256'}
+        if (authorization.get('repair_return_sha256') != proposal.get('repair_return_sha256')
+                or proposal.get('scope_diff') != {}):
+            raise TransitionError('Operator repair return must bind exact unchanged scope and feedback')
     if proposal.get('authorization_contract') == 'cumulative-limits-v1':
         expected |= {'profile_sha256', 'decisions_sha256', 'accept_unknown_history', 'authorize_extensions'}
         if authorization.get('profile_sha256') != proposal.get('profile_sha256'):
@@ -195,7 +203,8 @@ class TransitionStore:
                     'manifest_sha256': file_hash(_regular(generation, 'manifest.json'))}
         pointer = self.root / 'active.json'
         if pointer.exists() and self._read(self.root, 'active.json') != selected:
-            if (proposal.get('authorization_contract') not in {'scope-amendment-v1', 'feedback-scope-delegation-v1', 'feedback-profile-admission-v1'}
+            if (proposal.get('authorization_contract') not in {'scope-amendment-v1', 'feedback-scope-delegation-v1',
+                    'feedback-profile-admission-v1', 'feedback-in-scope-return-v1', 'feedback-operator-repair-return-v1'}
                     or proposal.get('parent_selector') != self._read(self.root, 'active.json')):
                 raise TransitionError('Another generation is already selected')
             self.load()  # Validate the exact parent, not merely its pointer bytes.

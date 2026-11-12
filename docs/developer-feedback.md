@@ -153,12 +153,13 @@ stateDiagram-v2
     REQUESTED --> PROPOSED: separate planner records route
     PROPOSED --> REVIEWED: independent reviewer binds exact proposal
     REVIEWED --> NativeTransitionRequired: approved amendment
+    REVIEWED --> NativeRepairReturnRequired: approved IN_SCOPE_REPAIR
     REVIEWED --> BlockedPrerequisite: approved prerequisite proposal
     REVIEWED --> BacklogOnly: approved optional improvement
     REVIEWED --> OperatorDecision: rejected or inconclusive review
 ```
 
-Routes are `AMENDMENT`, `PREREQUISITE`, `ADVISORY`, `REJECTED` and
+Routes are `AMENDMENT`, `IN_SCOPE_REPAIR`, `PREREQUISITE`, `ADVISORY`, `REJECTED` and
 `INCONCLUSIVE`. A planner cannot add files beyond the request or delegated path
 list, change obligations, or attach authorized files to a non-amendment route.
 Only an `IMPROVEMENT` request can become an advisory. A missing-target blocker
@@ -168,6 +169,79 @@ reconciliation and cannot silently inherit the previous decision.
 Reviews bind the exact proposal and record a coverage assessment; this is a
 reviewer's judgment, not a mechanical proof that assertions were preserved.
 The native activation/candidate verification gates remain mandatory.
+
+### In-scope repair after a scope question
+
+An outside failing test can reveal a regression in the current task's own
+implementation. The planner may return this exact typed alternative:
+
+```json
+{
+  "route": "IN_SCOPE_REPAIR",
+  "requested_files": [],
+  "repair_files": ["existing-task-target.py"],
+  "reason_code": "fix_owned_code"
+}
+```
+
+The host requires a captured `CHECK_FAILURE`, a nonempty literal subset of the
+current task targets, no protected paths, and a strongly independent funded
+review approving the exact proposal with preserved coverage. A failure alone
+does not authorize changing its test. `REJECTED` remains terminal; neither
+review prose nor an approved rejection is interpreted as permission to retry.
+
+`feedback-in-scope-return-v1` uses the native preparation/selector protocol. It
+preserves the plan, scope, requirements, checks, global profile, deadline,
+historical captures and invocation facts. It records a reconciliation bound to
+the exact failed candidate. No amendment/file allowance is spent; a subsequent
+developer call consumes its ordinary next attempt and invocation. Exhausted
+limits still stop. One failure cannot acquire multiple repair returns, and a
+changed repeated cause still requires explicit reconciliation.
+
+The selector is insufficient by itself: dispatch remains fenced until the
+canonical feedback journal contains its matching return receipt. Cold resume
+can reconcile a sealed delegated return without repeating either model. The
+supervisor can observe its verified parent while this is pending. Historical
+decisions and the original recording authority remain intact; receipts admit
+the exact descendant under the same cumulative grant.
+
+### Explicit recovery of an already rejected decision
+
+An existing native F3 `REJECTED` decision is never rewritten to `IN_SCOPE_REPAIR`. After
+operator review, `feedback-operator-repair-return-v1` can stage a distinct
+unchanged-scope return. It binds the current stopped source, prior decision and
+feedback head, exact repair files, controller/environment and preserved native
+accounting. It permits an explicitly approved controller revision, while
+refusing profile/grant changes or a different verification environment.
+
+```bash
+python3 orchestrator.py feedback-repair-prepare \
+  --repo /path/to/project --ticket TICKET \
+  --request-id REQUEST_SHA256 \
+  --repair-files /private/repair-files.json \
+  --reason 'Repair the existing implementation; preserve baseline tests'
+```
+
+`repair-files.json` is a JSON list containing only existing task targets. The
+operator authorization has exactly `schema_version`, `transition_id`,
+`proposal_sha256`, `old_controller_sha256`, `new_controller_sha256`,
+`repair_return_sha256`, `authorized: true`, and `source_fenced: true`. These are
+the operator's actual attestations for the concrete proposal; preparation does
+not synthesize them or dispatch providers.
+
+```bash
+python3 orchestrator.py feedback-repair-activate \
+  --repo /path/to/project --ticket TICKET \
+  --preparation /canonical/ticket/execution/prepared-ID \
+  --authorization /private/authorization.json
+```
+
+Activation adds a return receipt and descendant binding without refunding
+calls or resetting attempts, including when recovering a crash after selector
+publication. Only the ordinary bounded task engine executes the next attempt.
+Public projections/metrics distinguish return receipts from amendments and
+count operator return receipts separately; these counts are not measured human
+intervention durations.
 
 Role intents reserve only recording capacity. They are **not provider dispatch
 tokens** and do not replace `LimitsStore` reservations. A restart encountering
@@ -441,6 +515,11 @@ The optional frozen GH destination permits only host-generated comments through
 allowlist of enum statuses, counts and opaque request IDs; no task names, paths,
 AI text/reasons, private prompts, raw usage or credentials are copied. The
 canonical recording ledger remains authority; comments cannot schedule work.
+
+Comment history is read in explicit pages of 100, without requiring the newer
+`gh api --slurp` flag. Observation stops with a refusal after 100 full pages;
+an incomplete history never permits a POST. The adapter is compatible with the
+installed gh 2.46 client as well as newer clients.
 
 A separate host outbox durably records a publication intent and dispatch
 reservation before POST. Reconciliation accepts only the exact body authored by
