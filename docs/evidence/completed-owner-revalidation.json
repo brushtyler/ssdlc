@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "issue": 38,
+  "increment": "Completed-owner coverage, native candidate revalidation and operator/delegated feedback integration",
+  "tested_base_commit": "193d9a7c42732c32f385c6f1c6ab4ed0a2b8829a",
+  "integration_base_commit": "043c23b12027277134d0ea6eab63442197ec48bc",
+  "source_sha256": {
+    "ssdlc_owner_revalidation.py": "6716857c391d9c85ac83d9a479cb949f6adaeae04bcb188ffffbaf3ce8043aa4",
+    "ssdlc_tasks.py": "f019c29e8bf95858d79cf92ad034ee5dd7cbfe61e4f26bcd38589ca1190d2634",
+    "ssdlc_scope_amendments.py": "57d1ef290d252635d5bdba198cfcaa702ed729b45f823f72e5be4396777ef744",
+    "ssdlc_feedback.py": "f270da9c08854eebdd7796429fd83a971f77ac8d78913cb84f4f731653d3ddc0",
+    "ssdlc_feedback_delegation.py": "b6262423f33e706f9b9fc276b637e7c34963c826ddbf88f62e59a235e1af258e",
+    "ssdlc_feedback_delivery.py": "5f4225c482ee77309058d006ae02d223a03d3a240e9fde86a8ef879733e271f5",
+    "ssdlc_feedback_workflow.py": "a6dfef3b2fa7106c858746104fb18e81f78dbc7f67870f75a1f254d8c42c9ea9",
+    "schemas/recovery-limits.schema.json": "7ac97576621e8efde526317cff596b235417d56f0d5833d69e98be2ac6611131",
+    "tests/test_owner_revalidation.py": "4e734997638798058e217bd208815476b460907afbd2f3821f9be06d0993f507",
+    "tests/test_scope_amendments.py": "def5f17c513272e857a9a89e676c58eed5a88768da4fc0a71ebbf6d75c3dd16d"
+  },
+  "owner_regression_final_source": {
+    "tests": 23,
+    "seconds": 50.465,
+    "exit_code": 0
+  },
+  "full_core_suite": {
+    "tests": 1088,
+    "seconds": 588.243,
+    "exit_code": 0,
+    "isolation": "Disposable tracked-source copy with exact implementation overlay",
+    "scope": "Owner feature, feedback bridge and explicit evidence reconciliation before final cumulative-owner/prompt guards and added tests; final-source owner regression above passes; complete final-head suite runs in CI"
+  },
+  "isolated_A5": {
+    "cases": 12,
+    "failed_cases": 0,
+    "scope": "Pinned semantic recovery corpus; final-head CI repeats benchmark"
+  },
+  "native_entrypoint": {
+    "entrypoint": "run_phase_dev",
+    "result": "PASS",
+    "developer_invocations": 1,
+    "fresh_owner_receipt": "PASSED",
+    "provider": "Offline semantic fake"
+  },
+  "actual_stopped_run_preview": {
+    "task": "T12",
+    "owners": 6,
+    "added_files": 1,
+    "existing_request_preserved": true,
+    "explicit_evidence_reconciliation_required": true,
+    "native_preparation_or_activation": false,
+    "provider_calls": 0
+  },
+  "verified_cases": [
+    "Actual completed owners and unchanged typed check contracts included in reviewed scope subject",
+    "Explicit coverage review required; removed assertions/tests and introduced skip/xfail need exact old/new file hashes and reviewed reason",
+    "Fresh owner checks precede commit and bind candidate capture/tree; identical check observations share only the same verification of the unchanged candidate",
+    "Owner failure invalidates owner/dependent closure and fences further developer work; mutated verifier and missing/altered proof refuse acceptance",
+    "Captured verification interruption resumes without another developer dispatch; commit-intent recovery requires retained owner evidence",
+    "Explicit opt-in enables funded independent owner amendments; absent flag preserves operator-only behavior",
+    "Pending/reviewed feedback requests remain immutable during exact operator scope/controller admission; receipts reconcile idempotently after selector crashes",
+    "Registered-evidence reconciliation is opt-in and cannot waive changed plan/task/capture/counters/envelope/worktree or changed request evidence",
+    "Operator owner receipts consume cumulative amendment allowances alongside automatic delegation",
+    "Later scope additions preserve prior owner obligations; prompt authority is summarized without mutating sealed contracts"
+  ],
+  "live_provider_calls": 0,
+  "historical_run_mutated_by_implementation": false,
+  "boundaries": [
+    "Original profiles, attempts, counters, absolute deadline and historical receipts remain authoritative",
+    "Protected paths, changed obligations/DAG/environment and budget extensions remain refused",
+    "Failed completed-owner repair remains an explicit I5a responsibility, never an implicit developer retry",
+    "Python coverage guard is syntactic, not proof of semantic equivalence; independent coverage assessment remains necessary",
+    "No real provider inference, automatic merge or issue22 runtime migration is performed by this increment"
+  ],
+  "omitted": [
+    "Private paths, raw prompts/model responses, native authorization/source hashes, credentials and account data"
+  ]
+}

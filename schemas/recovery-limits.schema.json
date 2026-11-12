@@ -139,6 +139,10 @@
         "require_strong_independence": {
           "const": true
         },
+        "owner_revalidation": {
+          "const": true,
+          "description": "Explicit opt-in for independently reviewed completed-owner amendments with fresh native owner checks; absence preserves operator-only ownership recovery."
+        },
         "max_amendments": {
           "type": "integer",
           "minimum": 1,

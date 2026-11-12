@@ -12,7 +12,8 @@ execution authority; a recorded approval never grants model dispatch.
 | F2 | Funded role adapter, delegated native activation, technical fencing, lineage and cumulative amendment limits | Implemented as an opt-in host API, validated offline; F3 wires the bounded production adapter |
 | F3 | Supervisor recovery integration, sanitized idempotent GitHub projections, prerequisite proposals/return, consultative PO routing | Implemented opt-in, validated offline; prerequisite execution/return remains an explicit unsupported native transition |
 
-Live rollout/measurement and broader #38 ownership recovery remain separate from offline acceptance. It does not change a running controller or
+Live rollout/measurement remains separate from offline acceptance. Native #38
+owner recovery is described below. This does not change a running controller or
 authorize migration of the historical #22 run. The current #22 T08 case is a
 baseline test change and deliberately requires operator coverage review under
 the first proposed policy, even after automatic diagnosis is implemented.
@@ -31,10 +32,10 @@ resolve the Claude/Gemini review comments as follows:
   context identities are refused. Equal engine/model pairs or unknown model
   metadata are disclosed as `reduced_independence`; the proposed initial
   delegation policy escalates them to the operator.
-- Protected paths are never delegated. Baseline/checkpoint test changes require
-  coverage analysis and initially the operator. Completed production ownership
-  requires the native owner revalidation in #38, rather than treating old proof
-  as fresh. Missing native recovery support requires explicit escalation.
+- Protected paths are never delegated. Baseline test changes require coverage
+  analysis and the operator. Completed ownership requires native owner
+  revalidation; delegation additionally requires the explicit opt-in below.
+  Historical proof is never treated as fresh proof of an amended candidate.
 - A rejected/inconclusive request does not redispatch the identical developer
   attempt. An alternative implementation needs a separately reviewed decision,
   bounded negative context and a normal charged development attempt.
@@ -355,9 +356,10 @@ model, not authentication or continuous containment against a hostile host.
 recorded approval, the exact captured funded planner and reviewer responses,
 unchanged technical inputs, and an exact allowed accounting advance. Only target
 additions to the failed task are supported; checks, obligations, DAG, order and
-all other task manifests are unchanged. Only new files or unowned production paths can
-proceed. Baseline/completed tests and completed ownership retain their operator
-or #38 dispositions. Existing candidate confinement and verification remain
+all other task manifests are unchanged. By default only new files or unowned
+production paths can proceed. Completed ownership additionally requires the
+explicit owner-revalidation grant and coverage contract below; baseline tests
+without a completed owner retain their operator disposition. Existing candidate confinement and verification remain
 mandatory. Eligible requests exceeding delegation paths/quotas are refused
 before another funded consultation.
 
@@ -566,4 +568,118 @@ Live rollout is opt-in after review: compare intervention/wait counts and latenc
 against the three historical manual amendments, while checking coverage and
 end-to-end completion. Offline semantic fakes do not prove model quality or
 live authentication. Production use retains the applicable B/I6 containment and
-delivery requirements; broader owner revalidation stays #38.
+delivery requirements. The #38 owner-revalidation extension is described below.
+
+
+## Completed-owner scope recovery (#38)
+
+Scope preview now lists actual completed owners of added targets, derived from
+registered checkpoint `changed_files`, rather than just overlapping manifests.
+The `owner_revalidation` subject binds file classes and old hashes, the current
+checkpoint, owner commits/captures and each owner's unchanged task/check contract.
+Baseline test changes also require an explicit coverage review, even when they
+have no completed owner.
+
+An independent scope review has an additional `owner_coverage` field whenever
+that subject is present:
+
+```json
+{
+  "contract_sha256": "exact digest of subject.owner_revalidation",
+  "coverage_preserved": true,
+  "approved_test_changes": []
+}
+```
+
+This is added alongside `subject_sha256`, `reviewer`, `report` and `scope_diff`
+in the operator review, or alongside the existing reviewer response fields in
+the funded workflow. It is not a replacement for the independent review.
+An exception has exactly `path`, `old_sha256`, `new_sha256` and a nonempty bounded
+`reason`; `new_sha256: null` explicitly denotes deletion. It permits only the
+exact reviewed file outcome. Without that exception, a conservative Python AST
+guard refuses removed assertions/test functions or added skip/xfail markers.
+The guard is syntactic and cannot prove semantic test equivalence: the reviewer
+must still assess the owner obligations and coverage. An unsupported test syntax
+is refused instead of assumed safe.
+
+After the introducing task's checks pass, the existing scheduler runs the
+owners' complete typed checks and quality checks on the same captured candidate,
+before commit intent. Identical full check specifications can share observations
+from this verification only, with the same source, environment and evidence
+hashes. Checkpoint preflights, prior attempts and historical owner results are
+not reused. Each owner retains its complete check-to-log mapping. Acceptance
+requires successful owner evidence bound to the capture and resulting candidate
+tree; original owner commits and receipts remain historical facts.
+Later scope additions retain previously admitted owner files; unchanged-scope
+repair/controller returns retain their existing owner authority. Developer
+repair context contains a bounded summary and contract digest rather than the
+full owner task descriptions and evidence.
+
+A failed owner check or refused coverage invalidates the owners and their
+transitive dependents, refuses the introducing candidate, preserves its capture
+and logs, and fences further developer dispatch. This does not silently repair
+a completed task: explicit completed-task recovery remains the I5a responsibility.
+An owner verifier that mutates source or metadata also refuses acceptance.
+
+### Delegation and existing recording authorities
+
+New profiles may explicitly set
+`feedback_delegation.owner_revalidation: true`. The field is included in the
+frozen profile and native recording authority. It permits independently reviewed
+completed-source/test amendments only within the existing literal path grant,
+strong independence requirement, amendment/file quotas, attempts, invocation
+caps and deadline. Missing owner coverage never authorizes activation. An old
+profile/recording policy without this flag remains operator-only; installing a
+new controller does not expand it. Baseline tests without a completed owner
+remain an operator case.
+
+For a pending or reviewed owner request in an existing recording ledger, an
+operator can bind a normal exact scope amendment to that immutable request:
+
+```bash
+python3 orchestrator.py continuation-scope-preview \
+  --repo /path/to/project --ticket TICKET \
+  --plan /private/plan.json --reason 'Preserve completed owner obligations' \
+  --feedback-request REQUEST_SHA256
+python3 orchestrator.py continuation-scope-prepare \
+  --repo /path/to/project --ticket TICKET \
+  --plan /private/plan.json --review /private/review.json \
+  --reason 'Preserve completed owner obligations' \
+  --feedback-request REQUEST_SHA256
+```
+
+Activation uses the existing exact scope authorization, including proposal,
+controller and scope-diff hashes and the operator's `source_fenced: true`.
+Preview/preparation/activation make no provider calls. The original request and
+any acquired role responses stay unchanged; a separate owner amendment receipt
+admits the exact native descendant. This supports an explicitly approved
+controller revision and preserves the original profile, cumulative counters and
+absolute deadline. Operator receipts also count against the existing scope
+amendment/file allowances. Public projections and metrics expose their count.
+This bridge does not create a new delegation permission or fabricate an AI
+approval. Its coverage review and final operator authorization are real separate
+inputs, not automatically approved by the CLI.
+
+If final stop reporting changed the request's overall source-evidence hash,
+the bridge refuses it by default. `--reconcile-feedback-evidence` is a separate
+operator input to both preview and prepare. It admits only an identical parent,
+plan, complete task state, failure, capture, counters, limits envelope and
+worktree; request evidence must still match its recorded hashes. The subject
+explicitly records the old/current source hashes and the independent review of
+current registered evidence. It does not claim that an earlier decision covers
+that changed evidence. The automatic feedback route has no such waiver.
+
+### Owner recovery boundaries
+
+| Interruption | Native behavior |
+| --- | --- |
+| Owner verification started or a check recorded | Retain partial logs, mark the old verification interrupted and verify the same captured candidate in a new evidence directory; no developer redispatch or new development attempt. Existing captured-verification allowance applies. |
+| Owner failure/invalidation | Retain failed proof and block further dispatch; no implicit completed-task repair. |
+| Commit intent or commit before completion acknowledgment | Require the owner proof, original capture and exact tree; missing/altered evidence refuses recovery. |
+| Operator selector published before feedback receipt | Native entrypoints remain fenced until exact activation replay reconciles the receipt; no inference and no duplicate quota debit. |
+| Feedback/subject/capture/proposal changed after review | Refuse activation without moving the old selector. |
+
+The new fields/events are additive evidence. An older controller does not enforce
+this authority and must not execute the selected new generation. A rollback
+requires an explicit controller admission/reconciliation; do not rewind selectors,
+remove journal entries or refund attempts. Prior generations remain preserved.

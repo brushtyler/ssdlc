@@ -67,11 +67,16 @@ def _unique(values, validator, *, maximum=100):
 
 
 def validate_policy(policy):
-    _object(policy, ('schema_version', 'capability', 'ticket', 'source_binding_sha256',
+    fields = ('schema_version', 'capability', 'ticket', 'source_binding_sha256',
                      'controller_sha256', 'limits_sha256', 'allowed_files',
                      'max_requests', 'max_amendments', 'max_added_files',
                      'max_amendments_per_task', 'max_rounds', 'role_calls', 'expires_at',
-                     'require_strong_independence'))
+                     'require_strong_independence')
+    if isinstance(policy, dict) and 'owner_revalidation' in policy:
+        fields += ('owner_revalidation',)
+        if policy['owner_revalidation'] is not True:
+            raise FeedbackError('Owner revalidation delegation must be explicitly enabled')
+    _object(policy, fields)
     if type(policy['schema_version']) is not int or policy['schema_version'] != 1:
         raise FeedbackError('Unsupported feedback policy')
     if policy['capability'] != 'record-only-v1':
@@ -145,14 +150,17 @@ def participants(state, row, role=None, metadata=None):
     return list(unique.values())
 
 
-def class_disposition(row):
+def class_disposition(row, *, owner_revalidation=False):
     classes = row.get('path_classes')
     if not isinstance(classes, dict) or digest(classes) != row.get('path_classes_sha256'):
         return 'OPERATOR_DECISION'
     kinds = [classes.get(path, {}).get('kind') for path in row['proposal']['requested_files']]
-    if any(kind not in {'NEW_FILE', 'UNOWNED_SOURCE', 'COMPLETED_SOURCE'} for kind in kinds):
+    if any(kind not in {'NEW_FILE', 'UNOWNED_SOURCE', 'COMPLETED_SOURCE', 'COMPLETED_TEST'} for kind in kinds):
         return 'OPERATOR_DECISION'
-    if 'COMPLETED_SOURCE' in kinds:
+    if 'COMPLETED_TEST' in kinds and not owner_revalidation:
+        return 'OPERATOR_DECISION'
+    if any(k in {'COMPLETED_SOURCE', 'COMPLETED_TEST'} for k in kinds) and not (
+            owner_revalidation and row.get('review', {}).get('owner_coverage')):
         return 'OWNER_REVALIDATION_REQUIRED'
     return None
 
@@ -161,10 +169,11 @@ def reserve_amendment(policy, state, row):
     """Provisional recording quota; F2 must bind final native activation."""
     tid, paths = row['binding']['task_id'], row['proposal']['requested_files']
     prior = state['amendments']
-    reason = ('TICKET_AMENDMENTS_EXHAUSTED' if len(prior) >= policy['max_amendments'] else
-              'TASK_AMENDMENTS_EXHAUSTED' if sum(item['task_id'] == tid for item in prior)
+    slots = list(prior) + list(state.get('owner_amendments', []))
+    reason = ('TICKET_AMENDMENTS_EXHAUSTED' if len(slots) >= policy['max_amendments'] else
+              'TASK_AMENDMENTS_EXHAUSTED' if sum(item['task_id'] == tid for item in slots)
                   >= policy['max_amendments_per_task'] else
-              'ADDED_FILES_EXHAUSTED' if sum(len(item['paths']) for item in prior) + len(paths)
+              'ADDED_FILES_EXHAUSTED' if sum(len(item['paths']) for item in slots) + len(paths)
                   > policy['max_added_files'] else None)
     if reason:
         row['quota_status'] = 'EXHAUSTED'
@@ -402,7 +411,10 @@ class FeedbackStore:
 
     def review(self, identity, review, reviewer, source):
         actor(reviewer)
-        _object(review, ('proposal_sha256', 'verdict', 'coverage_preserved', 'reason_code'))
+        fields = ('proposal_sha256', 'verdict', 'coverage_preserved', 'reason_code')
+        if isinstance(review, dict) and 'owner_coverage' in review:
+            fields += ('owner_coverage',)
+        _object(review, fields)
         _hash(review['proposal_sha256']); _identity(review['reason_code'])
         if review['verdict'] not in ('APPROVED', 'REJECTED', 'INCONCLUSIVE') or type(review['coverage_preserved']) is not bool:
             raise FeedbackError('Invalid independent feedback review')
@@ -423,12 +435,18 @@ class FeedbackStore:
                 raise FeedbackError('Review does not bind the exact proposal')
             if review['verdict'] == 'APPROVED' and not review['coverage_preserved']:
                 raise FeedbackError('Approval cannot weaken obligation coverage')
+            if 'owner_coverage' in review:
+                from ssdlc_owner_revalidation import scope_contract, validate_review
+                value = scope_contract(source, row['proposal']['requested_files'])
+                if row['proposal']['route'] != 'AMENDMENT' or value is None:
+                    raise FeedbackError('Owner coverage requires an owned-file amendment')
+                validate_review(value, review['owner_coverage'])
             row.update(status='REVIEWED', reviewer=copy.deepcopy(reviewer), review=copy.deepcopy(review),
                        independence=quality, reviewed_at=self.clock())
             row['decisions'].append(dict(proposal=copy.deepcopy(row['proposal']), review=copy.deepcopy(review)))
             if (review['verdict'] == 'APPROVED' and row['proposal']['route'] == 'AMENDMENT'
                     and not row.get('source_reconciliation_required', True)
-                    and not class_disposition(row) and not (policy['require_strong_independence']
+                    and not class_disposition(row, owner_revalidation=policy.get('owner_revalidation', False)) and not (policy['require_strong_independence']
                                                            and quality['reduced_independence'])):
                 reserve_amendment(policy, state, row)
             self._append('FEEDBACK_REVIEWED', state)
@@ -438,6 +456,8 @@ class FeedbackStore:
         state = self.inspect()
         row = state['requests'][identity]
         authority, _ = self._read()
+        if any(r['request_id'] == identity for r in state.get('owner_amendments', [])):
+            return 'APPLIED'
         if any(r['request_id'] == identity for r in state.get('repair_returns', [])):
             return 'IN_SCOPE_RETURN_APPLIED'
         if row['status'] == 'APPLIED':
@@ -451,7 +471,7 @@ class FeedbackStore:
                 and quality['reduced_independence']):
             return 'OPERATOR_DECISION'
         if row.get('proposal', {}).get('route') == 'AMENDMENT':
-            disposition = class_disposition(row)
+            disposition = class_disposition(row, owner_revalidation=authority['policy'].get('owner_revalidation', False))
             if disposition:
                 return disposition
         if row['status'] not in ('REVIEWED', 'APPLIED'):
@@ -564,9 +584,10 @@ class FeedbackStore:
                     origin=row.get('origin', 'UNKNOWN'), quota_reason=row.get('quota_reason'),
                     reduced_independence=row.get('independence', {}).get('reduced_independence'))
                     for key, row in sorted(state['requests'].items())],
-                    role_calls=len(state['role_calls']), amendments=len(state['amendments']),
+                    role_calls=len(state['role_calls']), amendments=len(state['amendments']) + len(state.get('owner_amendments', [])),
                     amendments_reserved=sum(item['status'] == 'RESERVED' for item in state['amendments']),
-                    amendments_applied=sum(item['status'] == 'APPLIED' for item in state['amendments']),
+                    amendments_applied=sum(item['status'] == 'APPLIED' for item in state['amendments']) + len(state.get('owner_amendments', [])),
+                    operator_owner_amendments=len(state.get('owner_amendments', [])),
                     repair_returns=len(state.get('repair_returns', [])),
                     operator_repair_returns=sum(r['operator'] for r in state.get('repair_returns', [])))
 

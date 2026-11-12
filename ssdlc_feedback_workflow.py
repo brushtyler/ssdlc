@@ -43,7 +43,7 @@ def policy_for(ticket, binding, envelope, deadline):
         raise FeedbackError('Automatic feedback workflow is not authorized')
     grant = envelope['policy']['feedback_delegation']
     caps = envelope['policy']['role_invocations']
-    return dict(schema_version=1, capability='record-only-v1', ticket=ticket,
+    result = dict(schema_version=1, capability='record-only-v1', ticket=ticket,
         source_binding_sha256=digest(binding), controller_sha256=digest(execution_contract(envelope['binding']['controller'])),
         limits_sha256=digest(envelope), allowed_files=grant['allowed_files'],
         max_requests=min(1000, 3 * grant['max_amendments']), max_amendments=grant['max_amendments'],
@@ -51,6 +51,9 @@ def policy_for(ticket, binding, envelope, deadline):
         max_rounds=1, role_calls={r: min(1000, caps.get('feedback-' + r, 0))
                                 for r in ('diagnosis', 'planner', 'reviewer', 'po')},
         require_strong_independence=True, expires_at=deadline)
+    if grant.get('owner_revalidation'):
+        result['owner_revalidation'] = True
+    return result
 
 
 def validate_bootstrap(policy, authorization):
@@ -135,6 +138,17 @@ def role_prompt(source, row, role):
                 path_classes=row['path_classes'], impact=row['impact'], proposal=row.get('proposal'),
                 proposal_sha256=row.get('proposal_sha256'),
                 task=next(t for t in source['plan']['tasks'] if t['task_id'] == source['task_id']))
+    if role == 'reviewer' and row.get('proposal', {}).get('route') == 'AMENDMENT':
+        from ssdlc_owner_revalidation import scope_contract
+        value = scope_contract(source, row['proposal']['requested_files'])
+        if value:
+            case['owner_coverage_contract'] = value
+            case['owner_coverage_contract_sha256'] = digest(value)
+            response += (' For APPROVED include owner_coverage: {contract_sha256: exact owner_coverage_contract_sha256, '
+                         'coverage_preserved: true, approved_test_changes: []}. Review each listed owner obligation. '
+                         'Assertions removed or skip/xfail introduced require an independently reviewed exact '
+                         'old/new file hash and reason in approved_test_changes; otherwise no such changes are allowed. '
+                         'For REJECTED or INCONCLUSIVE omit owner_coverage.')
     failed = source['journal']['tasks'][source['task_id']]['failed_attempts'][-1]
     for previous in reversed(source['journal']['tasks'][source['task_id']]['failed_attempts']):
         if previous.get('tree') != failed.get('tree'):
