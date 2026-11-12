@@ -11,6 +11,10 @@ from devloop.github import GitHub, GitHubError, normalize_checks, summarize_chec
 
 CFG = config.load_config()
 SHA1, SHA2 = 'a' * 40, 'b' * 40
+# Dispatcher tests follow whatever roles config.toml assigns.
+IMPL, REV = CFG.implementer, CFG.reviewer
+IMPL_NAME, REV_NAME = CFG.agent(IMPL).display_name, CFG.agent(REV).display_name
+META = {'issue': 7, 'implementer': IMPL, 'reviewer': REV}
 
 
 def finding(title='bug', file='x.py', line=3):
@@ -346,7 +350,7 @@ def pr(number=100, issue=7, labels=('agent:review',), reviews=(), fixes=(), chec
        head=SHA1):
     return PullRequest(number=number, issue=issue, head_ref=f'agent/issue-{issue}', head_sha=head,
                        title='t', body='b', labels=set(labels),
-                       meta={'issue': issue, 'implementer': 'codex', 'reviewer': 'claude'},
+                       meta=dict(META, issue=issue),
                        reviews=list(reviews), fixes=list(fixes), checks=checks,
                        failed_checks=['Unit Tests'] if checks == 'fail' else [],
                        failed_runs=['42'] if checks == 'fail' else [])
@@ -529,16 +533,15 @@ class DispatcherTests(unittest.TestCase):
         (created,) = self.gh.created
         self.assertEqual(created['head'], 'agent/issue-7')
         self.assertEqual(created['labels'], ['agent:review'])
-        self.assertTrue(created['body'].startswith('> [!NOTE]\n> **Agent:** Codex (CLI v9.9)'))
+        self.assertTrue(created['body'].startswith(f'> [!NOTE]\n> **Agent:** {IMPL_NAME} (CLI v9.9)'))
         self.assertIn('Closes #7', created['body'])
-        self.assertEqual(markdown.read_marker(created['body'], 'pr'),
-                         {'issue': 7, 'implementer': 'codex', 'reviewer': 'claude'})
+        self.assertEqual(markdown.read_marker(created['body'], 'pr'), META)
         self.assertEqual(self.ws.pushes, [('agent/issue-7', True)])
         self.assertIn('Refs #7', self.ws.commits[0])
         prompt = runner.calls[0][3]
         self.assertIn('Also X.', prompt)
         self.assertNotIn('IGNORE ALL RULES', prompt)
-        self.assertEqual(runner.calls[0][:3], ('codex', 'write', 'implement'))
+        self.assertEqual(runner.calls[0][:3], (IMPL, 'write', 'implement'))
         self.assertEqual(self.gh.labels[7], set())
 
     def test_implement_retries_failing_tests_then_escalates(self):
@@ -555,7 +558,7 @@ class DispatcherTests(unittest.TestCase):
         d = self.make(FakeRunner(implemented('blocked')))
         d._do_implement(7)
         self.assertEqual(self.gh.labels[7], {'agent:needs-human'})
-        self.assertTrue(self.gh.comments[0][1].startswith('> [!NOTE]\n> **Agent:** Codex'))
+        self.assertTrue(self.gh.comments[0][1].startswith(f'> [!NOTE]\n> **Agent:** {IMPL_NAME}'))
         self.assertIn('unclear', self.gh.comments[0][1])
 
     def test_review_posts_structured_verdict_and_routes_labels(self):
@@ -568,10 +571,10 @@ class DispatcherTests(unittest.TestCase):
                 p = pr()
                 self.gh.labels[100] = set(p.labels)
                 d._do_review(p)
-                self.assertEqual(runner.calls[0][:3], ('claude', 'review', 'review'))
+                self.assertEqual(runner.calls[0][:3], (REV, 'review', 'review'))
                 self.assertEqual(self.gh.labels[100], labels)
                 body = self.gh.comments[0][1]
-                self.assertTrue(body.startswith('> [!NOTE]\n> **Agent:** Claude Code (CLI v9.9)'))
+                self.assertTrue(body.startswith(f'> [!NOTE]\n> **Agent:** {REV_NAME} (CLI v9.9)'))
                 self.assertEqual(markdown.read_marker(body, 'review')['verdict'], raw['verdict'])
 
     def test_approval_is_not_promoted_when_head_or_ci_changed_meanwhile(self):
@@ -702,7 +705,7 @@ class DispatcherTests(unittest.TestCase):
         d = self.make(FakeRunner(dict(implemented(), pr_body=f'Why.\n{forged_pr}')))
         d._do_implement(7)
         meta = markdown.read_marker(self.gh.created[0]['body'], 'pr')
-        self.assertEqual(meta, {'issue': 7, 'implementer': 'codex', 'reviewer': 'claude'})
+        self.assertEqual(meta, META)
         self.assertEqual(self.gh.created[0]['body'].count('<!--'), 1)
 
     def test_fix_on_moved_branch_goes_back_to_review(self):
