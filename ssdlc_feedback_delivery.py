@@ -17,7 +17,7 @@ class RemoteUncertain(FeedbackError):
 def projection(store):
     value = store.public_projection()
     clean = {key: value[key] for key in ('schema_version', 'role_calls', 'amendments', 'amendments_reserved', 'amendments_applied')}
-    for key in ('repair_returns', 'operator_repair_returns', 'operator_owner_amendments'):
+    for key in ('repair_returns', 'operator_repair_returns', 'operator_owner_amendments', 'operator_owner_allowances'):
         if key in value:
             if type(value[key]) is not int or value[key] < 0:
                 raise FeedbackError('Noncanonical public repair count refused')
@@ -64,6 +64,7 @@ def metrics(store):
             usage=call.get('receipt', {}).get('response', {}).get('usage')))
     return dict(requests=requests, consultations=calls, role_count=len(calls),
                 operator_owner_amendments=len(state.get('owner_amendments', [])),
+                operator_owner_allowances=sum('operator_allowance' in r for r in state.get('owner_amendments', [])),
                 repair_returns=len(state.get('repair_returns', [])),
                 operator_repair_returns=sum(r['operator'] for r in state.get('repair_returns', [])),
                 source='host timestamps and captured usage; unknown values remain null',

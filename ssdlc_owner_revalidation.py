@@ -6,8 +6,12 @@ existing captured-candidate verification and commit-intent recovery path.
 import ast
 from collections import Counter
 import copy
+import hashlib
 import json
+from pathlib import Path
 import re
+import subprocess
+import tempfile
 
 from ssdlc_tasks import TaskError, digest, file_hash, git, confined
 
@@ -49,8 +53,13 @@ def validate_review(value, coverage):
             or not isinstance(coverage['approved_test_changes'], list)):
         raise TaskError('Explicit owner coverage review must bind the exact owner contract')
     seen = set()
+    patch_bytes = 0
+    patches = 0
     for change in coverage['approved_test_changes']:
-        if (not isinstance(change, dict) or set(change) != {'path', 'old_sha256', 'new_sha256', 'reason'}
+        fields = {'path', 'old_sha256', 'new_sha256', 'reason'}
+        if isinstance(change, dict) and 'patch' in change:
+            fields.add('patch')
+        if (not isinstance(change, dict) or set(change) != fields
                 or not isinstance(change['path'], str)
                 or change['path'] in seen or change['path'] not in value['files']
                 or value['files'][change['path']]['kind'] not in {'COMPLETED_TEST', 'BASELINE_TEST'}
@@ -60,19 +69,67 @@ def validate_review(value, coverage):
                 or not isinstance(change['reason'], str) or not change['reason'].strip()
                 or len(change['reason']) > 1600):
             raise TaskError('Test coverage changes require an exact independently reviewed hash and reason')
+        if 'patch' in change:
+            patch = change['patch']
+            if not isinstance(patch, str) or '\0' in patch or not patch:
+                raise TaskError('Reviewed test patch must be bounded unified diff text')
+            old = '/dev/null' if change['old_sha256'] is None else 'a/'+change['path']
+            new = '/dev/null' if change['new_sha256'] is None else 'b/'+change['path']
+            lines = patch.splitlines(keepends=True)
+            if (lines[:2]!=['--- '+old+'\n','+++ '+new+'\n']
+                    or any(line.startswith(('--- ','+++ ','diff --git ','GIT binary patch')) for line in lines[2:])):
+                raise TaskError('Reviewed patch must affect only its exact declared test file')
+            patch_bytes += len(json.dumps(patch).encode())
+            patches += 1
         seen.add(change['path'])
+    if patch_bytes > 4096 or patches > 4:
+        raise TaskError('Reviewed test patch bundle exceeds its bounded prompt allowance')
+
+
+def validate_patches(value, coverage, worktree):
+    """Apply reviewed data in a disposable directory, never in the candidate."""
+    validate_review(value, coverage)
+    from ssdlc_candidates import git_environment
+    for change in coverage['approved_test_changes']:
+        if 'patch' not in change:
+            continue
+        path = confined(worktree, change['path'])
+        old = path.read_bytes() if path.is_file() else None
+        if (hashlib.sha256(old).hexdigest() if old is not None else None)!=change['old_sha256']:
+            raise TaskError('Reviewed test patch base differs from its approved old hash')
+        with tempfile.TemporaryDirectory(prefix='ssdlc-reviewed-patch-') as temporary:
+            root = Path(temporary)
+            target = root/change['path']
+            if old is not None:
+                target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(old)
+            command = ['git','--literal-pathspecs','-c','core.hooksPath=/dev/null','-c','core.fsmonitor=false']
+            initialized = subprocess.run(command+['init','--quiet','--template='],cwd=root,
+                env=git_environment(),capture_output=True)
+            if initialized.returncode:
+                raise TaskError('Cannot validate reviewed test patch in a disposable repository')
+            applied = subprocess.run(command+['apply','--whitespace=nowarn','-'],input=change['patch'],
+                text=True,cwd=root,env=git_environment(),capture_output=True)
+            actual = hashlib.sha256(target.read_bytes()).hexdigest() if target.is_file() else None
+            if applied.returncode or actual!=change['new_sha256']:
+                raise TaskError('Reviewed test patch does not produce its approved new hash')
 
 
 def prompt_summary(authority):
     """The full sealed check/owner contracts are host authority, not prompt bulk."""
     value = authority['contract']
     owners, paths = sorted(value['owners']), sorted(value['files'])
-    return dict(contract_sha256=digest(value), owner_tasks=owners[:12], files=paths[:12],
+    summary = dict(contract_sha256=digest(value), owner_tasks=owners[:12], files=paths[:12],
         omitted_owners=max(0,len(owners)-12), omitted_files=max(0,len(paths)-12),
         rule='Preserve owner obligations and tests. Host runs fresh owner checks before accepting this candidate.',
         reviewed_test_changes=[dict(path=c['path'],new_sha256=c['new_sha256'])
             for c in authority['coverage_review']['approved_test_changes'][:4]],
         omitted_test_changes=max(0,len(authority['coverage_review']['approved_test_changes'])-4))
+    patches = [dict(path=c['path'],new_sha256=c['new_sha256'],patch=c['patch'])
+               for c in authority['coverage_review']['approved_test_changes'] if 'patch' in c]
+    if patches:
+        summary['reviewed_patches'] = patches
+        summary['patch_instruction'] = 'Apply these exact independently reviewed test patches unless the file already matches its new hash. Preserve their reviewed outcomes.'
+    return summary
 
 
 def _coverage_facts(text):
@@ -225,7 +282,48 @@ def evidence_problems(scheduler, task_id, record):
     return problems
 
 
-def feedback_binding(ticket, source, paths, request_id, *, reconcile_evidence=False):
+def _operator_accounting(source, row, state):
+    """Only exact captured consultations may advance a request's old counters.
+
+    The operator separately reviews the changed registered-evidence inventory;
+    this relation never waives a plan/task/candidate or accounting mutation.
+    """
+    from ssdlc_transitions import _regular
+    from ssdlc_feedback_roles import _usage
+    anchor = row.get('accounting_anchor', {})
+    before, after = anchor.get('counters'), source['counters']
+    if (not isinstance(before, dict) or anchor.get('envelope_sha256') != digest(source['envelope'])
+            or anchor.get('worktree_sha256') != source['worktree_sha256']
+            or row['binding']['counters_sha256'] != digest(before)
+            or {k:v for k,v in before.items() if k!='invocations'}
+                != {k:v for k,v in after.items() if k!='invocations'}
+            or any(after['invocations'].get(k)!=v for k,v in before['invocations'].items())):
+        raise TaskError('Operator reconciliation changed historical accounting; semantic inputs must match')
+    raw = _regular(source['root'], 'limits/task-journal.jsonl').read_bytes()
+    size = anchor.get('journal_size')
+    if (type(size) is not int or size < 1 or size > len(raw)
+            or not raw[:size].endswith(b'\n')
+            or hashlib.sha256(raw[:size]).hexdigest() != anchor.get('journal_sha256')):
+        raise TaskError('Operator accounting prefix changed')
+    added = set(after['invocations']) - set(before['invocations'])
+    calls = [c for c in state['role_calls'] if c['request_id']==row['request_id']
+             and c.get('native', {}).get('invocation_id') not in before['invocations']]
+    identities = [c.get('native', {}).get('invocation_id') for c in calls]
+    if len(set(identities))!=len(calls) or set(identities)!=added:
+        raise TaskError('Operator accounting includes unrelated or uncaptured invocations')
+    for call in calls:
+        native = call['native']; receipt = call.get('receipt', {})
+        response = receipt.get('response', {}); accounted = after['invocations'][native['invocation_id']]
+        if (call['status']!='RETURNED' or digest(response)!=receipt.get('response_sha256')
+                or native.get('limits_sha256')!=digest(source['envelope'])
+                or accounted.get('status')!='returned' or accounted.get('usage')!=_usage(response.get('usage'))
+                or accounted.get('role')!='feedback-'+call['role'] or accounted.get('phase')!='feedback'
+                or accounted.get('engine')!=call['actor']['engine']):
+            raise TaskError('Operator accounting differs from captured funded consultations')
+    return sorted(added)
+
+
+def feedback_binding(ticket, source, paths, request_id, *, reconcile_evidence=False, operator_owner_limit=None):
     """Operator bridge: retain a pending/reviewed request as an immutable fact."""
     from ssdlc_feedback import FeedbackStore, matches_source, source_binding, validate_request
     from ssdlc_feedback_return import _head
@@ -241,37 +339,57 @@ def feedback_binding(ticket, source, paths, request_id, *, reconcile_evidence=Fa
     reconciliation = None
     if not matches_source(state, row, source):
         current = source_binding(source)
-        anchor = row.get('accounting_anchor', {})
+        mutable = {'source_files_sha256', 'counters_sha256'}
         if (reconcile_evidence is not True
-                or {k:v for k,v in row['binding'].items() if k!='source_files_sha256'}
-                    != {k:v for k,v in current.items() if k!='source_files_sha256'}
-                or anchor.get('counters') != source['counters']
-                or anchor.get('envelope_sha256') != digest(source['envelope'])
-                or anchor.get('worktree_sha256') != source['worktree_sha256']):
+                or {k:v for k,v in row['binding'].items() if k not in mutable}
+                    != {k:v for k,v in current.items() if k not in mutable}):
             raise TaskError('Changed feedback evidence requires exact operator reconciliation; semantic inputs must match')
+        charged = _operator_accounting(source, row, state)
         validate_request(source, row['request'])
         reconciliation = dict(old_source_files_sha256=row['binding']['source_files_sha256'],
             current_source_files_sha256=current['source_files_sha256'],
-            unchanged_plan_task_capture_counters_and_worktree=True,
+            unchanged_plan_task_capture_and_worktree=True,
+            preserved_counter_prefix=True, captured_consultations=charged,
             interpretation='Current registered evidence is independently reviewed; old request/decisions are historical only')
     grant = source['envelope']['policy'].get('feedback_delegation')
     if not grant or not set(paths) <= set(grant['allowed_files']):
         raise TaskError('Operator owner amendment is outside frozen feedback paths')
-    _capacity(state, source['task_id'], paths, grant)
+    allowance = _capacity(state, source['task_id'], paths, grant, operator_owner_limit=operator_owner_limit)
     value = dict(request_id=request_id, feedback_head=_head(store),
                 authority_sha256=digest(authority), state_sha256=digest(state),
                 request=copy.deepcopy(row), paths=sorted(paths))
     if reconciliation:
         value['source_reconciliation'] = reconciliation
+    if allowance:
+        value['operator_allowance'] = allowance
     return value
 
 
-def _capacity(state, task_id, paths, grant):
+def _capacity(state, task_id, paths, grant, *, operator_owner_limit=None):
     slots = list(state.get('amendments', [])) + list(state.get('owner_amendments', []))
+    own = sum(s['task_id']==task_id for s in slots)
+    limit = grant['max_amendments_per_task']
+    allowance = None
+    if operator_owner_limit is not None:
+        if (type(operator_owner_limit) is not int or operator_owner_limit<=limit
+                or operator_owner_limit!=own+1 or operator_owner_limit>grant['max_amendments']):
+            raise TaskError('Operator owner allowance must authorize exactly the next manual amendment')
+        allowance = dict(capability='one-exact-manual-owner-amendment-v1', task_id=task_id,
+            frozen_limit=limit, observed_amendments=own, manual_limit=operator_owner_limit,
+            frozen_grant_sha256=digest(grant))
+        limit = operator_owner_limit
     if (len(slots) >= grant['max_amendments']
-            or sum(s['task_id'] == task_id for s in slots) >= grant['max_amendments_per_task']
+            or own >= limit
             or sum(len(s['paths']) for s in slots) + len(paths) > grant['max_added_files']):
         raise TaskError('Cumulative owner/scope amendment allowance exhausted')
+    return allowance
+
+
+def validate_allowance_binding(proposal, binding):
+    value = binding.get('operator_allowance')
+    if (('operator_allowance' in binding)!=('owner_allowance_sha256' in proposal)
+            or value is not None and digest(value)!=proposal['owner_allowance_sha256']):
+        raise TaskError('Manual owner allowance differs from its exact operator proposal')
 
 
 def finalize(ticket, proposal, recipe, projection):
@@ -280,10 +398,13 @@ def finalize(ticket, proposal, recipe, projection):
     from ssdlc_feedback import FeedbackStore
     from ssdlc_tasks import ticket_lock
     store = FeedbackStore(ticket); binding = recipe['subject']['owner_feedback']
+    validate_allowance_binding(proposal,binding)
     if digest(binding) != proposal['owner_feedback_sha256']:
         raise TaskError('Owner feedback binding changed')
     receipt = dict(request_id=binding['request_id'], task_id=recipe['subject']['task_id'],
         transition_id=proposal['transition_id'], proposal_sha256=digest(proposal), paths=binding['paths'])
+    if 'operator_allowance' in binding:
+        receipt['operator_allowance'] = binding['operator_allowance']
     admitted = dict(limits_sha256=digest(recipe['envelope']),
         profile_sha256=digest(recipe['envelope']['policy']), projection_sha256=digest(projection))
     with ticket_lock(store.root / 'feedback.lock'):
@@ -307,8 +428,11 @@ def ensure_reconciled(ticket, projection, proposal):
     from ssdlc_transitions import _regular
     recipe = json.loads(_regular(ticket / 'execution' / proposal['transition_id'], 'recipe.json').read_text())
     binding = recipe['subject']['owner_feedback']; state = FeedbackStore(ticket).inspect()
+    validate_allowance_binding(proposal,binding)
     receipt = dict(request_id=binding['request_id'], task_id=recipe['subject']['task_id'],
         transition_id=proposal['transition_id'], proposal_sha256=digest(proposal), paths=binding['paths'])
+    if 'operator_allowance' in binding:
+        receipt['operator_allowance'] = binding['operator_allowance']
     if (digest(binding) != proposal['owner_feedback_sha256']
             or [r for r in state.get('owner_amendments', []) if r['transition_id']==proposal['transition_id']] != [receipt]
             or state['requests'].get(binding['request_id']) != binding['request']

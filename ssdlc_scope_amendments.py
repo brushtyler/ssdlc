@@ -124,7 +124,8 @@ def inspect(ticket, *, allow_host_hints=False):
     return result
 
 
-def subject(source, plan, reason, *, feedback_request_id=None, reconcile_feedback_evidence=False):
+def subject(source, plan, reason, *, feedback_request_id=None, reconcile_feedback_evidence=False,
+            operator_owner_limit=None):
     """Pure host-calculated review subject; this grants no execution authority."""
     if not isinstance(reason, str) or not reason.strip() or len(reason) > 1600:
         raise TransitionError('A bounded nonempty scope reason is required')
@@ -170,15 +171,17 @@ def subject(source, plan, reason, *, feedback_request_id=None, reconcile_feedbac
             raise TransitionError('Owner feedback bridge requires completed ownership or baseline coverage')
         from ssdlc_owner_revalidation import feedback_binding
         result['owner_feedback'] = feedback_binding(source['root'].parent.parent, source,
-            changes[source['task_id']]['added'], feedback_request_id, reconcile_evidence=reconcile_feedback_evidence)
-    elif reconcile_feedback_evidence:
+            changes[source['task_id']]['added'], feedback_request_id, reconcile_evidence=reconcile_feedback_evidence,
+            operator_owner_limit=operator_owner_limit)
+    elif reconcile_feedback_evidence or operator_owner_limit is not None:
         raise TransitionError('Evidence reconciliation requires an explicit feedback request')
     return result
 
 
 def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_snapshot,
             guard=lambda: None, clock=time.time, fault=lambda point: None, held_locks=(), delegation=None, profile_update=None,
-            repair_return=None, repair_session=None, feedback_request_id=None, reconcile_feedback_evidence=False):
+            repair_return=None, repair_session=None, feedback_request_id=None, reconcile_feedback_evidence=False,
+            operator_owner_limit=None):
     """Stage a reviewed amendment, retaining all prior generations and counters."""
     from ssdlc_preparations import unfinished, register, update, pending, clear_pending
     from ssdlc_candidates import inventory
@@ -192,6 +195,8 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
         source = inspect(ticket, allow_host_hints=delegation is not None or profile_update is not None or repair_return is not None)
         with transition_lock(source['root'] / '03-dev/tasks/scheduler.lock', held_locks):
             guard()
+            if operator_owner_limit is not None and feedback_request_id is None:
+                raise TransitionError('Operator owner allowance requires its exact feedback request')
             if feedback_request_id is not None and any(x is not None for x in (delegation, profile_update, repair_return)):
                 raise TransitionError('Operator owner feedback cannot be combined with another transition capability')
             if profile_update is not None and delegation is not None:
@@ -233,7 +238,8 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                 reviewed = admission_subject(source, plan, profile_update, reason)
             else:
                 reviewed = subject(source, plan, reason, feedback_request_id=feedback_request_id,
-                                   reconcile_feedback_evidence=reconcile_feedback_evidence)
+                                   reconcile_feedback_evidence=reconcile_feedback_evidence,
+                                   operator_owner_limit=operator_owner_limit)
             review_fields = {'subject_sha256', 'reviewer', 'report', 'scope_diff'}
             if 'owner_revalidation' in reviewed:
                 review_fields.add('owner_coverage')
@@ -242,9 +248,10 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                     or review['subject_sha256'] != digest(reviewed)):
                 raise TransitionError('Independent review must bind the exact amendment subject')
             if 'owner_revalidation' in reviewed:
-                from ssdlc_owner_revalidation import validate_review
+                from ssdlc_owner_revalidation import validate_review, validate_patches
                 coverage = review['state']['requests'][review['request_id']]['review'].get('owner_coverage') if delegation else review.get('owner_coverage')
                 validate_review(reviewed['owner_revalidation'], coverage)
+                validate_patches(reviewed['owner_revalidation'], coverage, source['root'] / 'worktree')
             validator = TaskPlanValidator(source['root'] / 'worktree', source['context'][CONTEXT[0]],
                                           source['quality'], source['root'])
             if delegation is None and profile_update is None and repair_return is None:
@@ -364,6 +371,8 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                                     repair_return_sha256=digest(return_proof))
                 if 'owner_feedback' in reviewed:
                     proposal['owner_feedback_sha256'] = digest(reviewed['owner_feedback'])
+                    if 'operator_allowance' in reviewed['owner_feedback']:
+                        proposal['owner_allowance_sha256'] = digest(reviewed['owner_feedback']['operator_allowance'])
                 atomic_json(prepared / 'proposal.json', proposal)
                 guard(); sync_tree(runtime); sync_tree(prepared)
                 pending(ticket, identity, namespace='execution')
@@ -381,6 +390,9 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
     from ssdlc_preparations import update, clear_pending
     ticket, preparation = _ticket(ticket), _ticket(preparation)
     proposal, recipe = _read(preparation, 'proposal.json'), _read(preparation, 'recipe.json')
+    if 'owner_feedback' in recipe['subject'] or 'owner_allowance_sha256' in proposal:
+        from ssdlc_owner_revalidation import validate_allowance_binding
+        validate_allowance_binding(proposal, recipe['subject'].get('owner_feedback', {}))
     from ssdlc_feedback_delegation import CONTRACT, FencedSession, finalize
     delegated = proposal.get('authorization_contract') == CONTRACT
     profile_admission = proposal.get('authorization_contract') == 'feedback-profile-admission-v1'
@@ -425,7 +437,8 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
                 expected = subject(source, _read(ticket / 'execution-runtimes' / proposal['transition_id'],
                     '02-design/plan.json'), recipe['subject']['reason'],
                     feedback_request_id=recipe['subject']['owner_feedback']['request_id'],
-                    reconcile_feedback_evidence='source_reconciliation' in recipe['subject']['owner_feedback'])
+                    reconcile_feedback_evidence='source_reconciliation' in recipe['subject']['owner_feedback'],
+                    operator_owner_limit=recipe['subject']['owner_feedback'].get('operator_allowance', {}).get('manual_limit'))
                 if expected != recipe['subject']:
                     raise TransitionError('Owner feedback changed after coverage review')
             if delegated:
@@ -514,6 +527,8 @@ def main(argv=None):
             command.add_argument('--feedback-request', help='Bind an existing owner-scope request without repeating inference')
             command.add_argument('--reconcile-feedback-evidence', action='store_true',
                 help='Explicitly review changed registered evidence with identical plan/task/capture/counters/worktree')
+            command.add_argument('--operator-owner-limit', type=int,
+                help='Exact next manual owner amendment for this task; does not extend automatic/global/file allowances')
         if name == 'prepare': command.add_argument('--review', required=True)
         if name in {'activate', 'discard'}: command.add_argument('--preparation', required=True)
         if name == 'activate': command.add_argument('--authorization', required=True)
@@ -530,7 +545,8 @@ def main(argv=None):
                 with ticket_lock(source['root'] / '03-dev/tasks/scheduler.lock'):
                     if args.command.endswith('preview'):
                         value = subject(source, read(args.plan), args.reason, feedback_request_id=args.feedback_request,
-                                        reconcile_feedback_evidence=args.reconcile_feedback_evidence)
+                                        reconcile_feedback_evidence=args.reconcile_feedback_evidence,
+                                        operator_owner_limit=args.operator_owner_limit)
                         result = dict(subject=value, subject_sha256=digest(value), execution_authorized=False)
                     else:
                         result = dict(task_id=source['task_id'], source_generation=source['projection']['transition_id'],
@@ -564,7 +580,8 @@ def main(argv=None):
                 result = prepare(ticket, repo, read(args.plan), read(args.review), args.reason,
                                  runtime_identity=runtime_identity, controller_snapshot=snapshot, guard=guard,
                                  feedback_request_id=args.feedback_request,
-                                 reconcile_feedback_evidence=args.reconcile_feedback_evidence)
+                                 reconcile_feedback_evidence=args.reconcile_feedback_evidence,
+                                 operator_owner_limit=args.operator_owner_limit)
                 result = dict(preparation=result['preparation'], proposal_sha256=digest(result['proposal']),
                               transition_id=result['proposal']['transition_id'], execution_authorized=False)
             else:

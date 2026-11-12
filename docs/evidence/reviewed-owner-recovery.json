@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "issues": [
+    38,
+    39,
+    22
+  ],
+  "increment": "Exact operator owner recovery after funded rejection; reviewed fixture patches",
+  "base_commit": "313eb63693f0951276a83b2ab1fad0a87088a73c",
+  "source_sha256": {
+    "ssdlc_owner_revalidation.py": "62652be85d260fa66846955df76f5631c24d93030a70126b02e3aa05af2dd121",
+    "ssdlc_scope_amendments.py": "bb41e9bba8ffbb87dea4cabb83e741e91b9fcac2cb44894e7fe29333583f8815",
+    "ssdlc_transitions.py": "cae412c1791789f18c8c35a7b8e222c65d9571cebae526b929bfae7bf5f7009f",
+    "ssdlc_feedback.py": "d4e6b8e1ccca54c9846530a3bdecdbd72cdc0aafd21f48b35e4851699c4a4777",
+    "ssdlc_feedback_delivery.py": "d7506ea02e36a57671b204e46b3d6b823a2bccea405496e2f2b0d028f50f0597",
+    "tests/test_owner_operator_recovery.py": "442cfc0381474baff0b058c750c14dfccca6225e90c22cc52791ceeff51bfc49",
+    "tests/test_owner_revalidation.py": "efda36ba7be2eb20aee8e8e17aa69675f6da2dd0fed976e2ab00183928a2ac07"
+  },
+  "owner_regression": {
+    "tests": 31,
+    "seconds": 62.791,
+    "exit_code": 0
+  },
+  "isolated_A5": {
+    "corpus": "i2-recovery-v2",
+    "cases": 12,
+    "failed_cases": 0
+  },
+  "actual_stopped_run_preview": {
+    "task": "T12",
+    "completed_tasks": 10,
+    "total_tasks": 12,
+    "consumed_invocations": 48,
+    "preserved_funded_consultations": 2,
+    "next_development_attempt": 3,
+    "development_attempt_cap": 3,
+    "owners": 8,
+    "validated_fixture_patches": 2,
+    "patch_json_bytes": 3245,
+    "request_and_rejection_preserved": true,
+    "preparation_or_activation": false,
+    "controller": "Unmerged implementation; offline validation only"
+  },
+  "verified_cases": [
+    "Historical counter facts, native accounting journal prefix and frozen envelope are immutable; only exact captured funded consultations can advance request accounting",
+    "Unrelated invocations, changed observed usage and rewritten native prefixes refuse reconciliation",
+    "Second manual owner amendment requires a separately hashed exact operator authorization; automatic per-task grant remains unchanged",
+    "Global amendment and file caps remain enforced; no attempts, invocation allowance, budget or deadline are increased",
+    "Lost receipt after selector publication fences execution; exact replay reconciles once without duplicate amendment debit",
+    "Reviewed test patches apply only in disposable Git copies and must produce their exact approved hashes; bounded complete patches reach developer context",
+    "Changed headers, incorrect result hashes and oversized patch bundles are refused"
+  ],
+  "live_provider_calls": 0,
+  "historical_run_mutated_by_implementation": false,
+  "boundaries": [
+    "Original rejected feedback decision and consumed calls remain historical facts",
+    "Actual T12 fixture patches require independent semantic review and a new exact operator proposal before use",
+    "This increment does not complete T12/T13, run paid global gates or complete issue22",
+    "The manual exception does not change frozen automatic delegation or permit delegated activation",
+    "No automatic merge or native execution is performed"
+  ],
+  "omitted": [
+    "Private paths, raw logs and prompts, request and authorization hashes, credentials and account data"
+  ],
+  "full_final_source_suite": {
+    "tests": 1100,
+    "seconds": 631.063,
+    "exit_code": 0,
+    "command": "python3 -m unittest discover -s tests -v"
+  }
+}
