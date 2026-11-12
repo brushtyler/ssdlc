@@ -107,6 +107,11 @@ the `implementer` and `reviewer` roles (they must be different agents) and, for 
 model, reasoning effort and extra CLI arguments for writing and reviewing turns. Pass another file
 with `--config`.
 
+Each PR records its implementer and reviewer when it is opened, so changing the roles does not
+affect open PRs. If the recorded reviewer is no longer configured, the configured one takes over,
+but never the agent that implemented the PR: without an independent reviewer, or if the PR's
+implementer is no longer configured, the PR goes to `agent:needs-human`.
+
 Agents run headless: `claude -p`, `codex exec`, `agy -p`, with the schema in
 [`devloop/schemas/`](../devloop/schemas/). Reviewers run read-only (codex `read-only` sandbox,
 agy `plan` mode, claude without edit tools). Implementers edit only their worktree; the

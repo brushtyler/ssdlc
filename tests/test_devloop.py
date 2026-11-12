@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import subprocess
 import tempfile
@@ -707,6 +708,39 @@ class DispatcherTests(unittest.TestCase):
         meta = markdown.read_marker(self.gh.created[0]['body'], 'pr')
         self.assertEqual(meta, META)
         self.assertEqual(self.gh.created[0]['body'].count('<!--'), 1)
+
+    def test_reviewer_is_never_the_implementer_after_a_config_change(self):
+        # An open PR implemented by today's configured reviewer, e.g. after the roles were swapped.
+        d = self.make(FakeRunner())
+        p = pr()
+        p.meta = {'issue': 7, 'implementer': REV, 'reviewer': 'gone'}
+        self.assertIsNone(d._reviewer_key(p))
+        p.meta = {'issue': 7, 'implementer': REV, 'reviewer': IMPL}
+        self.assertEqual(d._reviewer_key(p), IMPL)
+        self.assertEqual(d._reviewer_key(pr()), REV)
+
+    def test_review_escalates_without_an_independent_reviewer(self):
+        cfg = dataclasses.replace(CFG, agents={REV: CFG.agents[REV]})
+        p = pr()
+        p.meta = {'issue': 7, 'implementer': REV, 'reviewer': 'gone'}
+        runner = FakeRunner(raw_review())
+        gh = FakeGH()
+        gh.labels[100] = set(p.labels)
+        Dispatcher(cfg, gh, FakeWS(), runner, log=lambda m: None)._do_review(p)
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(gh.labels[100], {'agent:needs-human'})
+        self.assertIn('indipendente', gh.comments[-1][1])
+
+    def test_fix_escalates_when_the_implementer_is_no_longer_configured(self):
+        first = norm(raw_review('request_changes', [finding()]))
+        p = pr(labels=['agent:changes'], reviews=[first])
+        p.meta = dict(META, implementer='gone')
+        runner = FakeRunner(fixed())
+        d = self.make(runner)
+        self.gh.labels[100] = set(p.labels)
+        d._do_fix(p)
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
 
     def test_fix_on_moved_branch_goes_back_to_review(self):
         first = norm(raw_review('request_changes', [finding()]))
