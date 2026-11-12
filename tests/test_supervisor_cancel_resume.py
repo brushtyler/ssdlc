@@ -257,7 +257,8 @@ class TestDocs(unittest.TestCase):
         docs.assert_documented(self, docs.user_facing_docs(), [
             'foreground commands', 'start --ticket', 'status --ticket', 'cancel --ticket', 'resume --ticket',
             'Recovery matrix', 'single-host and Linux-only', 'auth_unverified', 'no shipped native probe',
-            '--test-cmd', 'run_ended', 'unkeyed', 'code_defect', 'operator resupply'], issues=(1, 4, 14))
+            'no GitHub adapter', '--test-cmd', 'run_ended', 'unkeyed drift checks', 'code_defect',
+            'operator resupply'], issues=(1, 4, 14))
         self.assertFalse(any('github' in name.lower() for name in dir(s)))
 
 
