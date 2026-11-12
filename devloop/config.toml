@@ -1,0 +1,58 @@
+# devloop: dispatcher that moves issues labelled `agent:ready` through
+# implementation, independent structured review and fixes, up to a PR that a
+# human merges. See docs/devloop.md.
+
+repo = "brushtyler/ssdlc"
+base_branch = "main"
+branch_prefix = "agent/issue-"
+# Worktrees, logs and the lock live here, relative to the main checkout (ignored by git).
+state_dir = ".ssdlc/devloop"
+test_cmd = "python3 -m unittest discover -s tests"
+# Language of the text that agents write for GitHub.
+language = "Italian"
+
+# Only these logins may start work (`agent:ready`) or write markers that devloop reads.
+trusted_users = ["brushtyler"]
+
+max_open_prs = 2            # devloop PRs open at once; new issues wait
+max_review_rounds = 3       # review rounds (including CI failures) before escalating
+max_actions_per_tick = 3
+implement_test_retries = 1  # extra implementer attempts when local tests fail
+agent_timeout_seconds = 3600
+test_timeout_seconds = 1800
+
+blocked_labels = ["bloccata"]
+priority_labels = ["prerequisito"]
+
+[roles]
+implementer = "codex"
+reviewer = "claude"   # must differ from the implementer
+
+[agents.claude]
+kind = "claude"
+display_name = "Claude Code"
+model = "claude-opus-5-5"
+model_label = "Claude Opus 5.5"
+effort = "high"
+write_args = ["--permission-mode", "acceptEdits",
+              "--allowedTools", "Bash(python3 -m unittest *)", "Bash(git status *)",
+              "Bash(git diff *)", "Bash(git log *)", "Bash(git show *)"]
+review_args = ["--allowedTools", "Bash(git diff *)", "Bash(git log *)", "Bash(git show *)",
+               "Bash(python3 -m unittest tests.*)",
+               "Bash(PYTHONPATH=tests python3 -m unittest tests.*)",
+               "--disallowedTools", "Edit", "Write", "NotebookEdit"]
+commit_trailer = "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+
+[agents.codex]
+kind = "codex"
+display_name = "Codex"
+model = "gpt-6.1-sol"
+model_label = "gpt-6.1-sol"
+effort = "medium"
+
+[agents.agy]
+kind = "agy"
+display_name = "Antigravity"
+model = "gemini-3.8-flash-high"
+model_label = "Gemini 3.8 Flash"
+effort = "high"

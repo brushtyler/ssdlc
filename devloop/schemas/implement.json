@@ -1,0 +1,13 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "summary", "pr_title", "commit_message", "pr_body", "blocked_reason"],
+  "properties": {
+    "status": {"type": "string", "enum": ["completed", "blocked"]},
+    "summary": {"type": "string"},
+    "pr_title": {"type": "string"},
+    "commit_message": {"type": "string"},
+    "pr_body": {"type": "string"},
+    "blocked_reason": {"type": "string"}
+  }
+}

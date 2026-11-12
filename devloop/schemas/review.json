@@ -1,0 +1,55 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "summary", "blocking_findings", "non_blocking_findings",
+               "previous_findings", "human_reason", "checks_performed"],
+  "properties": {
+    "verdict": {"type": "string", "enum": ["approve", "request_changes", "needs_human"]},
+    "summary": {"type": "string"},
+    "blocking_findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["file", "line", "title", "detail", "suggested_fix"],
+        "properties": {
+          "file": {"type": "string"},
+          "line": {"type": "integer"},
+          "title": {"type": "string"},
+          "detail": {"type": "string"},
+          "suggested_fix": {"type": "string"}
+        }
+      }
+    },
+    "non_blocking_findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["file", "line", "title", "detail", "suggested_fix"],
+        "properties": {
+          "file": {"type": "string"},
+          "line": {"type": "integer"},
+          "title": {"type": "string"},
+          "detail": {"type": "string"},
+          "suggested_fix": {"type": "string"}
+        }
+      }
+    },
+    "previous_findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "status", "note"],
+        "properties": {
+          "id": {"type": "string"},
+          "status": {"type": "string", "enum": ["resolved", "unresolved", "withdrawn"]},
+          "note": {"type": "string"}
+        }
+      }
+    },
+    "human_reason": {"type": "string"},
+    "checks_performed": {"type": "array", "items": {"type": "string"}}
+  }
+}
