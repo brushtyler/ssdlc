@@ -155,6 +155,141 @@
           "maximum": 1000
         }
       }
+    },
+    "feedback_workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "enabled",
+        "roles"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "enabled": {
+          "const": true
+        },
+        "roles": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "planner",
+            "reviewer"
+          ],
+          "properties": {
+            "planner": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "engine",
+                "model",
+                "effort"
+              ],
+              "properties": {
+                "engine": {
+                  "enum": [
+                    "claude",
+                    "codex",
+                    "agy"
+                  ]
+                },
+                "model": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,119}$"
+                },
+                "effort": {
+                  "enum": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh"
+                  ]
+                }
+              }
+            },
+            "reviewer": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "engine",
+                "model",
+                "effort"
+              ],
+              "properties": {
+                "engine": {
+                  "enum": [
+                    "claude",
+                    "codex",
+                    "agy"
+                  ]
+                },
+                "model": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,119}$"
+                },
+                "effort": {
+                  "enum": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh"
+                  ]
+                }
+              }
+            },
+            "po": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "engine",
+                "model",
+                "effort"
+              ],
+              "properties": {
+                "engine": {
+                  "enum": [
+                    "claude",
+                    "codex",
+                    "agy"
+                  ]
+                },
+                "model": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,119}$"
+                },
+                "effort": {
+                  "enum": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "github": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "repo",
+            "issue"
+          ],
+          "properties": {
+            "repo": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+            },
+            "issue": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
     }
   },
   "$defs": {

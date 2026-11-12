@@ -9,10 +9,10 @@ execution authority; a recorded approval never grants model dispatch.
 | Increment | Contract | Status |
 | --- | --- | --- |
 | F1 | Typed requests, conservative diagnosis, persistent routing/role receipts, ownership and independence metadata | Implemented offline; native inspection commands below |
-| F2 | Funded role adapter, delegated native activation, technical fencing, lineage and cumulative amendment limits | Implemented as an opt-in host API, validated offline; production provider/supervisor wiring remains F3 |
-| F3 | Supervisor recovery integration, sanitized idempotent GitHub projections, prerequisite proposals/return, consultative PO routing | Pending; no new DAG node, product decision or GitHub ticket starts implicitly |
+| F2 | Funded role adapter, delegated native activation, technical fencing, lineage and cumulative amendment limits | Implemented as an opt-in host API, validated offline; F3 wires the bounded production adapter |
+| F3 | Supervisor recovery integration, sanitized idempotent GitHub projections, prerequisite proposals/return, consultative PO routing | Implemented opt-in, validated offline; prerequisite execution/return remains an explicit unsupported native transition |
 
-This does not complete #39 or #38. It does not change a running controller or
+Live rollout/measurement and broader #38 ownership recovery remain separate from offline acceptance. It does not change a running controller or
 authorize migration of the historical #22 run. The current #22 T08 case is a
 baseline test change and deliberately requires operator coverage review under
 the first proposed policy, even after automatic diagnosis is implemented.
@@ -85,8 +85,10 @@ outside disposable candidates and selected execution generations. Its policy
 has `capability: record-only-v1`; neither this policy nor an approved recorded
 review can later be reinterpreted as delegated execution authority.
 
-The exact operator authorization binds the policy digest and explicit fencing
-attestation for initialization. This is **not** the future in-run technical
+The F1 operator authorization binds the policy digest and explicit fencing
+attestation for initialization. F3 additionally supports a distinct
+`native-feedback-recording-v1` bootstrap from the frozen workflow grant and
+live host fencing; it never manufactures that operator attestation. This is **not** the future in-run technical
 fencing receipt. Replaying the same initialization is idempotent across intent
 and journal publication. A changed policy, missing active journal, corrupt
 chain, partial tail or symlink is refused. The snapshot is only a projection.
@@ -192,8 +194,8 @@ or an implemented publication workflow.
 
 The F2 support modules implement counted consultations through `LimitsStore`,
 with explicit named `feedback-*` role caps and the `feedback` phase. They require
-a host guard and an injected read-only runner; there is no default SDK runner or
-dispatch CLI. A recording grant does not fund them. I2 admission includes the
+a host guard and an injected read-only runner; the F2 primitive has no default SDK runner. F3 supplies the explicit
+read-only CLI adapter described below. A recording grant does not fund them. I2 admission includes the
 feedback phase only when that phase and named feedback roles are explicitly
 present in the exact authorized profile. Existing profiles remain unchanged. Consultations and response reconciliation
 resolve the selected native generation before touching accounting; adapters
@@ -251,10 +253,9 @@ amendment. Adding or changing the grant requires the normal exact native profile
 admission; existing authorizations are unchanged. The recording policy remains
 separate and grants recording only. Initial I1-to-I2 admission accepts the
 explicit grant; upgrading an existing I2 profile is outside the scope-only API
-and requires a separate reviewed native profile transition. The recording ledger
-currently uses its separate exact F1 operator initialization. F3 must supply an
-explicit native bootstrap contract before deriving that recording authority
-automatically from the run grant. Delegation never manufactures a human
+and uses the separate exact operator profile admission described below. The recording ledger
+currently uses its separate exact F1 operator initialization, or the separate F3 native bootstrap contract which
+derives recording limits from the explicitly admitted run grant. Delegation never manufactures a human
 `source_fenced` attestation or reinterprets a historical approval.
 
 The host opens `fenced(...)` with the current frozen controller snapshot and
@@ -313,9 +314,169 @@ tests; journals, Git worktrees, locks, selectors and native scheduler are real.
 The genuine-production-defect fixture separately proves rejection without
 weakening the independent test or redispatching an identical developer attempt.
 
-F3 must connect this handler to the persistent supervisor with the same native
-scheduler, expose precise reasons/next actions, include decision provenance and
-metrics in the Evidence Pack, and publish only sanitized host-owned projections.
-Remote uncertainty requires reconciliation before retry; creating a prerequisite
-never grants it budget or execution authority. Production activation continues
-to depend on the applicable B/I6 containment and delivery controls.
+## Automatic feedback workflow (F3)
+
+A profile enables automation only with `feedback_workflow` in addition to the
+F2 delegation grant. The role models and optional GitHub destination are frozen
+inputs, not an environment switch. The following is a fragment to include in an
+explicitly admitted recovery profile (replace model placeholders with the
+intended configured models):
+
+```json
+"feedback_workflow": {
+  "schema_version": 1,
+  "enabled": true,
+  "roles": {
+    "planner": {"engine": "claude", "model": "configured-planner-model", "effort": "medium"},
+    "reviewer": {"engine": "agy", "model": "configured-reviewer-model", "effort": "medium"}
+  },
+  "github": {"repo": "owner/repository", "issue": 39}
+}
+```
+
+`github` is optional; absence authorizes no publication. Planner/reviewer role
+caps and the feedback phase cap must be explicit within the existing totals.
+Automatic diagnosis uses deterministic host evidence; a paid diagnosis is not
+an implicit workflow call. The F2 primitive still supports an explicitly funded
+diagnosis consultation. An optional `po` role additionally requires `feedback-po`; it can recommend only
+`OPERATOR_REQUIRED`, never approve a new requirement. Unknown/reduced role
+independence still stops before an unusable consultation. Native preflight
+includes engines from this frozen workflow, using the existing bounded
+credential probes; credential presence is not proof of an authenticated session.
+
+The normal task scheduler now intercepts captured `CHECK_FAILURE` whose verified
+logs localize entirely outside the manifest before another developer dispatch
+or repeated preflight. It retains `CHECK_FAILURE` as evidence, not as permission
+to edit the test. Mixed, protected and unresolved hints retain their previous
+handling. Explicit developer refusals include a bounded typed line:
+
+```text
+TASK_FEEDBACK_JSON: {"cause":"MISSING_TARGET","obligation_refs":["AC-1"],"requested_files":["src/helper.py"]}
+TASK_DEV_STATUS: SCOPE_REQUIRED
+```
+
+Models cannot supply evidence hashes, actor identity, scope authority, GitHub
+credentials or native counters. The host derives those from the stopped native
+source. Duplicate/unknown fields, path aliases and ambiguous markers are refused.
+For legacy refusals without the typed line, only a fully localized host hint can
+supply a conservative request; other sources stop for explicit reconciliation.
+A failed test outside scope remains a hypothesis, never proof its assertion is
+wrong. A rejection is replayable without another developer or reviewer call.
+
+On an enabled run the controller:
+
+1. Stops the source, proves native ownership/quiescence and initializes the
+   canonical recording ledger from the exact native grant. The recording grant
+   remains record-only; it does not replace funding or activation authority.
+2. Consults independent frozen roles through `FundedFeedbackRoles`. A one-use
+   process-local prepaid token binds the existing reservation to the CLI
+   dispatcher. Supervisor dispatch events remain active; there is no second
+   reservation or second accounting finish hidden in a nested SDK call.
+3. Runs each consultation in a fresh disposable Git clone mounted read-only.
+   Full registered requirements, plan, checks and candidate diffs are available
+   in a bounded read-only evidence bundle. Inline excerpts are marked truncated.
+   No host GH token/configuration, toolkit private runtime/Git database, global
+   Claude configuration or another role's conversation history is mounted.
+   Only the selected provider's subscription credential is supplied, with fresh
+   CLI context. Container/source mutation or context overflow stops recovery.
+4. Preserves structured responses, observed usage and bounded raw output before
+   semantic interpretation. Invalid JSON/nonzero CLI results become captured
+   protocol failures with the known cost retained, not another inference.
+   Raw excerpts include full-output hash and a truncation flag. Unknown usage
+   remains null. Captured returns can reconcile after a crash/deadline without
+   repeating the call; uncertain/lost returns and partial journals refuse retry.
+5. Applies only a supported F2 amendment. After activation it rebinds all
+   orchestrator paths, state and frozen accounting to the admitted generation
+   before restarting the same native task engine. The old source is not rewritten
+   by exception/evidence handlers after an interrupted selector change.
+
+The supervisor follows only sealed, reconciled feedback descendants of its
+pinned runtime; this does not waive controller/configuration/goal fingerprints.
+During preparation or selector-to-quota reconciliation, observation can read
+the verified parent without granting dispatch. Explicit supervisor resume and
+foreground run can finish an already granted sealed F3 preparation under real
+fencing before launch; no provider is called by this reconciliation. No general
+retry or worker/controller launch allowance is reset by an amendment.
+
+## Existing I2 profile admission
+
+`ssdlc_feedback_admission.py` adds a separate operator-only
+`feedback-profile-admission-v1` transition, reusing native staging and selectors.
+It may add/change only feedback grant/workflow configuration and named feedback
+role/phase allocations. Global cost/time/invocation limits, timeout, transport
+policy, unknown-usage reserves, development attempts and existing role/phase
+allocations remain exact. It cannot reconcile the existing scope refusal,
+modify a plan, authorize a developer retry or replace an existing feedback ledger.
+Controller changes remain explicit in the operator-bound proposal; verification
+environment changes are refused. A new ledger reconciliation is required for
+incompatible pre-existing recording authority.
+
+```sh
+python3 orchestrator.py feedback-profile-prepare \
+  --repo /absolute/target --ticket TICKET \
+  --profile /private/profile.json --reason 'Enable bounded feedback'
+python3 orchestrator.py feedback-profile-activate \
+  --repo /absolute/target --ticket TICKET \
+  --preparation /private/canonical-preparation \
+  --authorization /private/exact-authorization.json
+```
+
+Preparation dispatches nothing and returns the exact proposal digest. The
+operator authorization binds `transition_id`, `proposal_sha256`,
+`old_controller_sha256`, `new_controller_sha256`, `profile_sha256`,
+`schema_version: 1`, `authorized: true` and `source_fenced: true`.
+The last field is the operator's real offline attestation, not something the
+feedback loop invents. Crash/replay preserves all original history and counters.
+
+Historical #22 is untouched. Adoption requires the latest merged controller,
+inspection of its actual source and remaining caps, native discard/archive of
+any older unselected preparation, and a concrete profile proposal approved by
+the operator. Existing authorizations never acquire this grant implicitly.
+Baseline T08 still requires the operator under the first coverage policy.
+
+## GitHub projections and prerequisite boundaries
+
+The optional frozen GH destination permits only host-generated comments through
+`gh api`. Models never invoke GitHub. `ssdlc_feedback_delivery.py` publishes an
+allowlist of enum statuses, counts and opaque request IDs; no task names, paths,
+AI text/reasons, private prompts, raw usage or credentials are copied. The
+canonical recording ledger remains authority; comments cannot schedule work.
+
+A separate host outbox durably records a publication intent and dispatch
+reservation before POST. Reconciliation accepts only the exact body authored by
+the recorded authenticated account. A lost acknowledgment can find that own
+comment without another POST. Absence after the dispatch boundary, duplicates,
+foreign markers or changed remote evidence require reconciliation. An earlier
+uncertain operation blocks newer publications too. A known unlaunched intent
+may be superseded. Partial outbox journals are preserved/refused. Publication
+failure is reported and retained for delivery reconciliation, not converted into
+new development authority. Publishing is optional and cannot add model budget.
+
+A reviewed `PREREQUISITE` becomes a canonical blocking proposal with an opaque
+host-generated child identity. Proposed dependency/wait edges are checked for
+cycles. No child run, GH issue or local DAG task is implicitly created. Returning
+from a proposed child is bound to that proposal and explicitly returns
+`NATIVE_DAG_TRANSITION_REQUIRED`: the current task engine has no supported
+DAG insertion/return transition. An external 'done' claim never marks the parent
+complete. These unsupported cases go through the operator/intake contract.
+`ADVISORY` remains optional backlog; it cannot replace a required blocker or
+pretend that a refused developer completed its existing obligations.
+
+## Evidence and rollout
+
+`compile_evidence_pack` registers `feedback-summary.json`, with classifications,
+decisions/coverage judgments, hashed provenance and plan subjects, amendment
+counts, host timing/observed waits, impact-report attribution, consultation usage
+and publication status. Raw role responses remain in the canonical private
+ledger. Older timestamps/costs stay null when not observed. Reported required
+operator decisions are not claimed as actual human interventions. Amendment
+approval alone grants no signoff; the normal review/QA/security gates remain.
+
+Offline acceptance uses real journals, Git worktrees, kernel locks and native
+scheduler/selector transitions, with simulated providers and external host
+observations. No paid calls or automatic #22 migration are part of this work.
+Live rollout is opt-in after review: compare intervention/wait counts and latency
+against the three historical manual amendments, while checking coverage and
+end-to-end completion. Offline semantic fakes do not prove model quality or
+live authentication. Production use retains the applicable B/I6 containment and
+delivery requirements; broader owner revalidation stays #38.

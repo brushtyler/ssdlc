@@ -699,11 +699,26 @@ def refusal(store, reason='unsupported_transition'):
     return result
 
 
-def pinned_root(repo, ticket, record):
-    root = canonical_root(repo, ticket)
+def pinned_root(repo, ticket, record, *, observe=False):
     expected = record['authorized'].get('runtime_root', '.ssdlc/' + ticket)
+    try:
+        root = canonical_root(repo, ticket)
+    except SupervisorIntegrityError:
+        if not observe or not (Path(repo) / '.ssdlc' / ticket / 'execution/pending.json').exists():
+            raise
+        from ssdlc_feedback_workflow import observation_root
+        try:
+            return observation_root(Path(repo) / '.ssdlc' / ticket, Path(repo) / expected)
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+            raise SupervisorIntegrityError('filesystem_integrity') from None
     if str(root.relative_to(Path(repo))) != expected:
-        raise SupervisorIntegrityError('fingerprint_mismatch')
+        from ssdlc_feedback_delegation import descendant_of
+        try:
+            admitted = descendant_of(Path(repo) / '.ssdlc' / ticket, root, Path(repo) / expected)
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+            admitted = False
+        if not admitted:
+            raise SupervisorIntegrityError('fingerprint_mismatch')
     return root
 
 
@@ -972,7 +987,7 @@ def start(args, clock=None, fault=None):
                 if any(identity_state(d, role) != GONE for role in ('worker', 'controller')):
                     return public(d, 'blocked', 'reconcile')
                 candidate = new_record(a, store)
-                changes = fingerprint_changes(d, candidate)
+                changes = fingerprint_changes(d, candidate, native_advance(a['repo'], a['ticket'], d, candidate))
                 if changes and not a.get('reauthorize_fingerprints'):
                     return public(d, 'blocked', 'fingerprint_mismatch')
                 a['_reauthorization'] = reauthorization_entries(d, changes, store.clock)
@@ -1025,16 +1040,26 @@ def start(args, clock=None, fault=None):
         return public({}, 'locked', 'locked')
 
 
-def fingerprint_changes(old, new):
+def fingerprint_changes(old, new, native_runtime_advance=False):
     changes = []
     for section, fields in [('authorized', ('goal_sha256', 'tier', 'test_cmd_sha256', 'runtime_root')),
                             ('fingerprints', ('config_sha256', 'controller'))]:
         for field in fields:
             a, b = old[section].get(field), new[section].get(field)
             if a != b:
+                if field == 'runtime_root' and native_runtime_advance:
+                    continue
                 changes.append(dict(field=field, old_sha256=digest(json.dumps(a, sort_keys=True)),
                                     new_sha256=digest(json.dumps(b, sort_keys=True))))
     return changes
+
+
+def native_advance(repo, ticket, old, new):
+    before, after = old['authorized'].get('runtime_root'), new['authorized'].get('runtime_root')
+    if not before or not after or before == after:
+        return False
+    from ssdlc_feedback_delegation import descendant_of
+    return descendant_of(Path(repo) / '.ssdlc' / ticket, Path(repo) / after, Path(repo) / before)
 
 
 def reauthorization_entries(old, changes, clock):
@@ -1049,11 +1074,16 @@ def resume(args, clock=None, fault=None):
     a = validate_args(a)
     build_argv('orchestrator.' + a['entrypoint'], a)
     store = RunStore(a['repo'], a['ticket'], a.get('run_id'), clock, fault)
+    old = store.read() if store.run_id else store.current()
+    if (Path(a['repo']) / '.ssdlc' / a['ticket'] / 'execution/pending.json').exists():
+        if any(identity_state(old, role) != GONE for role in ('worker', 'controller')):
+            return public(old, 'blocked', 'reconcile')
+        from ssdlc_feedback_workflow import recover_preparation
+        recover_preparation(a['repo'], a['ticket'])
     if not compatibility(a, build_project_env(a['repo'], os.environ))['ok']:
         return refusal(store)
-    old = store.read() if store.run_id else store.current()
     candidate = new_record(a, store)
-    changes = fingerprint_changes(old, candidate)
+    changes = fingerprint_changes(old, candidate, native_advance(a['repo'], a['ticket'], old, candidate))
     if changes and not a.get('reauthorize_fingerprints'):
         return public(old, 'blocked', 'fingerprint_mismatch')
     a['_resumes'] = old['run_id']
@@ -1627,6 +1657,16 @@ def preflight(repo, ticket, env, entrypoint='run', tier='auto', probes=None, ref
     except (OSError, ValueError, KeyError, subprocess.TimeoutExpired):
         engines = set()
         add('routes', 'failed', 'routes_unavailable')
+    try:
+        root = canonical_root(repo, ticket)
+        if (root / 'limits/policy.json').exists():
+            from ssdlc_recovery import LimitsStore
+            from ssdlc_feedback_workflow import workflow
+            config = workflow(LimitsStore(root)._load(repair=False)[0]['policy'])
+            if config:
+                engines = set(engines) | {role['engine'] for role in config['roles'].values()}
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+        add('feedback_workflow', 'failed', 'quality_contract_invalid')
     tools = {'git'} | (engines & {'claude', 'codex', 'agy'})
     if env.get('SSDLC_EXECUTION_MODE', 'docker') == 'docker':
         tools.add('docker')
@@ -1692,7 +1732,7 @@ def preflight(repo, ticket, env, entrypoint='run', tier='auto', probes=None, ref
 
 
 def peek_journal(repo, ticket, record=None):
-    directory = (pinned_root(repo, ticket, record) if record else canonical_root(repo, ticket)) / '03-dev/tasks'
+    directory = (pinned_root(repo, ticket, record, observe=True) if record else canonical_root(repo, ticket)) / '03-dev/tasks'
     if not directory.is_dir() or not (directory / 'task-journal.jsonl').is_file():
         return None, False
     from ssdlc_tasks import TaskJournal, TaskError
@@ -1719,11 +1759,12 @@ CATEGORIES = {'INTEGRITY', 'ENVIRONMENT_RESOURCE', 'SCOPE_REQUIRED', 'ENVIRONMEN
               'LIMIT_REACHED', 'OUTCOME_UNCERTAIN', 'GIT_LOCK_UNOWNED', 'DESIGN_STALLED', 'ENVIRONMENT_DIAGNOSIS'}
 EXC_TYPES = {'TaskError', 'DevelopmentBlocked', 'ResourceLimitError', 'PlanError', 'RuntimeError', 'TimeoutError',
              'TimeoutExpired', 'ConnectionError', 'OSError', 'ValueError', 'SystemExit', 'KeyboardInterrupt',
-             'SupervisorIntegrityError', 'FencedOut', 'Exception', 'RecoveryStop', 'QuiescentTimeout', 'NotDispatched'}
+             'SupervisorIntegrityError', 'FencedOut', 'Exception', 'RecoveryStop', 'QuiescentTimeout', 'NotDispatched',
+             'FeedbackError', 'RemoteUncertain'}
 CONTROLLER_TYPES = {'shim_released', 'phase_started', 'phase_finished', 'failure', 'progress',
                     'dispatch_started', 'dispatch_finished', 'run_ended'}
 PHASES = {'00-recon', '01-po', '02-design', '02-design-arch', '02-design-sec', '03-dev', '04-review',
-          '05-qa', '05b-appsec', '06-ops', '07-docs', '08-supervisor'}
+          '05-qa', '05b-appsec', '06-ops', '07-docs', '08-supervisor', 'feedback'}
 
 
 def valid_controller_event(x, d):
@@ -1946,7 +1987,7 @@ def evidence_for(store, d, env, events=None, malformed=0):
     journal, corrupt = peek_journal(repo, store.ticket, d)
     if events is None:
         events, malformed = controller_events(store, d)
-    return dict(state=read_document(pinned_root(repo, store.ticket, d) / 'state.json'), journal=journal,
+    return dict(state=read_document(pinned_root(repo, store.ticket, d, observe=True) / 'state.json'), journal=journal,
         journal_corrupt=corrupt, events=events, malformed=malformed, baseline=d['journal_baseline'], env=env,
         preflight=d.get('preflight') or {}, controller_launched=any(x['role'] == 'controller' for x in d['launches']),
         exit_code=d['exit_evidence'].get('code'), entrypoint=d['authorized']['entrypoint'],
@@ -1969,7 +2010,7 @@ def completion(store, d, state):
         task_mode = d['authorized'].get('task_mode', True) or bool(state.get('task_breakdown')) or bool(state.get('task_verified_head'))
         if not task_mode:
             return True
-        worktree = pinned_root(repo, store.ticket, d) / 'worktree'
+        worktree = pinned_root(repo, store.ticket, d, observe=True) / 'worktree'
         return (worktree.is_dir() and bool(state.get('task_verified_head')) and
                 git_read(worktree, 'rev-parse', 'HEAD') == state['task_verified_head'] and
                 git_read(worktree, 'status', '--porcelain') == '')
@@ -1978,7 +2019,7 @@ def completion(store, d, state):
     paths = ['02-design/plan.json'] if kind == 'plan' else ['02-design/adr.md'] + (
         [] if state.get('risk_tier', d['authorized']['tier']) == 'S' else ['02-design/threat-model.md'])
     for rel in paths:
-        path = pinned_root(repo, store.ticket, d) / rel
+        path = pinned_root(repo, store.ticket, d, observe=True) / rel
         if not path.is_file() or digest(path.read_bytes()) != state.get('artifacts', {}).get(rel, {}).get('sha256'):
             return False
     return True
@@ -2140,9 +2181,9 @@ def monitor_tick(store, env, proc=None, docker=None, generation=None):
                     labels={'ssdlc.run_id': d['run_id'], 'ssdlc.project': d['project']['key']},
                     state=c.get('state') if c.get('state') in {'running', 'exited', 'paused', 'created', 'dead', 'restarting'} else 'unknown'))
     tokens['containers'] = digest(json.dumps(containers, sort_keys=True))
-    state_path = pinned_root(repo, store.ticket, d) / 'state.json'
+    state_path = pinned_root(repo, store.ticket, d, observe=True) / 'state.json'
     state = read_document(state_path)
-    for name, path in [('state', state_path), ('journal', pinned_root(repo, store.ticket, d) / '03-dev/tasks/task-journal.jsonl')]:
+    for name, path in [('state', state_path), ('journal', pinned_root(repo, store.ticket, d, observe=True) / '03-dev/tasks/task-journal.jsonl')]:
         try:
             st = path.stat()
             if name != 'state' or state:

@@ -5,6 +5,7 @@ integration must supply a guarded, read-only adapter; tests use semantic fakes.
 Recording policy alone cannot fund a call or bypass allowed native phases.
 """
 import copy
+import hashlib
 import json
 import math
 
@@ -100,18 +101,31 @@ class FundedFeedbackRoles:
                 self.limits.finish(invocation, status)
                 raise
             # An absent/invalid response does not authorize a blind inference.
-            if not isinstance(result, dict) or set(result) != {'response', 'usage'}:
+            if (not isinstance(result, dict) or not {'response', 'usage'} <= set(result)
+                    or set(result) - {'response', 'usage', 'raw_output'}):
                 self.limits.finish(invocation, 'returned')
                 raise FeedbackError('Malformed returned feedback response; operator reconciliation required')
+            usage = None
             try:
                 usage = _usage(result['usage'])
+                if 'raw_output' in result:
+                    raw = result['raw_output']
+                    if (not isinstance(raw, dict) or set(raw) != {'text','sha256','truncated','characters'}
+                            or not isinstance(raw['text'], str) or len(raw['text']) > 1600
+                            or type(raw['truncated']) is not bool or type(raw['characters']) is not int
+                            or raw['characters'] < len(raw['text'])
+                            or raw['truncated'] != (raw['characters'] > len(raw['text']))
+                            or not isinstance(raw['sha256'], str) or len(raw['sha256']) != 64
+                            or any(c not in '0123456789abcdef' for c in raw['sha256'])
+                            or not raw['truncated'] and hashlib.sha256(raw['text'].encode()).hexdigest() != raw['sha256']):
+                        raise FeedbackError('Malformed raw feedback observation')
                 # Validate the complete envelope before preserving it as typed
                 # observed usage. Strings and nonfinite numbers stay untrusted.
                 encoded = json.dumps(result, allow_nan=False)
                 if len(encoded) > 16000 or not isinstance(result['response'], dict):
                     raise FeedbackError('Malformed or oversized feedback response')
             except (TypeError, ValueError, FeedbackError):
-                self.limits.finish(invocation, 'returned')
+                self.limits.finish(invocation, 'returned', usage)
                 raise FeedbackError('Malformed returned feedback data; no automatic retry') from None
             receipt = self.feedback.record_role_result(call['operation_id'], result)
             fault('response_captured')

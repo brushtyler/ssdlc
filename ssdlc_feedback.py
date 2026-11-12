@@ -24,7 +24,7 @@ class FeedbackError(TaskError):
 ROUTES = {'AMENDMENT', 'PREREQUISITE', 'ADVISORY', 'REJECTED', 'INCONCLUSIVE'}
 CAUSES = {'MISSING_TARGET', 'MISSING_PREREQUISITE', 'IMPROVEMENT',
           'REQUIREMENT_CONFLICT', 'INCONCLUSIVE'}
-ROLES = {'diagnosis', 'planner', 'reviewer'}
+ROLES = {'diagnosis', 'planner', 'reviewer', 'po'}
 HASH = re.compile(r'[a-f0-9]{64}')
 IDENTITY = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.:@/-]{0,159}')
 
@@ -84,7 +84,9 @@ def validate_policy(policy):
         _integer(policy[key])
     if type(policy['require_strong_independence']) is not bool:
         raise FeedbackError('Explicit independence policy required')
-    _object(policy['role_calls'], ROLES)
+    if (not isinstance(policy['role_calls'], dict) or not {'diagnosis', 'planner', 'reviewer'} <= set(policy['role_calls'])
+            or set(policy['role_calls']) - ROLES):
+        raise FeedbackError('Malformed feedback role allowances')
     for value in policy['role_calls'].values():
         _integer(value, minimum=0)
     if (type(policy['expires_at']) not in (float, int)
@@ -221,10 +223,7 @@ class FeedbackStore:
         self._paths()
         authority = json.loads(_regular(self.root, 'authority.json').read_text())
         validate_policy(authority['policy'])
-        expected = dict(schema_version=1, policy_sha256=digest(authority['policy']),
-                        authorized=True, source_fenced=True)
-        if not exact_authorization(authority.get('authorization'), expected):
-            raise FeedbackError('Feedback policy has no exact operator authority')
+        validate_recording_authority(authority['policy'], authority.get('authorization'))
         path = self.root / 'task-journal.jsonl'
         if not path.exists():
             if authority['status'] == 'INTENT':
@@ -248,6 +247,13 @@ class FeedbackStore:
         expected = dict(schema_version=1, policy_sha256=digest(policy), authorized=True, source_fenced=True)
         if not exact_authorization(authorization, expected) or policy['ticket'] != self.ticket.name:
             raise FeedbackError('Exact fenced feedback policy authorization required')
+        return self._initialize(policy, authorization, fault=fault)
+
+    def _initialize(self, policy, authorization, *, fault=lambda point: None):
+        validate_policy(policy)
+        validate_recording_authority(policy, authorization)
+        if policy['ticket'] != self.ticket.name:
+            raise FeedbackError('Feedback policy belongs to another ticket')
         if self.clock() >= policy['expires_at']:
             raise FeedbackError('Feedback policy expired')
         self._paths()
@@ -339,6 +345,7 @@ class FeedbackStore:
                 anchor = accounting_anchor(source)
             row = dict(request_id=identity, request=copy.deepcopy(request), binding=binding,
                        developer=copy.deepcopy(developer), status='REQUESTED', rounds=0, decisions=[],
+                       created_at=self.clock(),
                        cause_id=digest(cause), origin=binding['origin'], failed_tests=derived_tests,
                        source_root_sha256=root_sha, source_reconciliation_required=unbound,
                        accounting_anchor=anchor,
@@ -409,7 +416,7 @@ class FeedbackStore:
             if review['verdict'] == 'APPROVED' and not review['coverage_preserved']:
                 raise FeedbackError('Approval cannot weaken obligation coverage')
             row.update(status='REVIEWED', reviewer=copy.deepcopy(reviewer), review=copy.deepcopy(review),
-                       independence=quality)
+                       independence=quality, reviewed_at=self.clock())
             row['decisions'].append(dict(proposal=copy.deepcopy(row['proposal']), review=copy.deepcopy(review)))
             if (review['verdict'] == 'APPROVED' and row['proposal']['route'] == 'AMENDMENT'
                     and not row.get('source_reconciliation_required', True)
@@ -482,10 +489,10 @@ class FeedbackStore:
                 raise FeedbackError('Reduced independence requires operator decision')
             if any(r['status'] == 'INTENT' for r in state['role_calls']):
                 raise FeedbackError('Unknown feedback outcome requires reconciliation')
-            if sum(r['role'] == role for r in state['role_calls']) >= policy['role_calls'][role]:
+            if sum(r['role'] == role for r in state['role_calls']) >= policy['role_calls'].get(role, 0):
                 raise FeedbackError('Named feedback role allowance exhausted')
             call = dict(operation_id=operation, request_id=identity, role=role,
-                        actor=copy.deepcopy(metadata), status='INTENT')
+                        actor=copy.deepcopy(metadata), status='INTENT', reserved_at=self.clock())
             state['role_calls'].append(call)
             self._append('FEEDBACK_ROLE_INTENT', state)
             return copy.deepcopy(call)
@@ -513,7 +520,7 @@ class FeedbackStore:
                 if call['receipt'] != receipt:
                     raise FeedbackError('Conflicting role response requires reconciliation')
                 return copy.deepcopy(call)
-            call.update(status='RETURNED', receipt=receipt)
+            call.update(status='RETURNED', receipt=receipt, returned_at=self.clock())
             self._append('FEEDBACK_ROLE_RETURNED', state)
             return copy.deepcopy(call)
 
@@ -555,6 +562,16 @@ def exact_authorization(value, expected):
     return (isinstance(value, dict) and value == expected
             and type(value.get('schema_version')) is int
             and value.get('authorized') is True and value.get('source_fenced') is True)
+
+
+def validate_recording_authority(policy, authorization):
+    expected = dict(schema_version=1, policy_sha256=digest(policy), authorized=True, source_fenced=True)
+    if exact_authorization(authorization, expected):
+        return
+    if isinstance(authorization, dict) and authorization.get('contract') == 'native-feedback-recording-v1':
+        from ssdlc_feedback_workflow import validate_bootstrap
+        return validate_bootstrap(policy, authorization)
+    raise FeedbackError('Feedback policy has no exact recording authority')
 
 
 def main(argv=None):

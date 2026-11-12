@@ -48,6 +48,10 @@ def validate_authorization(authorization, proposal):
                 'source_fenced', 'old_controller_sha256', 'new_controller_sha256'}
     if not isinstance(authorization, dict):
         raise TransitionError('Transition requires exact, fenced operator authorization')
+    if proposal.get('authorization_contract') == 'feedback-profile-admission-v1':
+        expected |= {'profile_sha256'}
+        if authorization.get('profile_sha256') != proposal.get('profile_sha256') or proposal.get('scope_diff') != {}:
+            raise TransitionError('Feedback profile admission requires exact unchanged scope and profile authorization')
     if proposal.get('authorization_contract') == 'cumulative-limits-v1':
         expected |= {'profile_sha256', 'decisions_sha256', 'accept_unknown_history', 'authorize_extensions'}
         if authorization.get('profile_sha256') != proposal.get('profile_sha256'):
@@ -191,7 +195,7 @@ class TransitionStore:
                     'manifest_sha256': file_hash(_regular(generation, 'manifest.json'))}
         pointer = self.root / 'active.json'
         if pointer.exists() and self._read(self.root, 'active.json') != selected:
-            if (proposal.get('authorization_contract') not in {'scope-amendment-v1', 'feedback-scope-delegation-v1'}
+            if (proposal.get('authorization_contract') not in {'scope-amendment-v1', 'feedback-scope-delegation-v1', 'feedback-profile-admission-v1'}
                     or proposal.get('parent_selector') != self._read(self.root, 'active.json')):
                 raise TransitionError('Another generation is already selected')
             self.load()  # Validate the exact parent, not merely its pointer bytes.
@@ -202,6 +206,10 @@ class TransitionStore:
 
     def load(self):
         pointer = self._read(self.root, 'active.json')
+        return self.load_pointer(pointer)
+
+    def load_pointer(self, pointer):
+        """Validate an exact sealed ancestor without changing the live selector."""
         if (not isinstance(pointer, dict) or set(pointer) != {'schema_version', 'transition_id', 'intent_sha256', 'manifest_sha256'}
                 or type(pointer['schema_version']) is not int or pointer['schema_version'] != 1):
             raise TransitionError('Unsupported active pointer schema')

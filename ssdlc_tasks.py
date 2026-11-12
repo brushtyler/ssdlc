@@ -557,7 +557,7 @@ class TaskScheduler:
                  max_attempts: int = 3, isolate_candidates: bool = False,
                  runtime_identity: dict | None = None, recover_timeouts: bool = False,
                  historical_capture_authority=None, dispatch_budget=None, historical_task_floors=None,
-                 scope_reconciliations=None):
+                 scope_reconciliations=None, feedback_enabled=False):
         self.wt = worktree
         self.directory = directory
         self.plan = plan
@@ -573,6 +573,7 @@ class TaskScheduler:
         self.historical_task_floors = copy.deepcopy(historical_task_floors or {})
         self.historical_capture_authority = historical_capture_authority
         self.scope_reconciliations = copy.deepcopy(scope_reconciliations or {})
+        self.feedback_enabled = feedback_enabled
         self.dispatch_budget = dispatch_budget or budget
         self.runtime_identity = copy.deepcopy(runtime_identity or {})
         from ssdlc_grader import protected_paths
@@ -1211,7 +1212,7 @@ class TaskScheduler:
         if not authority or self.scope_reconciliations.get(authority.get('task_id')) != authority:
             return False
         failures = record.get('failed_attempts', [])
-        return bool(failures and failures[-1]['category'] == 'SCOPE_REQUIRED'
+        return bool(failures and failures[-1]['category'] in {'SCOPE_REQUIRED', 'CHECK_FAILURE'}
                     and digest(failures[-1]) == authority['failure_sha256']
                     and digest(self.plan) == authority['plan_sha256'])
 
@@ -1338,6 +1339,9 @@ class TaskScheduler:
                   'If repair context is supplied, the previous failed candidate is already restored: repair it in place. '
                   'When ready for independent verification, end with TASK_DEV_STATUS: COMPLETE. '
                   'If completion requires changes outside target_files, end with TASK_DEV_STATUS: SCOPE_REQUIRED. '
+                  'For a scope refusal include one line TASK_FEEDBACK_JSON: followed by a JSON object with '
+                  'cause (MISSING_TARGET, MISSING_PREREQUISITE, REQUIREMENT_CONFLICT or INCONCLUSIVE), '
+                  'obligation_refs (existing obligation IDs) and requested_files (literal paths; empty unless missing target). '
                   'For a missing environment prerequisite, end with TASK_DEV_STATUS: ENVIRONMENT_BLOCKED. '
                   'Explain the blocker and do not bypass it, weaken checks or expand scope.\n'
                   + json.dumps(task, indent=2) + '\nPROJECT QUALITY CONTRACT:\n'
@@ -1652,6 +1656,13 @@ class TaskScheduler:
             return self._run(ordered, feedback, recover_protocol_task=recover_protocol_task,
                              verify_captured_only=verify_captured_only)
 
+    def _feedback_boundary(self, task, record):
+        if (self.feedback_enabled and record.get('failed_attempts') and not self._scope_reconciled(record)
+                and record['failed_attempts'][-1]['category'] == 'CHECK_FAILURE'):
+            from ssdlc_feedback_analysis import repair_hint
+            if repair_hint(self, task, record)['classification'] == 'ALL_OUTSIDE':
+                raise DevelopmentBlocked('SCOPE_REQUIRED', 'Host scope hypothesis requires feedback before another dispatch')
+
     def _run(self, ordered: list[dict], feedback: str, *, recover_protocol_task=None,
              verify_captured_only=False) -> dict:
         if any(t['kind'] != 'task' or t['verification']['mode'] != 'automated' for t in ordered):
@@ -1720,6 +1731,7 @@ class TaskScheduler:
             raise TaskError('Unknown task for protocol recovery')
         for task in pending:
             record = state['tasks'][task['task_id']]
+            self._feedback_boundary(task, record)
             if record.get('reconciliation_required'):
                 raise DevelopmentBlocked(record['reconciliation_required'][-1], 'Historical attempt needs explicit reconciliation')
             recovering = task['task_id'] == recover_protocol_task
@@ -1772,6 +1784,7 @@ class TaskScheduler:
                 self._finish_attempt(task, record, result, attempt_dir)
                 if record['status'] == 'COMPLETED':
                     break
+                self._feedback_boundary(task, record)
             if record['status'] != 'COMPLETED':
                 raise TaskError(f'Task {task["task_id"]} exhausted its persistent attempt limit')
         self.guard()
