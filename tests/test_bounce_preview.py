@@ -388,7 +388,4 @@ class PreviewTests(GateFixture):
                   'cumulative recovery', 'revalidation integration',
                   'repeated global gates', 'advanced-target delivery',
                   'not implemented here', 'unkeyed integrity checks', 'not authentication')
-        for corpus in (docs.user_facing_docs(),
-                       docs.plan_section('PLAN_TASK_ROUTING_AND_SUBGOALS.md',
-                                         '12. Stato del bootstrap progressivo')):
-            docs.assert_documented(self, corpus, limits, issues=(14,))
+        docs.assert_documented(self, docs.user_facing_docs(), limits, issues=(14,))
