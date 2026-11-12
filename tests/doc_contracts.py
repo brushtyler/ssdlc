@@ -1,13 +1,14 @@
 """Helpers for documentation contract tests.
 
-Documentation contracts check that the docs state the system's real limits and
-non-guarantees. They match normalized phrases, not exact formatting, and read the
-pages a reader can reach, not a fixed file:
+Documentation contracts check that user-facing docs state the system's real limits
+and non-guarantees. They match normalized phrases, not exact formatting, and read
+the pages a reader can reach, not a fixed file:
 
 - ``user_facing_docs`` is README.md plus every Markdown page under docs/ reachable
   from it through relative links. Internal plans are excluded even when linked, so a
   limit cannot count as documented only because an internal plan mentions it.
-- ``plan_section`` is one section of an internal plan, checked on its own.
+- ``plan_section`` extracts one section of an internal plan, available when a test
+  specifically needs to verify a bounded plan section without coupling to full files.
 """
 import re
 from pathlib import Path
