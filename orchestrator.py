@@ -131,6 +131,10 @@ def _supervision_event(event_type, **fields):
         return False
 
 
+def _corrective_fault(point):
+    """Inert publication fault seam."""
+
+
 def _supervision_fault(point):
     """Injectable crash boundary; inert in production."""
     pass
@@ -2204,9 +2208,7 @@ class SSDLCOrchestrator:
             if set(anchor_state['tasks']) != {t['task_id'] for t in ordered} or any(
                     t['status'] != 'COMPLETED' for t in anchor_state['tasks'].values()):
                 raise corrective.CorrectiveError('tasks_not_completed')
-            cap = float(os.environ.get('SSDLC_BUDGET_CAP_USD') or
-                        {'S': 3, 'M': 6, 'L': 20}.get(self.state.get('risk_tier', 'M'), 6))
-            limits = corrective.effective_limits(dict(os.environ, SSDLC_BUDGET_CAP_USD=str(cap)), [])
+            limits = self._corrective_limits()
             limits['spend_at_creation_usd'] = sum(x.get('cost_usd', 0) for x in self.state.get('ledger', []))
             if any(anchor_state['tasks'][tid]['attempts'] >= limits['max_attempts'] for tid in roots):
                 raise corrective.CorrectiveError('attempts_exhausted')
@@ -2320,6 +2322,152 @@ class SSDLCOrchestrator:
         except (TaskError, bounce.BounceError, OSError, ValueError, KeyError, TypeError):
             self._corrective_stage('refused', preview, txn_id, reason='evidence_mutated')
             raise corrective.CorrectiveError('evidence_mutated') from None
+
+    def _open_or_any_txns(self):
+        """Read registered records afresh, so creation cannot leave a stale cache."""
+        records = []
+        for ref, meta in self.state.get('artifacts', {}).items():
+            if ref.startswith('bounce-txn/') and ref.endswith('/transaction.json'):
+                try:
+                    path = bounce._safe_path(self.ssdlc_root, ref)
+                    if file_hash(path) != meta['sha256']:
+                        raise ValueError()
+                    record = json.loads(path.read_text())
+                    corrective.verify_record(record)
+                    records.append(record)
+                except (OSError, ValueError, bounce.BounceError):
+                    raise corrective.CorrectiveError('txn_record_conflict') from None
+        return records
+
+    def _corrective_limits(self, transactions=None):
+        return corrective.effective_limits(dict(os.environ, risk_tier=self.state.get('risk_tier') or 'M'),
+            self._open_or_any_txns() if transactions is None else transactions)
+
+    def _cancel_requested(self):
+        if not os.environ.get('SSDLC_SUPERVISED_RUN_ID'):
+            return False
+        import ssdlc_supervisor as sup
+        env = os.environ
+        data = sup.RunStore(env['SSDLC_SUPERVISED_REPO'], env['SSDLC_SUPERVISED_TICKET'],
+                            env['SSDLC_SUPERVISED_RUN_ID']).read()
+        return bool(data['cancel'] or data['launch_revoked'])
+
+    def _mark_open_txn_interrupted(self, code):
+        try:
+            records = self._open_or_any_txns()
+        except (TaskError, OSError, ValueError):
+            logging.getLogger('ssdlc_corrective').warning('corrective interruption records unavailable')
+            return
+        for record in records:
+            try:
+                path = bounce._safe_path(self.ssdlc_root, 'bounce-txn/' + record['txn_id'])
+                journal = corrective.TransactionJournal(path)
+                state = journal.load()
+                if state and state['status'] not in ('COMPLETED', 'APPROVED', 'FAILED', 'INTERRUPTED'):
+                    journal.append('INTERRUPTED', dict(state, status='INTERRUPTED',
+                        code=code, resume_status=state['status']))
+            except (TaskError, OSError, ValueError):
+                logging.getLogger('ssdlc_corrective').warning('corrective interruption record unavailable')
+
+    def _supersede_artifact(self, ref, path, old_sha, new_sha):
+        with self._registry_lock:
+            if file_hash(path) != new_sha or self.state['artifacts'][ref]['sha256'] != old_sha:
+                raise corrective.CorrectiveError('txn_record_conflict')
+            self.record_artifact(ref, path)
+
+    def _publish_corrective(self, record, journal, checkpoint, verify):
+        """Preparatory publication under ticket_lock, after final-preflight acknowledgment.
+
+        The caller supplies the layer E/J verifier; no pipeline entry invokes this.
+        Recovery uses observed bytes/registry/head rather than a step counter.
+        """
+        self.check_budget_circuit_breaker()
+        verify()
+        state = journal.load()
+        if state['status'] in ('COMPLETED', 'APPROVED'):
+            return state
+        if not state.get('publish_intent') and state.get('status') != 'REVALIDATED':
+            raise corrective.CorrectiveError('txn_record_conflict')
+        def safe(ref):
+            try:
+                return bounce._safe_path(self.ssdlc_root, ref)
+            except (TaskError, bounce.BounceError):
+                raise corrective.CorrectiveError('txn_record_conflict') from None
+        ref = '03-dev/implementation.diff'
+        path = safe(ref)
+        new_head = checkpoint['expected_head']
+        new_data = (git(self.worktree_dir, 'diff', '--binary', self.state['base_commit'], new_head) + '\n').encode()
+        sha = lambda data: hashlib.sha256(data).hexdigest()
+        intent = state.get('publish_intent')
+        if intent is None:
+            old_data = path.read_bytes()
+            if sha(old_data) != self.state['artifacts'][ref]['sha256']:
+                raise corrective.CorrectiveError('txn_record_conflict')
+            intent = {}
+            for name, head, data in (('old', record['reviewed_commit'], old_data), ('new', new_head, new_data)):
+                if not re.fullmatch('[0-9a-f]{40,64}', head):
+                    raise corrective.CorrectiveError('txn_record_conflict')
+                archive_ref = '03-dev/archive/implementation-' + head[:12] + '.diff'
+                archive = safe(archive_ref)
+                try:
+                    write_or_verify(archive, data, root=self.ssdlc_root)
+                    self._register_new(archive_ref, archive)
+                except TaskError:
+                    raise corrective.CorrectiveError('txn_record_conflict') from None
+                intent[name] = dict(head=head, sha256=sha(data), archive_ref=archive_ref)
+            _corrective_fault('publish.after_archive')
+            state = dict(state, status='PUBLISHING', publish_intent=intent)
+            journal.append('PUBLISH_INTENT', state)
+            _corrective_fault('publish.after_intent')
+        old, new = intent['old'], intent['new']
+        if new['head'] != new_head or new['sha256'] != sha(new_data):
+            raise corrective.CorrectiveError('txn_record_conflict')
+        for entry in (old, new):
+            archive = safe(entry['archive_ref'])
+            if (file_hash(archive) != entry['sha256'] or
+                    self.state['artifacts'].get(entry['archive_ref'], {}).get('sha256') != entry['sha256']):
+                raise corrective.CorrectiveError('txn_record_conflict')
+        disk = file_hash(path)
+        registry = self.state['artifacts'][ref]['sha256']
+        tvh = self.state['task_verified_head']
+        if (disk not in (old['sha256'], new['sha256']) or registry not in (old['sha256'], new['sha256'])
+                or tvh not in (old['head'], new['head'])
+                or (disk == old['sha256'] and disk != new['sha256'] and
+                    (registry != old['sha256'] or tvh != old['head']))
+                or (registry == old['sha256'] and registry != new['sha256'] and tvh != old['head'])):
+            raise corrective.CorrectiveError('txn_record_conflict')
+        if disk != new['sha256']:
+            verify()
+            corrective.replace_atomic(path, new_data)
+            _corrective_fault('publish.after_diff_replace')
+        if registry != new['sha256']:
+            verify()
+            self._supersede_artifact(ref, path, old['sha256'], new['sha256'])
+            _corrective_fault('publish.after_registry')
+        verify()
+        self.state.update(task_verified_head=new_head, tasks_status=checkpoint['tasks'])
+        changed = git(self.worktree_dir, 'diff', '--name-only', self.state['base_commit'], new_head).splitlines()
+        specialists = set()
+        for name in changed:
+            lower = name.lower()
+            for needles, specialist in (
+                (('migration', 'schema', 'prisma', 'alembic', '.sql', 'models.py'), 'DB_MIGRATION_AND_PRIVACY_SPECIALIST'),
+                (('package.json', 'lock', 'pyproject.toml', 'requirements', 'auth', 'crypto', 'jwt', 'oauth'), 'APPSEC_SUPPLY_CHAIN_REDTEAM'),
+                (('async', 'worker', 'queue', 'cache', 'pool', 'concurrent'), 'PERF_AND_CONCURRENCY_SRE')):
+                if any(x in lower for x in needles):
+                    specialists.add(specialist)
+        self.state['specialists_triggered'] = sorted(specialists)
+        for name in ('tasks-state.json', 'task-journal.jsonl'):
+            self.record_artifact('03-dev/' + name, safe('03-dev/tasks/' + name))
+        self._save_state()
+        _corrective_fault('publish.after_state')
+        if state['status'] != 'PUBLISHED':
+            state = dict(state, status='PUBLISHED', new_head=new_head, diff_sha256=new['sha256'])
+            journal.append('CHECKPOINT_PUBLISHED', state)
+            _corrective_fault('publish.after_checkpoint_event')
+        state = dict(state, status='COMPLETED', next_gate_attempt=record['next_gate_attempt'])
+        journal.append('TXN_COMPLETED', state)
+        return state
 
     def _ensure_quality_contract(self) -> Dict[str, Any]:
         target = self.dir_recon / "quality-contract.json"
@@ -2973,8 +3121,8 @@ class SSDLCOrchestrator:
             verify, guard, verification_budget, dispatch_budget=dispatch_budget,
             historical_task_floors=(limits._load(repair=False)[0]['binding'].get('task_floors', {}) if limits else {}),
             historical_capture_authority=history_authority,
-            max_attempts=(getattr(_dispatch_local, "limits")._load(repair=False)[0]["policy"]["development_attempts"]
-                          if getattr(_dispatch_local, "limits", None) is not None else int(os.environ.get("SSDLC_MAX_DEV_RETRIES", "3"))),
+            max_attempts=min(self._corrective_limits()["max_attempts"],
+                limits._load(repair=False)[0]["policy"]["development_attempts"] if limits else self._corrective_limits()["max_attempts"]),
             bootstrap=quality.get("bootstrap"),
             isolate_candidates=True,
             recover_timeouts=getattr(_dispatch_local, 'limits', None) is not None,
@@ -4586,20 +4734,17 @@ To **REJECT** and record feedback (free text authorizes no repair):
     ]
 
     def check_budget_circuit_breaker(self) -> None:
+        transactions = self._open_or_any_txns()
+        if transactions and self._cancel_requested():
+            raise corrective.CorrectiveError('cancelled')
         limits = getattr(_dispatch_local, 'limits', None)
         if limits is not None:
             envelope, state = limits._load(repair=False)
             limits.check(state, envelope['policy'])
-            return
-        env_cap = os.environ.get("SSDLC_BUDGET_CAP_USD", "").strip()
-        if env_cap:
-            budget_cap = float(env_cap)
-        else:
-            tier = (self.state.get("risk_tier") or "M").upper()
-            tier_caps = {"S": 3.0, "M": 6.0, "L": 20.0}
-            budget_cap = tier_caps.get(tier, 6.0)
-
-        if budget_cap <= 0:
+            if not transactions:
+                return
+        budget_cap = self._corrective_limits(transactions)['budget_cap_usd']
+        if budget_cap is None:
             return
         total_spent = sum(item.get("cost_usd", 0.0) for item in self.state.get("ledger", []))
         if total_spent >= budget_cap:
@@ -4632,6 +4777,7 @@ To **REJECT** and record feedback (free text authorizes no repair):
             try:
                 return self._run_pipeline(goal, test_cmd, tier, from_phase)
             except TaskError as exc:
+                self._mark_open_txn_interrupted(getattr(exc, 'code', 'budget_interrupted'))
                 _supervision_event('failure', category=getattr(exc, 'category', 'TASK_EXECUTION'), exc_type=type(exc).__name__)
                 failed_phase = self.state.get('current_phase')
                 failed_step = self.state.get('current_step')
@@ -4687,8 +4833,15 @@ To **REJECT** and record feedback (free text authorizes no repair):
         self._ensure_task_plan()
 
         frozen = getattr(_dispatch_local, 'limits', None)
-        max_retries = (frozen._load(repair=False)[0]['policy']['development_attempts'] if frozen is not None
-                       else int(os.environ.get('SSDLC_MAX_DEV_RETRIES', '3')))
+        max_retries = int(os.environ.get('SSDLC_MAX_DEV_RETRIES', '3'))
+        # Preserve historical gate setup until a registered transaction exists.
+        # In particular, this path must not resolve the budget cap early.
+        if any(ref.startswith('bounce-txn/') and ref.endswith('/transaction.json')
+               for ref in self.state.get('artifacts', {})):
+            max_retries = self._corrective_limits()['gate_round_ceiling']
+        if frozen is not None:
+            max_retries = min(max_retries,
+                frozen._load(repair=False)[0]['policy']['development_attempts'])
         passed_all = False
 
         if start_idx <= self.PHASE_ORDER.index("05b-appsec"):

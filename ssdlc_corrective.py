@@ -5,6 +5,8 @@ who can replace the registry and both complete journals.
 """
 import copy
 import math
+import os
+import tempfile
 from pathlib import Path
 
 from ssdlc_tasks import TaskError, TaskJournal, confined, digest, file_hash, validate_document
@@ -371,3 +373,23 @@ def effective_limits(env, txns):
     if any(not math.isfinite(c) or c <= 0 for c in caps):
         raise CorrectiveError('limits_exceeded')
     return dict(max_attempts=attempts, gate_round_ceiling=rounds, budget_cap_usd=min(caps) if caps else None)
+
+
+def replace_atomic(path, data):
+    """Durably replace a projection; caller validates repository confinement."""
+    path = Path(path)
+    fd, temporary = tempfile.mkstemp(prefix='.publish-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
