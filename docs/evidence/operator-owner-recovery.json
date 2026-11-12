@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "issues": [
+    22,
+    38,
+    39
+  ],
+  "increment": "Exact operator profile/scope recovery for an exhausted I2 owner task",
+  "base_commit": "5799929f859c1604d33fd1e3806208c53083291f",
+  "source_sha256": {
+    "ssdlc_operator_recovery.py": "310e21de01bce82e434d3a805c5ba94dda38bb59d89ea7f2a94b47638e0ebd1a",
+    "ssdlc_scope_amendments.py": "d5f3a8627b1ef83f93452c4cd0463adbe91bd0865ffad1f320c81c3df45f0c28",
+    "ssdlc_owner_revalidation.py": "3660ec91d202ecf217f46277c4b1d81da952c8f2599d2c3555ed00c75d2d7148",
+    "ssdlc_transitions.py": "23c1b2f707eace78e94e047785ba10efebc40ddaff770aa382bcc2c51d99d106",
+    "ssdlc_feedback.py": "33ae7f4e6836d09ef4f519ca8cebad7e0e55ff399489da48cf1990db45e1d61a",
+    "ssdlc_feedback_delivery.py": "a2df45e31f8a38c95669e5463bae52a8910723de3cb86635f445ef946b28a046",
+    "tests/test_operator_profile_recovery.py": "26e61b9f5ecdd12163ec8e06291c1674a7b1fe265b8f43112b20d71c84697814",
+    "docs/developer-feedback.md": "90f69fdd83d7b0aab2f9999c8ff90d6efbbae9de0ff419eacd86ceb1b72e85d6"
+  },
+  "new_contract_tests": 5,
+  "isolated_A5": {
+    "corpus": "i2-recovery-v2",
+    "cases": 12,
+    "failed_cases": 0
+  },
+  "actual_readonly_preview": {
+    "task": "T12",
+    "completed_tasks": 10,
+    "total_tasks": 12,
+    "consumed_invocations": 49,
+    "consumed_task_attempts": 3,
+    "proposed_attempt_default": 4,
+    "added_paths": [
+      "ssdlc_bounce.py"
+    ],
+    "proposed_global_amendments": 3,
+    "proposed_cumulative_added_files": 4,
+    "automatic_per_task_amendments": 1,
+    "manual_owner_amendment": 3,
+    "retained_owners": 8,
+    "retained_reviewed_test_patches": 2,
+    "provider_calls": 0,
+    "admission_prepared": false,
+    "activated": false
+  },
+  "verified_cases": [
+    "Native run_phase_dev resumes the preserved failed candidate at attempt4 with one simulated developer dispatch and fresh owner proof",
+    "Funded role calls, original recording authority bytes, request decisions, prior invocation facts and absolute deadline remain unchanged",
+    "Exhausted cumulative amendment/file capacities extend only by the exact needed next amendment and literal paths; automatic per-task allowance remains unchanged",
+    "Separate exact profile/recovery hashes and authorize_extensions=true are required alongside scope and manual-owner consent",
+    "Wrong or omitted authorization fields, excess attempts, extra paths, role grants, monetary/time/invocation extensions and premature recovery are refused",
+    "Selector publication without receipt fences execution; exact replay reconciles once and preserves the original history",
+    "Changed sealed profiles cannot borrow ordinary scope authorization"
+  ],
+  "live_provider_calls": 0,
+  "historical_run_mutated_by_implementation": false,
+  "boundaries": [
+    "The development-attempt extension changes the default for unfinished tasks; completed tasks are not silently redispatched",
+    "Money, wall time, absolute deadline, timeout, invocation caps, funded-role caps, historical reserves and quality contracts cannot change through this capability",
+    "Original rejected/requested feedback stays historical; a separate operator receipt admits the exact descendant",
+    "The missing candidate_checks validator implementation remains for native issue22 development after a new merged-controller admission",
+    "This increment does not complete T12/T13, integrate the final candidate or run paid global quality gates",
+    "Live-unknown accounting policy remains issue43"
+  ],
+  "omitted": [
+    "Private paths, raw prompts/logs, request/authorization hashes, credentials and account data"
+  ],
+  "full_final_source_suite": {
+    "tests": 1105,
+    "seconds": 644.509,
+    "exit_code": 0,
+    "command": "python3 -m unittest discover -s tests -v"
+  }
+}

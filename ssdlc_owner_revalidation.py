@@ -323,7 +323,8 @@ def _operator_accounting(source, row, state):
     return sorted(added)
 
 
-def feedback_binding(ticket, source, paths, request_id, *, reconcile_evidence=False, operator_owner_limit=None):
+def feedback_binding(ticket, source, paths, request_id, *, reconcile_evidence=False, operator_owner_limit=None,
+                     grant_override=None):
     """Operator bridge: retain a pending/reviewed request as an immutable fact."""
     from ssdlc_feedback import FeedbackStore, matches_source, source_binding, validate_request
     from ssdlc_feedback_return import _head
@@ -351,7 +352,8 @@ def feedback_binding(ticket, source, paths, request_id, *, reconcile_evidence=Fa
             unchanged_plan_task_capture_and_worktree=True,
             preserved_counter_prefix=True, captured_consultations=charged,
             interpretation='Current registered evidence is independently reviewed; old request/decisions are historical only')
-    grant = source['envelope']['policy'].get('feedback_delegation')
+    grant = (grant_override if grant_override is not None
+             else source['envelope']['policy'].get('feedback_delegation'))
     if not grant or not set(paths) <= set(grant['allowed_files']):
         raise TaskError('Operator owner amendment is outside frozen feedback paths')
     allowance = _capacity(state, source['task_id'], paths, grant, operator_owner_limit=operator_owner_limit)
@@ -396,6 +398,8 @@ def finalize(ticket, proposal, recipe, projection):
     if 'owner_feedback_sha256' not in proposal:
         return
     from ssdlc_feedback import FeedbackStore
+    from ssdlc_operator_recovery import validate_binding
+    validate_binding(proposal, recipe)
     from ssdlc_tasks import ticket_lock
     store = FeedbackStore(ticket); binding = recipe['subject']['owner_feedback']
     validate_allowance_binding(proposal,binding)
@@ -405,6 +409,8 @@ def finalize(ticket, proposal, recipe, projection):
         transition_id=proposal['transition_id'], proposal_sha256=digest(proposal), paths=binding['paths'])
     if 'operator_allowance' in binding:
         receipt['operator_allowance'] = binding['operator_allowance']
+    if 'operator_recovery' in recipe['subject']:
+        receipt['operator_recovery'] = recipe['subject']['operator_recovery']
     admitted = dict(limits_sha256=digest(recipe['envelope']),
         profile_sha256=digest(recipe['envelope']['policy']), projection_sha256=digest(projection))
     with ticket_lock(store.root / 'feedback.lock'):
@@ -427,12 +433,16 @@ def ensure_reconciled(ticket, projection, proposal):
     from ssdlc_feedback import FeedbackStore
     from ssdlc_transitions import _regular
     recipe = json.loads(_regular(ticket / 'execution' / proposal['transition_id'], 'recipe.json').read_text())
+    from ssdlc_operator_recovery import validate_binding
+    validate_binding(proposal, recipe)
     binding = recipe['subject']['owner_feedback']; state = FeedbackStore(ticket).inspect()
     validate_allowance_binding(proposal,binding)
     receipt = dict(request_id=binding['request_id'], task_id=recipe['subject']['task_id'],
         transition_id=proposal['transition_id'], proposal_sha256=digest(proposal), paths=binding['paths'])
     if 'operator_allowance' in binding:
         receipt['operator_allowance'] = binding['operator_allowance']
+    if 'operator_recovery' in recipe['subject']:
+        receipt['operator_recovery'] = recipe['subject']['operator_recovery']
     if (digest(binding) != proposal['owner_feedback_sha256']
             or [r for r in state.get('owner_amendments', []) if r['transition_id']==proposal['transition_id']] != [receipt]
             or state['requests'].get(binding['request_id']) != binding['request']
