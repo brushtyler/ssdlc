@@ -13,6 +13,7 @@ import time
 import unittest
 from unittest.mock import patch
 
+import doc_contracts as docs
 import orchestrator as o
 import ssdlc_supervisor as s
 from test_supervisor_core import CoreCase
@@ -252,17 +253,14 @@ class TestSecretsAndBoundaryT3(CoreCase):
 
 class TestDocs(unittest.TestCase):
     def test_required_sections_limits_and_no_github_adapter(self):
-        root = Path(__file__).resolve().parents[1]
-        # The README is a landing page; the facts live in the guide it links.
-        self.assertIn('(docs/supervision.md)', (root / 'README.md').read_text())
-        guide = (root / 'docs/supervision.md').read_text()
-        for text in ['foreground', 'start --ticket', 'status --ticket', 'cancel --ticket', 'resume --ticket',
-                     'Recovery matrix', 'single-host', 'Linux', 'auth_unverified', 'no shipped native probe',
-                     '--test-cmd', 'run_ended', 'unkeyed', 'code_defect', 'operator resupply', '#16', '#1', '#4', '#14']:
-            self.assertIn(text, guide)
-        milestone = (root / 'PLAN_TASK_ROUTING_AND_SUBGOALS.md').read_text()
-        self.assertIn('T3', milestone)
-        self.assertIn('No GitHub adapter', milestone)
+        # Documented commands, limits and non-guarantees; historical facts are not contract.
+        docs.assert_documented(self, docs.user_facing_docs(), [
+            'foreground', 'start --ticket', 'status --ticket', 'cancel --ticket', 'resume --ticket',
+            'Recovery matrix', 'single-host', 'Linux', 'auth_unverified', 'no shipped native probe',
+            '--test-cmd', 'run_ended', 'unkeyed', 'code_defect', 'operator resupply'], issues=(1, 4, 14))
+        milestone = docs.plan_section('PLAN_TASK_ROUTING_AND_SUBGOALS.md',
+                                      '13. Supervisione persistente e workflow GitHub')
+        docs.assert_documented(self, milestone, ['T3', 'No GitHub adapter'])
         self.assertFalse(any('github' in name.lower() for name in dir(s)))
 
 

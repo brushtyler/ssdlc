@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+import doc_contracts as docs
 import orchestrator
 import ssdlc_bounce as bounce
 import ssdlc_gate_reports as gates
@@ -382,17 +383,12 @@ class PreviewTests(GateFixture):
         self.assertFalse(self.files())
 
     def test_docs_required_facts_and_limits(self):
-        root = Path(orchestrator.__file__).parent
-        # The README is a landing page; the facts live in the guide it links.
-        self.assertIn('(docs/bounce-preview.md)', (root / 'README.md').read_text())
-        for name in ('docs/bounce-preview.md', 'PLAN_TASK_ROUTING_AND_SUBGOALS.md'):
-            text = (root / name).read_text()
-            if name.startswith('PLAN_'):
-                text = text.split('## 12. Stato del bootstrap progressivo', 1)[1]
-            for fact in ('Step 3b.2', 'PR #13', '397 tests after review fixes',
-                         'only prepares targeted bounce', 'repair execution',
-                         'cumulative recovery', 'revalidation integration',
-                         'repeated global gates', 'advanced-target delivery',
-                         'GH issue #14', 'not implemented here',
-                         'unkeyed integrity checks', 'not authentication'):
-                self.assertIn(fact, text)
+        # Limits and non-guarantees only; historical facts are not contract.
+        limits = ('only prepares targeted bounce', 'repair execution',
+                  'cumulative recovery', 'revalidation integration',
+                  'repeated global gates', 'advanced-target delivery',
+                  'not implemented here', 'unkeyed integrity checks', 'not authentication')
+        for corpus in (docs.user_facing_docs(),
+                       docs.plan_section('PLAN_TASK_ROUTING_AND_SUBGOALS.md',
+                                         '12. Stato del bootstrap progressivo')):
+            docs.assert_documented(self, corpus, limits, issues=(14,))
