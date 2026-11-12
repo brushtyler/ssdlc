@@ -1,0 +1,29 @@
+name: devloop
+
+# Fast feedback for the devloop tool. The full suite still runs in test.yml.
+on:
+  push:
+    branches: [ main ]
+    paths: [ 'devloop/**', 'tests/test_devloop*.py', '.github/workflows/devloop.yml' ]
+  pull_request:
+    branches: [ main ]
+    paths: [ 'devloop/**', 'tests/test_devloop*.py', '.github/workflows/devloop.yml' ]
+
+permissions:
+  contents: read
+
+jobs:
+  devloop:
+    name: devloop tests (Python 3.12, stdlib only)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run devloop tests without installing requirements
+        run: python3 -m unittest -v tests.test_devloop tests.test_devloop_boundary
