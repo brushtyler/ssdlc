@@ -45,6 +45,7 @@ import ssdlc_gate_reports as candidate_reports
 OPS_DOCS_TEXT_CAP = 60000
 OPS_DOCS_COVERAGE_NOTE = "When full_audit_coverage_permitted is false, you must not claim complete audit coverage."
 import ssdlc_bootstrap as bootstrap
+import ssdlc_corrective as corrective
 import ssdlc_bounce as bounce
 from ssdlc_bounce import request_identity
 from ssdlc_catalogues import CatalogueError, requirement_catalogue
@@ -1985,6 +1986,16 @@ class SSDLCOrchestrator:
         self.issue_id = issue_id or self.state.get("issue_id")
 
     def preview_bounce(self, phase: str, attempt: int) -> dict:
+        """Acquire the ticket lock once; the pipeline may use the locked helper."""
+        try:
+            bounce._safe_path(self.ssdlc_root, 'ticket.lock')
+            with ticket_lock(getattr(self, 'ticket_lock_path', self.ssdlc_root / 'ticket.lock')):
+                return self._preview_bounce_locked(phase, attempt)
+        except (TaskError, OSError, bounce.BounceError):
+            return dict(status='blocked', execution_authorized=False,
+                        blockers=[{'code': 'integrity_mismatch'}])
+
+    def _preview_bounce_locked(self, phase: str, attempt: int) -> dict:
         """Host-only preview of one exact task gate; never run pipeline roles."""
         counters = getattr(self, 'preview_counters', None)
         if counters is None:
@@ -1995,56 +2006,56 @@ class SSDLCOrchestrator:
             if (not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', self.ticket_id)
                     or phase not in bounce.PHASES or type(attempt) is not int or attempt < 1):
                 raise bounce.BounceError('malformed_record')
-            # Acquire before loading. Do not initialize or migrate legacy state.
+            # The caller holds ticket_lock. Never initialize or migrate legacy state.
             bounce._safe_path(self.ssdlc_root, 'ticket.lock')
-            with ticket_lock(getattr(self, 'ticket_lock_path', self.ssdlc_root / 'ticket.lock')):
-                self.state = json.loads(bounce._safe_path(self.ssdlc_root, 'state.json').read_text())
-                initial = bounce.read_evidence(root=self.ssdlc_root, state=self.state,
-                    repo=self.repo_root, worktree=self.worktree_dir, phase=phase, attempt=attempt)
-                if initial['status'] != 'verified':
-                    result = {k: initial[k] for k in ('status', 'execution_authorized', 'blockers')}
-                else:
-                    controller_root = Path(__file__).resolve().parent
-                    if controller_root == self.worktree_dir.resolve():
-                        raise bounce.BounceError('controller_unpinned')
-                    contract_ref = '00-recon/controller-contract.json'
-                    contract_path = bounce._safe_path(self.ssdlc_root, contract_ref)
-                    meta = self.state['artifacts'].get(contract_ref)
-                    if not meta or not contract_path.is_file() or file_hash(contract_path) != meta['sha256']:
-                        raise bounce.BounceError('controller_integrity')
-                    controller = json.loads(contract_path.read_text())
+            self.state = json.loads(bounce._safe_path(self.ssdlc_root, 'state.json').read_text())
+            initial = bounce.read_evidence(root=self.ssdlc_root, state=self.state,
+                repo=self.repo_root, worktree=self.worktree_dir, phase=phase, attempt=attempt)
+            if initial['status'] != 'verified':
+                result = {k: initial[k] for k in ('status', 'execution_authorized', 'blockers')}
+            else:
+                controller_root = Path(__file__).resolve().parent
+                if controller_root == self.worktree_dir.resolve():
+                    raise bounce.BounceError('controller_unpinned')
+                contract_ref = '00-recon/controller-contract.json'
+                contract_path = bounce._safe_path(self.ssdlc_root, contract_ref)
+                meta = self.state['artifacts'].get(contract_ref)
+                if not meta or not contract_path.is_file() or file_hash(contract_path) != meta['sha256']:
+                    raise bounce.BounceError('controller_integrity')
+                controller = json.loads(contract_path.read_text())
+                assert_controller(controller_root, controller)
+                repo_before = (git(self.repo_root, 'rev-parse', 'HEAD'),
+                               git(self.repo_root, 'status', '--porcelain'),
+                               git(self.repo_root, 'diff', '--binary', 'HEAD'))
+                frozen = bounce.preview_snapshot(self.ssdlc_root, self.state)
+                # The revision binds consumed evidence, not unrelated phases
+                # that may register their own outputs between previews.
+                sources = dict(initial['source_hashes'])
+                sources[contract_ref] = meta['sha256']
+
+                def verify():
+                    fresh = json.loads(bounce._safe_path(self.ssdlc_root, 'state.json').read_text())
                     assert_controller(controller_root, controller)
-                    repo_before = (git(self.repo_root, 'rev-parse', 'HEAD'),
-                                   git(self.repo_root, 'status', '--porcelain'),
-                                   git(self.repo_root, 'diff', '--binary', 'HEAD'))
-                    frozen = bounce.preview_snapshot(self.ssdlc_root, self.state)
-                    # The revision binds consumed evidence, not unrelated phases
-                    # that may register their own outputs between previews.
-                    sources = dict(initial['source_hashes'])
-                    sources[contract_ref] = meta['sha256']
+                    if repo_before != (git(self.repo_root, 'rev-parse', 'HEAD'),
+                                       git(self.repo_root, 'status', '--porcelain'),
+                                       git(self.repo_root, 'diff', '--binary', 'HEAD')):
+                        raise bounce.BounceError('source_changed')
+                    if bounce.preview_snapshot(self.ssdlc_root, fresh) != frozen:
+                        raise bounce.BounceError('snapshot_mismatch')
+                    evidence = bounce.read_evidence(root=self.ssdlc_root, state=fresh,
+                        repo=self.repo_root, worktree=self.worktree_dir, phase=phase, attempt=attempt)
+                    if evidence != initial:
+                        raise bounce.BounceError('postcheck_failed')
 
-                    def verify():
-                        fresh = json.loads(bounce._safe_path(self.ssdlc_root, 'state.json').read_text())
-                        assert_controller(controller_root, controller)
-                        if repo_before != (git(self.repo_root, 'rev-parse', 'HEAD'),
-                                           git(self.repo_root, 'status', '--porcelain'),
-                                           git(self.repo_root, 'diff', '--binary', 'HEAD')):
-                            raise bounce.BounceError('source_changed')
-                        if bounce.preview_snapshot(self.ssdlc_root, fresh) != frozen:
-                            raise bounce.BounceError('snapshot_mismatch')
-                        evidence = bounce.read_evidence(root=self.ssdlc_root, state=fresh,
-                            repo=self.repo_root, worktree=self.worktree_dir, phase=phase, attempt=attempt)
-                        if evidence != initial:
-                            raise bounce.BounceError('postcheck_failed')
-
-                    proposal = bounce.plan_bounce(repo=self.repo_root, artifacts=self.ssdlc_root,
-                        plan=initial['plan'], requirements_text=initial['requirements_text'],
-                        quality=initial['quality'], reviewed_commit=initial['reviewed_commit'],
-                        evaluations=initial['evaluations'], phase=phase, attempt=attempt)
-                    result = bounce.publish_preview(root=self.ssdlc_root, state=self.state,
-                        proposal=proposal, sources=sources, verify=verify,
-                        record_artifact=self.record_artifact)
-                    counters[result['publication']] += 1
+                proposal = bounce.plan_bounce(repo=self.repo_root, artifacts=self.ssdlc_root,
+                    plan=initial['plan'], requirements_text=initial['requirements_text'],
+                    quality=initial['quality'], reviewed_commit=initial['reviewed_commit'],
+                    evaluations=initial['evaluations'], phase=phase, attempt=attempt)
+                proposal['journal_head'] = TaskJournal.head(self.ssdlc_root / '03-dev/tasks/task-journal.jsonl')
+                result = bounce.publish_preview(root=self.ssdlc_root, state=self.state,
+                    proposal=proposal, sources=sources, verify=verify,
+                    record_artifact=self.record_artifact)
+                counters[result['publication']] += 1
         except bounce.BounceError as exc:
             result = dict(status='blocked', execution_authorized=False, blockers=[{'code': exc.code}])
         except bounce.FindingsError:
@@ -2069,6 +2080,246 @@ class SSDLCOrchestrator:
             result.get('revision', '-'), result['status'], ','.join(reasons),
             len(plan.get('repair_roots', [])), len(plan.get('revalidation_tasks', [])), len(reasons))
         return result
+
+    def _corrective_stage(self, stage, preview=None, txn_id='-', tasks=(), reason='-'):
+        counters = getattr(self, 'corrective_counters', None)
+        if counters is None:
+            counters = self.corrective_counters = {}
+        metric = {'created': 'corrective_transactions_created',
+                  'invalidated': 'corrective_transactions_executed',
+                  'refused': 'corrective_transactions_refused'}.get(stage, 'corrective_' + stage)
+        if stage == 'refused':
+            counts = counters.setdefault(metric, {})
+            counts[reason] = counts.get(reason, 0) + 1
+        else:
+            counters[metric] = counters.get(metric, 0) + 1
+        logging.getLogger('ssdlc_corrective').info(
+            'corrective stage=%s run=%s txn=%s preview=%s tasks=%s reason=%s',
+            stage, self.ticket_id, txn_id[:12], (preview or {}).get('revision', '-')[:12],
+            ','.join(tasks), reason)
+
+    @staticmethod
+    def _corrective_preview_code(preview):
+        payload = preview.get('plan', {})
+        codes = {b.get('code') for b in payload.get('blockers', []) + preview.get('blockers', [])}
+        if codes & {'control_failed', 'scanner_failed', 'tool_failure', 'scanner_failure'}:
+            return 'gate_failure_not_repairable'
+        if payload.get('diagnosis') or 'evaluation_diagnostic' in codes:
+            return 'diagnostic_only'
+        if payload.get('replanning'):
+            return 'replan_required'
+        if payload.get('impact_analysis'):
+            return 'impact_ambiguous'
+        if preview.get('status') != 'ready-for-later-executor':
+            return 'diagnostic_only' if preview.get('status') == 'diagnostic' else 'preview_not_candidates'
+        return None
+
+    def _corrective_round(self, phase, attempt):
+        """Preparatory entry, called only by an owner already holding ticket_lock."""
+        preview = self._preview_bounce_locked(phase, attempt)
+        return self._execute_corrective(phase, attempt, preview)
+
+    def _execute_corrective(self, phase, attempt, preview):
+        """Create and invalidate only, under the caller's held ticket_lock.
+
+        No pipeline/startup caller exists yet. Repair, replay and recovery are
+        deliberately deferred; an existing transaction fails closed here.
+        """
+        txn_id = '-'
+        try:
+            self.state = json.loads(bounce._safe_path(self.ssdlc_root, 'state.json').read_text())
+            self.check_budget_circuit_breaker()
+            code = self._corrective_preview_code(preview)
+            if code:
+                raise corrective.CorrectiveError(code)
+            payload = preview.get('plan', {})
+            revision = preview.get('revision')
+            if (phase not in bounce.PHASES or type(attempt) is not int or attempt < 1
+                    or not isinstance(revision, str) or not re.fullmatch('[0-9a-f]{64}', revision)):
+                raise corrective.CorrectiveError('preview_tampered')
+            base = f'bounce-preview/{phase}/attempt-{attempt}/{revision}'
+            preview_ref, summary_ref = base + '/plan.json', base + '/summary.txt'
+
+            def registered(ref, expected=None):
+                path = bounce._safe_path(self.ssdlc_root, ref)
+                if not path.is_file():
+                    raise corrective.CorrectiveError('evidence_missing')
+                sha = file_hash(path)
+                if self.state.get('artifacts', {}).get(ref, {}).get('sha256') != sha or (expected and expected != sha):
+                    raise corrective.CorrectiveError('evidence_mutated')
+                return dict(ref=ref, sha256=sha)
+
+            preview_binding = registered(preview_ref)
+            summary_binding = registered(summary_ref)
+            published = json.loads(bounce._safe_path(self.ssdlc_root, preview_ref).read_text())
+            unsigned = dict(published)
+            unsigned.pop('revision', None)
+            if (published != payload or bounce._sha(bounce.canonical_json(unsigned).encode()) != revision
+                    or payload.get('revision') != revision or payload.get('phase') != phase
+                    or payload.get('attempt') != attempt or preview.get('execution_authorized') is not False
+                    or payload.get('execution_authorized') is not False):
+                raise corrective.CorrectiveError('preview_tampered')
+            if payload.get('status') != 'candidates' or payload.get('blockers') or not payload.get('repair_roots'):
+                raise corrective.CorrectiveError('preview_not_candidates')
+
+            # Verify the published inventory before the reader, so a partial
+            # report/proof swap has the stable evidence_mutated classification.
+            for ref, sha in payload['source_hashes'].items():
+                registered(ref, sha)
+            fresh = bounce.read_evidence(root=self.ssdlc_root, state=self.state,
+                repo=self.repo_root, worktree=self.worktree_dir, phase=phase, attempt=attempt)
+            if fresh['status'] != 'verified':
+                codes = {b['code'] for b in fresh.get('blockers', [])}
+                raise corrective.CorrectiveError('evidence_stale' if 'stale_checkpoint' in codes else 'evidence_mutated')
+            controller = registered('00-recon/controller-contract.json')
+            manifest = corrective.frozen_manifest(payload, fresh, controller)
+            def verify_controller(binding):
+                assert_controller(Path(__file__).resolve().parent,
+                    json.loads(bounce._safe_path(self.ssdlc_root, binding['ref']).read_text()))
+            verify_controller(controller)
+            plan, quality = fresh['plan'], fresh['quality']
+            context = build_task_context(self.ssdlc_root)
+            inputs = digest(dict(plan=plan, quality=quality, context=context))
+            ordered = TaskPlanValidator(self.repo_root, context['01-po/requirements.md'],
+                                        quality, self.ssdlc_root).validate(plan)
+            # Re-derive attribution from verified substantive gate results; no
+            # caller-supplied roots or prose become execution authority.
+            derived = bounce.plan_bounce(repo=self.repo_root, artifacts=self.ssdlc_root,
+                plan=plan, quality=quality, requirements_text=fresh['requirements_text'],
+                reviewed_commit=fresh['reviewed_commit'], evaluations=fresh['evaluations'],
+                phase=phase, attempt=attempt)
+            for key in ('repair_roots', 'revalidation_tasks', 'status', 'blockers'):
+                if derived[key] != payload[key]:
+                    raise corrective.CorrectiveError('preview_tampered')
+            roots = payload['repair_roots']
+            affected = set(roots) | set(payload['revalidation_tasks'])
+            closure = [t['task_id'] for t in ordered if t['task_id'] in affected]
+            journal_path = self.ssdlc_root / '03-dev/tasks/task-journal.jsonl'
+            head = TaskJournal.head(journal_path)
+            if not head or head != payload.get('journal_head'):
+                raise corrective.CorrectiveError('evidence_stale')
+            anchor_state, descendants = TaskJournal.replay_range(journal_path, head['sequence'], head['sha256'])
+            if descendants or anchor_state['inputs_sha256'] != inputs:
+                raise corrective.CorrectiveError('evidence_mutated')
+            if set(anchor_state['tasks']) != {t['task_id'] for t in ordered} or any(
+                    t['status'] != 'COMPLETED' for t in anchor_state['tasks'].values()):
+                raise corrective.CorrectiveError('tasks_not_completed')
+            cap = float(os.environ.get('SSDLC_BUDGET_CAP_USD') or
+                        {'S': 3, 'M': 6, 'L': 20}.get(self.state.get('risk_tier', 'M'), 6))
+            limits = corrective.effective_limits(dict(os.environ, SSDLC_BUDGET_CAP_USD=str(cap)), [])
+            limits['spend_at_creation_usd'] = sum(x.get('cost_usd', 0) for x in self.state.get('ledger', []))
+            if any(anchor_state['tasks'][tid]['attempts'] >= limits['max_attempts'] for tid in roots):
+                raise corrective.CorrectiveError('attempts_exhausted')
+            def no_dispatch(*args, **kwargs):
+                raise TaskError('Preparatory corrective driver cannot dispatch')
+            scheduler = TaskScheduler(self.worktree_dir, journal_path.parent, plan, quality,
+                context, no_dispatch, no_dispatch, budget=self.check_budget_circuit_breaker,
+                max_attempts=limits['max_attempts'])
+            scheduler.state = anchor_state
+            if scheduler.verify_inventory():
+                raise corrective.CorrectiveError('evidence_mutated')
+            outcomes = []
+            for ref in sorted(manifest['reader']):
+                if ref.endswith('/outcome.json'):
+                    outcome = json.loads(bounce._safe_path(self.ssdlc_root, ref).read_text())
+                    outcomes.append(dict(registered(ref), outcome_class=outcome['outcome_class']))
+            gate_outcomes = [{k: e[k] for k in ('gate', 'identity', 'outcome_class', 'verdict')}
+                             for e in fresh['evaluations']]
+            record_payload = dict(payload, preview_revision=revision, closure=closure)
+            record = corrective.build_record(record_payload, ticket_id=self.ticket_id,
+                preview=dict(preview_binding, revision=revision, summary_ref=summary_ref,
+                             summary_sha256=summary_binding['sha256']),
+                plan=registered('02-design/plan.json'), quality=registered('00-recon/quality-contract.json'),
+                requirements=registered('01-po/requirements.md'),
+                roster=registered(f'{phase}/provenance/attempt-{attempt}/roster.json'),
+                completion=registered(f'{phase}/provenance/attempt-{attempt}/completion.json'),
+                outcomes=outcomes, gate_outcomes=gate_outcomes, evidence_manifest=manifest,
+                inputs_sha256=inputs, journal_head=head, limits=limits, next_gate_attempt=attempt + 1)
+            txn_id = record['txn_id']
+            txn_base = f'bounce-txn/{txn_id}'
+            record_ref = txn_base + '/transaction.json'
+            record_path = bounce._safe_path(self.ssdlc_root, record_ref)
+            if record_path.exists():
+                raise corrective.CorrectiveError('txn_record_conflict')
+            txn = None
+            txn_state = dict(status='CREATED', txn_id=txn_id, journal_head=head)
+            # During P0 implementation.diff is still immutable. Layer E can
+            # compare its original registered bytes directly.
+            def verify(invalidated=False):
+                self.state = json.loads(bounce._safe_path(self.ssdlc_root, 'state.json').read_text())
+                registered(preview_ref, preview_binding['sha256'])
+                registered(summary_ref, summary_binding['sha256'])
+                current_inputs = digest(dict(plan=json.loads((self.ssdlc_root / record['plan']['ref']).read_text()),
+                    quality=json.loads((self.ssdlc_root / record['quality']['ref']).read_text()),
+                    context=build_task_context(self.ssdlc_root)))
+                corrective.verify_evidence(record, self.ssdlc_root, self.state['artifacts'],
+                    inputs_sha256=current_inputs, controller_verifier=verify_controller,
+                    captured_diff_ref='03-dev/implementation.diff')
+                if record_path.exists():
+                    expected_record = hashlib.sha256(canon(record)).hexdigest()
+                    if file_hash(record_path) != expected_record:
+                        raise corrective.CorrectiveError('txn_record_conflict')
+                    if record_ref in self.state['artifacts']:
+                        registered(record_ref, expected_record)
+                if txn is not None and txn.path.exists():
+                    TaskJournal.head(txn.path)
+                if scheduler._inventory_problems(anchor_state):
+                    raise corrective.CorrectiveError('evidence_mutated')
+                if invalidated:
+                    corrective.verify_lineage(journal_path, dict(head, event='TXN_CREATED', txn_id=txn_id),
+                                              closure, roots, limits)
+                elif TaskJournal.head(journal_path) != head:
+                    raise corrective.CorrectiveError('evidence_stale')
+                if (git(self.worktree_dir, 'rev-parse', 'HEAD') != record['reviewed_commit']
+                        or anchor_state['expected_head'] != record['reviewed_commit']
+                        or self.state.get('task_verified_head') != record['reviewed_commit']
+                        or git(self.worktree_dir, 'status', '--porcelain')
+                        or git(self.repo_root, 'rev-parse', 'HEAD') != self.state['base_commit']
+                        or plan['base_commit'] != self.state['base_commit']
+                        or git(self.repo_root, 'status', '--porcelain')):
+                    raise corrective.CorrectiveError('source_changed')
+                for task in anchor_state['tasks'].values():
+                    if 'protected_snapshot' in task and scheduler._protected() != task['protected_snapshot']:
+                        raise corrective.CorrectiveError('protected_path_modified')
+
+            verify()
+            for name in ('task-journal.jsonl', 'tasks-state.json'):
+                source = bounce._safe_path(self.ssdlc_root, '03-dev/tasks/' + name)
+                if not source.is_file():
+                    raise corrective.CorrectiveError('evidence_missing')
+                verify()
+                ref = txn_base + '/pre-invalidation/' + name
+                path = bounce._safe_path(self.ssdlc_root, ref)
+                write_or_verify(path, source.read_bytes(), root=self.ssdlc_root)
+                verify()
+                self._register_new(ref, path)
+            verify()
+            write_or_verify(record_path, canon(record), root=self.ssdlc_root)
+            verify()
+            self._register_new(record_ref, record_path)
+            verify()
+            txn = corrective.TransactionJournal(record_path.parent)
+            verify()
+            txn.append('TXN_CREATED', txn_state)
+            self._corrective_stage('created', preview, txn_id, roots)
+            verify()
+            txn_state = dict(txn_state, status='INVALIDATING')
+            txn.append('INVALIDATION_INTENT', txn_state)
+            self.check_budget_circuit_breaker()
+            verify()
+            scheduler.invalidate(roots, reason='corrective:' + txn_id)
+            verify(invalidated=True)
+            position = TaskJournal.head(journal_path)
+            txn_state = dict(txn_state, status='INVALIDATED', event=position)
+            txn.append('INVALIDATION_APPLIED', txn_state)
+            self._corrective_stage('invalidated', preview, txn_id, roots)
+            return dict(status='INVALIDATED', txn_id=txn_id, repair_roots=roots, event=position)
+        except corrective.CorrectiveError as exc:
+            self._corrective_stage('refused', preview, txn_id, reason=exc.code)
+            raise
+        except (TaskError, bounce.BounceError, OSError, ValueError, KeyError, TypeError):
+            self._corrective_stage('refused', preview, txn_id, reason='evidence_mutated')
+            raise corrective.CorrectiveError('evidence_mutated') from None
 
     def _ensure_quality_contract(self) -> Dict[str, Any]:
         target = self.dir_recon / "quality-contract.json"
