@@ -9,8 +9,8 @@ PR     agent:review ─► (CI fail | request_changes) ─► agent:changes ─�
        any step can escalate to agent:needs-human.
 
 Readiness is bound to the approved commit: a PR is promoted only if its head is still the
-reviewed commit and CI passed, and a ready PR whose head moves goes back to review (or to
-agent:changes when CI fails on it).
+reviewed commit and CI passed. A ready PR whose head moves, or whose CI is running again, goes
+back to review (to agent:changes when CI fails on it).
 """
 
 import string
@@ -91,6 +91,10 @@ def plan(snapshot, cfg):
                 actions.append(Action('revoke', pr.number, 'head is not the approved commit'))
             elif pr.checks == 'fail':
                 actions.append(Action('ci_failed', pr.number, 'CI failed after approval'))
+            elif pr.checks == 'pending':
+                # CI re-running on the approved commit: not ready until it passes again. The
+                # recorded approval is replayed from agent:review, without a new review.
+                actions.append(Action('revoke', pr.number, 'CI pending on the approved commit'))
             continue
         if lb.changes in pr.labels:
             actions.append(Action('fix', pr.number))
@@ -311,12 +315,22 @@ class Dispatcher:
     def _do_revoke(self, pr):
         lb = self.cfg.labels
         latest = pr.reviews[-1] if pr.reviews else None
-        approved = latest['head_sha'][:12] if latest and latest['verdict'] == 'approve' else None
-        reason = (f'Il commit `{pr.head_sha[:12]}` non è quello approvato (`{approved}`)'
-                  if approved else 'Non risulta una review devloop approvata')
-        self.gh.comment(pr.number, dispatcher_header() + '\n## Approvazione revocata\n\n'
-                        + reason + '. La PR torna in review.\n')
+        approved = latest['head_sha'] if latest and latest['verdict'] == 'approve' else None
+        if approved == pr.head_sha:
+            title = 'Readiness sospesa'
+            reason = (f'La CI del commit approvato `{approved[:12]}` è di nuovo in corso. La PR '
+                      'torna in review: l\'approvazione resta registrata e verrà riapplicata '
+                      'senza una nuova review se la CI passa')
+        elif approved:
+            title = 'Approvazione revocata'
+            reason = (f'Il commit `{pr.head_sha[:12]}` non è quello approvato (`{approved[:12]}`). '
+                      'La PR torna in review')
+        else:
+            title = 'Approvazione revocata'
+            reason = 'Non risulta una review devloop approvata. La PR torna in review'
+        self.gh.comment(pr.number, dispatcher_header() + f'\n## {title}\n\n' + reason + '.\n')
         self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.ready_to_merge])
+
     def _do_stale(self, number):
         lb = self.cfg.labels
         self._escalate(number, 'Implementazione interrotta: la issue era in lavorazione ma non '

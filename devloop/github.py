@@ -74,8 +74,8 @@ class GitHub:
         """
         runs = self._json_lines('api', '--paginate', f'repos/{self.repo}/commits/{sha}/check-runs',
                                 '--jq', '.check_runs[] | {name, status, conclusion, details_url}')
-        statuses = self._json('api', f'repos/{self.repo}/commits/{sha}/status')
-        return summarize_checks(normalize_checks(runs, statuses.get('statuses') or []))
+        combined = self._json('api', f'repos/{self.repo}/commits/{sha}/status?per_page=100')
+        return summarize_checks(normalize_checks(runs, combined or {}))
 
     def failed_log(self, run_id, max_lines=80):
         done = self._gh('run', 'view', str(run_id), '-R', self.repo, '--log-failed', check=False)
@@ -112,8 +112,18 @@ class GitHub:
                  '--description', description, '--force')
 
 
-def normalize_checks(check_runs, statuses):
-    """Check runs and commit statuses as ``{name, bucket, link}`` (bucket: pass, fail, pending)."""
+def _status_bucket(state):
+    return 'fail' if state in _FAILED_STATUSES else 'pending' if state == 'pending' else 'pass'
+
+
+def normalize_checks(check_runs, combined_status):
+    """Check runs and commit statuses as ``{name, bucket, link}`` (bucket: pass, fail, pending).
+
+    ``combined_status`` is the response of ``commits/<sha>/status``. Its ``statuses`` list is
+    paginated, so the aggregate ``state`` is authoritative: if it is worse than every listed
+    status (a failing or pending context beyond the first page), it is added as its own entry.
+    Without any status (``total_count`` 0) GitHub reports ``pending``, which means nothing here.
+    """
     checks = []
     for run in check_runs:
         if run.get('status') != 'completed':
@@ -123,11 +133,14 @@ def normalize_checks(check_runs, statuses):
         else:
             bucket = 'pass'
         checks.append({'name': run.get('name'), 'bucket': bucket, 'link': run.get('details_url')})
-    for status in statuses:
-        state = status.get('state')
-        bucket = 'fail' if state in _FAILED_STATUSES else 'pending' if state == 'pending' else 'pass'
-        checks.append({'name': status.get('context'), 'bucket': bucket,
-                       'link': status.get('target_url')})
+    statuses = combined_status.get('statuses') or []
+    listed = [{'name': s.get('context'), 'bucket': _status_bucket(s.get('state')),
+               'link': s.get('target_url')} for s in statuses]
+    checks += listed
+    if combined_status.get('total_count', len(statuses)):
+        aggregate = _status_bucket(combined_status.get('state'))
+        if aggregate != 'pass' and not any(c['bucket'] == aggregate for c in listed):
+            checks.append({'name': 'commit status (aggregate)', 'bucket': aggregate, 'link': None})
     return checks
 
 

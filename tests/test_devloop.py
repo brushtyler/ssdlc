@@ -233,12 +233,26 @@ class ChecksTests(unittest.TestCase):
                 {'name': 'wip', 'status': 'in_progress', 'conclusion': None, 'details_url': ''},
                 {'name': 'bad', 'status': 'completed', 'conclusion': 'timed_out',
                  'details_url': 'https://github.com/o/r/actions/runs/9/job/1'}]
-        statuses = [{'context': 'ext', 'state': 'error', 'target_url': None}]
+        statuses = {'state': 'failure', 'total_count': 1,
+                    'statuses': [{'context': 'ext', 'state': 'error', 'target_url': None}]}
         self.assertEqual([c['bucket'] for c in normalize_checks(runs, statuses)],
                          ['pass', 'pending', 'fail', 'fail'])
         self.assertEqual(summarize_checks(normalize_checks(runs, statuses)),
                          ('fail', ['bad', 'ext'], ['9']))
-        self.assertEqual(summarize_checks(normalize_checks(runs[:2], [])), ('pending', [], []))
+        no_status = {'state': 'pending', 'total_count': 0, 'statuses': []}
+        self.assertEqual(summarize_checks(normalize_checks(runs[:2], no_status)),
+                         ('pending', [], []))
+        self.assertEqual(summarize_checks(normalize_checks(runs[:1], no_status)), ('pass', [], []))
+
+    def test_statuses_beyond_the_first_page_follow_the_aggregate_state(self):
+        page = [{'context': f's{i}', 'state': 'success', 'target_url': None} for i in range(30)]
+        failed = {'state': 'failure', 'total_count': 31, 'statuses': page}
+        self.assertEqual(summarize_checks(normalize_checks([], failed)),
+                         ('fail', ['commit status (aggregate)'], []))
+        pending = {'state': 'pending', 'total_count': 31, 'statuses': page}
+        self.assertEqual(summarize_checks(normalize_checks([], pending)), ('pending', [], []))
+        complete = {'state': 'success', 'total_count': 30, 'statuses': page}
+        self.assertEqual(summarize_checks(normalize_checks([], complete)), ('pass', [], []))
 
 
 class GitHubAdapterTests(unittest.TestCase):
@@ -260,15 +274,24 @@ class GitHubAdapterTests(unittest.TestCase):
             ('check-runs', (0, '{"name":"t","status":"completed","conclusion":"success",'
                                '"details_url":""}\n', '')),
             # The combined status is "pending" when a commit has no statuses at all.
-            (f'commits/{SHA1}/status', (0, '{"state":"pending","statuses":[]}', ''))])
+            (f'commits/{SHA1}/status', (0, '{"state":"pending","total_count":0,"statuses":[]}', ''))])
         self.assertEqual(gh.checks(SHA1), ('pass', [], []))
         self.assertTrue(all(argv[1] == 'api' for argv, _ in self.calls))
         self.assertTrue(any(f'commits/{SHA1}/check-runs' in ' '.join(a) for a, _ in self.calls))
 
     def test_no_checks_at_all(self):
         gh = self.make([('check-runs', (0, '', '')),
-                        ('/status', (0, '{"state":"pending","statuses":[]}', ''))])
+                        ('/status', (0, '{"state":"pending","total_count":0,"statuses":[]}', ''))])
         self.assertEqual(gh.checks(SHA1), ('none', [], []))
+
+    def test_checks_respect_a_failed_aggregate_status_beyond_the_first_page(self):
+        page = ','.join(f'{{"context":"s{i}","state":"success","target_url":null}}'
+                        for i in range(30))
+        gh = self.make([('check-runs', (0, '', '')),
+                        ('/status', (0, f'{{"state":"failure","total_count":31,'
+                                        f'"statuses":[{page}]}}', ''))])
+        self.assertEqual(gh.checks(SHA1)[0], 'fail')
+        self.assertTrue(any('per_page=100' in ' '.join(a) for a, _ in self.calls))
 
     def test_label_and_comment_writes_use_rest(self):
         gh = self.make([('labels/agent%3Achanges', (1, '{"message":"Label does not exist"}',
@@ -353,7 +376,9 @@ class PlanTests(unittest.TestCase):
         done = norm(raw_review())
         ready_pr = dict(labels=['agent:ready-to-merge'], reviews=[done])
         self.assertEqual(self.kinds(Snapshot([pr(**ready_pr)], [], [])), [])
-        self.assertEqual(self.kinds(Snapshot([pr(**ready_pr, checks='pending')], [], [])), [])
+        # CI re-running on the approved commit suspends readiness.
+        self.assertEqual(self.kinds(Snapshot([pr(**ready_pr, checks='pending')], [], [])),
+                         [('revoke', 100)])
         self.assertEqual(self.kinds(Snapshot([pr(**ready_pr, head=SHA2, checks='fail')], [], [])),
                          [('revoke', 100)])
         self.assertEqual(self.kinds(Snapshot([pr(**ready_pr, checks='fail')], [], [])),
@@ -553,6 +578,33 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual(self.gh.labels[100], {'agent:review'})
         self.assertIn('**Agent:** devloop dispatcher', self.gh.comments[0][1])
         self.assertIn(SHA1[:12], self.gh.comments[0][1])
+
+    def _ci_rerun_on_ready_pr(self, final_ci):
+        """A ready PR whose CI re-runs: pass -> pending -> ``final_ci``, driven through plan()."""
+        runner = FakeRunner()
+        d = self.make(runner)
+        approval = norm(raw_review())
+        p = pr(labels=['agent:ready-to-merge'], reviews=[approval], checks='pending')
+        self.gh.labels[100] = set(p.labels)
+        [action] = plan(Snapshot([p], [], []), CFG)
+        self.assertEqual(action.kind, 'revoke')
+        d._do_revoke(p)
+        self.assertEqual(self.gh.labels[100], {'agent:review'})
+        self.assertIn('Readiness sospesa', self.gh.comments[-1][1])
+        self.gh.ci = final_ci
+        p = pr(labels=['agent:review'], reviews=[approval], checks=final_ci)
+        [action] = plan(Snapshot([p], [], []), CFG)
+        getattr(d, f'_do_{action.kind}')(p)
+        self.assertEqual(runner.calls, [])  # the recorded approval is reused, no new review
+        return action.kind
+
+    def test_ready_pr_ci_rerun_that_passes_is_ready_again_without_review(self):
+        self.assertEqual(self._ci_rerun_on_ready_pr('pass'), 'apply_review')
+        self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
+
+    def test_ready_pr_ci_rerun_that_fails_goes_to_changes(self):
+        self.assertEqual(self._ci_rerun_on_ready_pr('fail'), 'ci_failed')
+        self.assertEqual(self.gh.labels[100], {'agent:changes'})
 
     def test_ci_failure_after_approval_clears_readiness(self):
         d = self.make(FakeRunner())
