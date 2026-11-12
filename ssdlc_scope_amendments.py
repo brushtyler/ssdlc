@@ -32,7 +32,7 @@ def _git_read(root, *args):
     return git(root, '--no-optional-locks', '-c', 'core.fsmonitor=false', *args)
 
 
-def inspect(ticket, *, allow_host_hints=False):
+def inspect(ticket, *, allow_host_hints=False, verification_repair=False):
     """Inspect the selected stopped generation; no repairing loads or writers."""
     from ssdlc_candidates import CandidateStore, inventory
     ticket = _ticket(ticket)
@@ -70,7 +70,8 @@ def inspect(ticket, *, allow_host_hints=False):
     task_id = selected[0]
     failed = state['tasks'][task_id].get('failed_attempts', [])
     if not failed or failed[-1]['category'] != 'SCOPE_REQUIRED':
-        if not (allow_host_hints and failed and failed[-1]['category'] == 'CHECK_FAILURE'):
+        if not (failed and (allow_host_hints and failed[-1]['category'] == 'CHECK_FAILURE'
+                            or verification_repair and failed[-1]['category'] == 'ENVIRONMENT_DIAGNOSIS')):
             raise TransitionError('Only an explicit SCOPE_REQUIRED failure is supported')
     if any(row['status'] not in {'FAILED', 'COMPLETED', 'PENDING'} for row in state['tasks'].values()):
         raise TransitionError('Active or invalidated work requires separate reconciliation')
@@ -118,7 +119,10 @@ def inspect(ticket, *, allow_host_hints=False):
                 task_id=task_id, capture_bindings=bindings, files=_files(root),
                 worktree_sha256=digest(inventory(worktree)),
                 parent_selector=_read(ticket / 'execution', 'active.json'))
-    if failed[-1]['category'] != 'SCOPE_REQUIRED':
+    if verification_repair:
+        from ssdlc_verification_repair import require_timeout
+        require_timeout(result)
+    elif failed[-1]['category'] != 'SCOPE_REQUIRED':
         from ssdlc_feedback_analysis import failure_hint
         if failure_hint(result, task)['classification'] != 'ALL_OUTSIDE':
             raise TransitionError('Host scope hypothesis requires all failed checks localized outside the task')
@@ -182,7 +186,7 @@ def subject(source, plan, reason, *, feedback_request_id=None, reconcile_feedbac
 def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_snapshot,
             guard=lambda: None, clock=time.time, fault=lambda point: None, held_locks=(), delegation=None, profile_update=None,
             repair_return=None, repair_session=None, feedback_request_id=None, reconcile_feedback_evidence=False,
-            operator_owner_limit=None, operator_recovery_profile=None):
+            operator_owner_limit=None, operator_recovery_profile=None, verification_repair=None):
     """Stage a reviewed amendment, retaining all prior generations and counters."""
     from ssdlc_preparations import unfinished, register, update, pending, clear_pending
     from ssdlc_candidates import inventory
@@ -193,9 +197,16 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
     with transition_lock(ticket / 'ticket.lock', held_locks):
         if unfinished(ticket, namespace='execution'):
             raise TransitionError('Earlier preparation requires native discard')
-        source = inspect(ticket, allow_host_hints=delegation is not None or profile_update is not None or repair_return is not None)
+        source = inspect(ticket, allow_host_hints=delegation is not None or profile_update is not None or repair_return is not None,
+                         verification_repair=verification_repair is not None)
         with transition_lock(source['root'] / '03-dev/tasks/scheduler.lock', held_locks):
             guard()
+            if verification_repair is not None and (not isinstance(verification_repair, dict)
+                    or set(verification_repair) != {'quality', 'profile'}
+                    or any(x is not None for x in (delegation, profile_update, repair_return,
+                        feedback_request_id, operator_owner_limit, operator_recovery_profile))
+                    or reconcile_feedback_evidence):
+                raise TransitionError('Verification repair requires its separate exact operator capability')
             if operator_recovery_profile is not None and (feedback_request_id is None or
                     any(x is not None for x in (delegation, profile_update, repair_return))):
                 raise TransitionError('Operator recovery cannot borrow another transition capability')
@@ -237,6 +248,10 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                 return_proof = return_proof_for(source, reviewed)
                 if not operator:
                     return_proof['fence'] = repair_session.check()
+            elif verification_repair is not None:
+                from ssdlc_verification_repair import subject as verification_subject
+                reviewed = verification_subject(source, plan, verification_repair['quality'],
+                                                verification_repair['profile'], reason)
             elif operator_recovery_profile is not None:
                 from ssdlc_operator_recovery import subject as recovery_subject
                 reviewed = recovery_subject(source, plan, reason, profile=operator_recovery_profile,
@@ -272,10 +287,12 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                 raise TransitionError('Scope-only recovery cannot change verification environment')
             if runtime_identity['controller_sha256'] != digest(execution_contract(controller_snapshot)):
                 raise TransitionError('Controller snapshot does not match the proposed runtime')
+            quality = verification_repair['quality'] if verification_repair else source['quality']
             limits = LimitsStore(source['root'], clock)
             limits.check(source['counters'], source['envelope']['policy'])
             limits.require_capacity('03-dev', '03-dev')
-            attempt_profile = operator_recovery_profile or source['envelope']['policy']
+            attempt_profile = (verification_repair['profile'] if verification_repair else
+                               operator_recovery_profile or source['envelope']['policy'])
             if source['journal']['tasks'][source['task_id']]['attempts'] >= attempt_profile['development_attempts']:
                 raise RecoveryStop('LIMIT_REACHED', 'Scope amendment cannot grant another development attempt')
             identity = uuid.uuid4().hex
@@ -294,11 +311,13 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                 fault('worktree_created')
                 current = copy.deepcopy(source['journal'])
                 current.update(candidate_runtime=runtime_identity, historical_capture_bindings=source['capture_bindings'],
-                               inputs_sha256=digest(dict(plan=plan, quality=source['quality'], context=source['context'])))
+                               inputs_sha256=digest(dict(plan=plan, quality=quality, context=source['context'])))
                 row = current['tasks'][source['task_id']]
                 if profile_update is None:
                     reconciliation = dict(task_id=source['task_id'], failure_sha256=digest(row['failed_attempts'][-1]),
                                           plan_sha256=digest(plan), subject_sha256=digest(reviewed), reason=reason)
+                    if verification_repair is not None:
+                        reconciliation['verification_repair'] = copy.deepcopy(reviewed['verification_repair'])
                     if 'owner_revalidation' in reviewed:
                         reconciliation['owner_revalidation'] = dict(contract=reviewed['owner_revalidation'],
                             coverage_review=copy.deepcopy(coverage))
@@ -320,6 +339,9 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                 if operator_recovery_profile is not None:
                     envelope['policy'] = copy.deepcopy(operator_recovery_profile)
                     current['attempt_limit'] = operator_recovery_profile['development_attempts']
+                if verification_repair is not None:
+                    envelope['policy'] = copy.deepcopy(verification_repair['profile'])
+                    current['attempt_limit'] = envelope['policy']['development_attempts']
                 envelope['binding'].update(controller=controller_snapshot, reconciliation_id=identity,
                     historical_capture_bindings_sha256=digest(source['capture_bindings']), scope_reconciliations=scope,
                     historical_invocations=copy.deepcopy(counters['invocations']),
@@ -332,6 +354,8 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                 store.journal.load()
                 store.journal.append('SCOPE_AMENDMENT_LIMITS_BOUND', counters)
                 atomic_json(runtime / '02-design/plan.json', plan)
+                if verification_repair is not None:
+                    atomic_json(runtime / '00-recon/quality-contract.json', quality)
                 atomic_json(runtime / '00-recon/controller-contract.json', controller_snapshot)
                 outer = copy.deepcopy(source['state'])
                 outer.update(status='SCOPE_AMENDMENT_PREPARED', current_phase='03-dev', current_step='awaiting-exact-authorization',
@@ -339,12 +363,12 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                 outer.pop('failure', None); outer.pop('task_verified_head', None)
                 outer['bounded_execution'] = dict(kind='bounded-i2', policy_sha256=digest(envelope))
                 atomic_json(runtime / 'execution-mode.json', dict(outer['bounded_execution'], status='ACTIVE'))
-                for ref in ('02-design/plan.json', '00-recon/controller-contract.json'):
+                for ref in ('02-design/plan.json', '00-recon/controller-contract.json', '00-recon/quality-contract.json'):
                     outer['artifacts'][ref] = dict(path=ref, sha256=file_hash(runtime / ref))
                 atomic_json(runtime / 'state.json', outer)
                 store._publish_mode(envelope, outer)
                 atomic_json(runtime / 'state.json', outer)
-                scheduler = TaskScheduler(runtime / 'worktree', runtime / '03-dev/tasks', plan, source['quality'], source['context'],
+                scheduler = TaskScheduler(runtime / 'worktree', runtime / '03-dev/tasks', plan, quality, source['context'],
                     None, None, isolate_candidates=True, recover_timeouts=True, runtime_identity=runtime_identity,
                     max_attempts=envelope['policy']['development_attempts'],
                     historical_capture_authority=digest(source['capture_bindings']), scope_reconciliations=scope)
@@ -385,6 +409,11 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                     proposal.update(authorization_contract=RECOVERY_CONTRACT,
                         profile_sha256=digest(operator_recovery_profile),
                         operator_recovery_sha256=digest(reviewed['operator_recovery']))
+                if verification_repair is not None:
+                    from ssdlc_verification_repair import CONTRACT as VERIFICATION_CONTRACT
+                    proposal.update(authorization_contract=VERIFICATION_CONTRACT,
+                        profile_sha256=digest(envelope['policy']), quality_contract_sha256=digest(quality),
+                        verification_repair_sha256=digest(reviewed['verification_repair']))
                 if return_proof is not None:
                     from ssdlc_feedback_return import CONTRACT as RETURN_CONTRACT, OPERATOR_CONTRACT
                     proposal.update(authorization_contract=OPERATOR_CONTRACT if operator else RETURN_CONTRACT,
@@ -412,6 +441,12 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
     proposal, recipe = _read(preparation, 'proposal.json'), _read(preparation, 'recipe.json')
     from ssdlc_operator_recovery import CONTRACT as RECOVERY_CONTRACT, validate_binding as validate_recovery
     validate_recovery(proposal, recipe)
+    from ssdlc_verification_repair import CONTRACT as VERIFICATION_CONTRACT, validate_binding as validate_verification
+    validate_verification(proposal, recipe)
+    if proposal.get('authorization_contract') == VERIFICATION_CONTRACT:
+        for ref, sha in proposal['artifacts'].items():
+            if file_hash(_regular(preparation, ref)) != sha:
+                raise TransitionError('Prepared verification repair changed')
     if 'owner_feedback' in recipe['subject'] or 'owner_allowance_sha256' in proposal:
         from ssdlc_owner_revalidation import validate_allowance_binding
         validate_allowance_binding(proposal, recipe['subject'].get('owner_feedback', {}))
@@ -419,11 +454,12 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
     delegated = proposal.get('authorization_contract') == CONTRACT
     profile_admission = proposal.get('authorization_contract') == 'feedback-profile-admission-v1'
     operator_recovery = proposal.get('authorization_contract') == RECOVERY_CONTRACT
+    verification_repair = proposal.get('authorization_contract') == VERIFICATION_CONTRACT
     from ssdlc_feedback_return import CONTRACTS as RETURN_CONTRACTS, CONTRACT as RETURN_CONTRACT
     repair_return = proposal.get('authorization_contract') in RETURN_CONTRACTS
     repair_delegated = proposal.get('authorization_contract') == RETURN_CONTRACT
     if (preparation != ticket / 'execution' / ('prepared-' + proposal['transition_id'])
-            or proposal.get('authorization_contract') not in {'scope-amendment-v1', CONTRACT, RECOVERY_CONTRACT, 'feedback-profile-admission-v1', *RETURN_CONTRACTS}
+            or proposal.get('authorization_contract') not in {'scope-amendment-v1', CONTRACT, RECOVERY_CONTRACT, VERIFICATION_CONTRACT, 'feedback-profile-admission-v1', *RETURN_CONTRACTS}
             or delegated and (not isinstance(delegation, FencedSession) or delegation.ticket != ticket
                               or delegation.root != Path(recipe['source_root']))
             or not delegated and delegation is not None):
@@ -451,11 +487,22 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
                 finalize_return(ticket, proposal, recipe, selected)
             from ssdlc_owner_revalidation import finalize as finalize_owners
             finalize_owners(ticket, proposal, recipe, selected)
+            if verification_repair:
+                from ssdlc_verification_repair import finalize as finalize_verification
+                finalize_verification(ticket, proposal, recipe, selected)
             update(ticket, proposal['transition_id'], namespace='execution', status='ACTIVE')
             clear_pending(ticket, proposal['transition_id'], namespace='execution')
             return selected
-        source = inspect(ticket, allow_host_hints=delegated or profile_admission or repair_return)
+        source = inspect(ticket, allow_host_hints=delegated or profile_admission or repair_return,
+                         verification_repair=verification_repair)
         with transition_lock(source['root'] / '03-dev/tasks/scheduler.lock', held_locks):
+            if verification_repair:
+                from ssdlc_verification_repair import subject as verification_subject
+                runtime = ticket / 'execution-runtimes' / proposal['transition_id']
+                if verification_subject(source, _read(runtime, '02-design/plan.json'),
+                        _read(runtime, '00-recon/quality-contract.json'), recipe['envelope']['policy'],
+                        recipe['subject']['reason']) != recipe['subject']:
+                    raise TransitionError('Verification repair source or quality changed after review')
             if 'owner_feedback_sha256' in proposal:
                 subject_builder = subject
                 extra = {}
@@ -501,7 +548,7 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
             seal = _read(preparation, 'runtime-seal.json')
             if _files(runtime) != seal: raise TransitionError('Prepared runtime changed')
             envelope, counters = LimitsStore(runtime, clock)._load(repair=False)
-            if (profile_admission or operator_recovery) and digest(envelope['policy']) != proposal['profile_sha256']:
+            if (profile_admission or operator_recovery or verification_repair) and digest(envelope['policy']) != proposal['profile_sha256']:
                 raise TransitionError('Admitted feedback profile changed')
             tasks = TaskJournal(runtime / '03-dev/tasks').peek()
             if (envelope != recipe['envelope'] or counters != recipe['counters'] or tasks != recipe['journal_state']
@@ -518,6 +565,11 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
             if repair_delegated:
                 repair_session.check()
             result = store.publish(source['root'], proposal, authorization, source['projection'], projected, artifacts)
+            if verification_repair:
+                from ssdlc_verification_repair import finalize as finalize_verification
+                fault('verification_repair_selector_published')
+                finalize_verification(ticket, proposal, recipe, result)
+                fault('verification_repair_reconciled')
             if 'owner_feedback_sha256' in proposal:
                 from ssdlc_owner_revalidation import finalize as finalize_owners
                 fault('owner_selector_published')
@@ -559,6 +611,10 @@ def main(argv=None):
                 help='Exact next manual owner amendment for this task; does not extend automatic/global/file allowances')
             command.add_argument('--operator-recovery-profile',
                 help='Exact operator-reviewed next-attempt/scope profile; money, clock and invocation caps cannot change')
+            command.add_argument('--verification-repair-quality',
+                help='Exact quality contract with longer observed timed-out checks; requires a separate operator capability')
+            command.add_argument('--verification-repair-profile',
+                help='Exact profile granting one repair attempt; all other limits remain unchanged')
         if name == 'prepare': command.add_argument('--review', required=True)
         if name in {'activate', 'discard'}: command.add_argument('--preparation', required=True)
         if name == 'activate': command.add_argument('--authorization', required=True)
@@ -569,9 +625,17 @@ def main(argv=None):
     ticket = repo / '.ssdlc' / args.ticket
     read = lambda path: json.loads(Path(path).read_text())
     try:
+        verification = None
+        if args.command.endswith(('preview', 'prepare')):
+            if bool(args.verification_repair_quality) != bool(args.verification_repair_profile):
+                raise TransitionError('Verification repair requires both quality and profile')
+            if args.verification_repair_quality:
+                if args.feedback_request or args.operator_owner_limit is not None or args.operator_recovery_profile or args.reconcile_feedback_evidence:
+                    raise TransitionError('Verification repair cannot borrow owner-feedback authorization')
+                verification = dict(quality=read(args.verification_repair_quality), profile=read(args.verification_repair_profile))
         if args.command in {'continuation-scope-inspect', 'continuation-scope-preview'}:
             with ticket_lock(ticket / 'ticket.lock'):
-                source = inspect(ticket)
+                source = inspect(ticket, verification_repair=verification is not None)
                 with ticket_lock(source['root'] / '03-dev/tasks/scheduler.lock'):
                     if args.command.endswith('preview'):
                         subject_builder = subject
@@ -579,9 +643,13 @@ def main(argv=None):
                         if args.operator_recovery_profile:
                             from ssdlc_operator_recovery import subject as subject_builder
                             extra['profile'] = read(args.operator_recovery_profile)
-                        value = subject_builder(source, read(args.plan), args.reason, feedback_request_id=args.feedback_request,
-                                        reconcile_feedback_evidence=args.reconcile_feedback_evidence,
-                                        operator_owner_limit=args.operator_owner_limit, **extra)
+                        if verification is not None:
+                            from ssdlc_verification_repair import subject as verification_subject
+                            value = verification_subject(source, read(args.plan), verification['quality'], verification['profile'], args.reason)
+                        else:
+                            value = subject_builder(source, read(args.plan), args.reason, feedback_request_id=args.feedback_request,
+                                            reconcile_feedback_evidence=args.reconcile_feedback_evidence,
+                                            operator_owner_limit=args.operator_owner_limit, **extra)
                         result = dict(subject=value, subject_sha256=digest(value), execution_authorized=False)
                     else:
                         result = dict(task_id=source['task_id'], source_generation=source['projection']['transition_id'],
@@ -617,7 +685,8 @@ def main(argv=None):
                                  feedback_request_id=args.feedback_request,
                                  reconcile_feedback_evidence=args.reconcile_feedback_evidence,
                                  operator_owner_limit=args.operator_owner_limit,
-                                 operator_recovery_profile=read(args.operator_recovery_profile) if args.operator_recovery_profile else None)
+                                 operator_recovery_profile=read(args.operator_recovery_profile) if args.operator_recovery_profile else None,
+                                 verification_repair=verification)
                 result = dict(preparation=result['preparation'], proposal_sha256=digest(result['proposal']),
                               transition_id=result['proposal']['transition_id'], execution_authorized=False)
             else:

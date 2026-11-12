@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "capability": "operator-verification-repair-v1",
+  "validation": {
+    "targeted_tests": {
+      "command": "python3 -m unittest discover -s tests -p test_verification_repair.py",
+      "tests": 9,
+      "elapsed_seconds": 18.517,
+      "result": "PASS"
+    },
+    "full_suite": {
+      "command": "python3 -B -m unittest discover -s tests",
+      "environment": "Python 3.12 in Docker; source mounted read-only; isolated temporary caches; AI keys not passed",
+      "tests": 1126,
+      "unique_test_ids": 1126,
+      "elapsed_seconds": 698.832,
+      "result": "PASS"
+    },
+    "coverage": [
+      "Real I1/I2 generation, durable candidate capture, cumulative counters and exhausted task",
+      "Native run_phase_dev restores the old candidate, charges exactly one new invocation and revalidates completed owners before accepting the repaired task",
+      "Original source bytes, failed attempts, invocation history and deadline are retained",
+      "Quality commands, required flags and coverage cannot change; timeout increases are limited to observed timed-out checks and the existing invocation timeout",
+      "Other profile limits and obligations cannot change; ordinary scope authorization cannot borrow timeout recovery",
+      "Missing exact authorization fields and changed prepared quality are refused",
+      "Selector crash and replay do not duplicate activation or reset counters",
+      "Existing feedback authority, requests and role responses remain unchanged; receipt reconciliation fences dispatch and counts manual scope once",
+      "CLI preview is read-only and grants no execution authority"
+    ],
+    "A5_recovery_benchmark": {
+      "command": "python3 -I ssdlc_replay_gate.py --output recovery-benchmark.json",
+      "corpus": "i2-recovery-v2",
+      "cases": 12,
+      "failed_cases": 0,
+      "result": "PASS"
+    }
+  },
+  "limitations": [
+    "The default attempt ceiling increases by one for every uncompleted task, including pending tasks; this requires explicit review",
+    "Task-specific check timeouts cannot change through this capability",
+    "No production targets, extra money, clocks, role allowances or automatic delegation capacity are granted",
+    "These are offline simulated-provider tests, not acceptance evidence or activation of issue 22",
+    "Candidate fixture and functional defects still require development and fresh native verification"
+  ],
+  "provider_calls": 0,
+  "historical_run_modified": false
+}
