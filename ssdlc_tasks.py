@@ -1272,30 +1272,138 @@ class TaskScheduler:
                 print(f"[task-dev] Failed {check['check_id']}: exit={check['exit_code']}, empty_suite={check['empty_suite']}", flush=True)
                 log_retry_reason('task-dev', diagnostic_excerpt(path.read_text(), 3000), path)
 
-    def _repair_context(self, record: dict) -> dict | None:
+    @staticmethod
+    def _scrub_prompt(value):
+        """Deterministic recursive redaction, including identifiers and mapping keys."""
+        secrets = sorted({v for k, v in os.environ.items()
+                          if re.search(r'KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL', k, re.I)
+                          and len(v) >= 8}, key=lambda v: (-len(v), v))
+        def scrub(text):
+            text = re.sub(r'-----BEGIN [^-]+-----.*?-----END [^-]+-----',
+                          '[REDACTED]', text, flags=re.S)
+            for secret in secrets:
+                text = text.replace(secret, '[REDACTED]')
+            return re.sub(r'sk-[A-Za-z0-9_-]+|ghp_[A-Za-z0-9]+|AKIA[A-Z0-9]+|Bearer\s+[A-Za-z0-9._~+/-]+=*',
+                          '[REDACTED]', text, flags=re.I)
+        if isinstance(value, str):
+            return scrub(value)
+        if isinstance(value, list):
+            return [TaskScheduler._scrub_prompt(v) for v in value]
+        if isinstance(value, dict):
+            return {scrub(k): TaskScheduler._scrub_prompt(v) for k, v in value.items()}
+        return value
+
+    def _repair_context(self, record: dict, corrective=None) -> dict | None:
         failures = record.get('failed_attempts', [])[record.get('failed_floor', 0):]
-        if not failures:
+        if failures and failures[-1].get('category') != 'CHECK_FAILURE':
+            raise DevelopmentBlocked('DEVELOPER_INVOCATION', 'Previous failure is terminal')
+        if not failures and corrective is None:
             return None
-        latest = failures[-1]
-        context = copy.deepcopy(latest)
-        context['history'] = [{k: item[k] for k in ('attempt', 'category', 'checks', 'diff_ref', 'diff_sha256')}
-                              for item in failures]
-        remaining = 24000
-        for check in context['checks']:
-            if not check['exit_code'] and not check['empty_suite']:
-                continue
-            path = confined(self.directory, check['log_ref'], protect=False)
-            if not path.is_file() or file_hash(path) != check['sha256']:
-                raise TaskError('Repair verification evidence changed or disappeared')
-            text = path.read_text()
-            limit = min(6000, remaining)
-            check['log_excerpt'] = diagnostic_excerpt(text, limit)
-            check['log_truncated'] = len(text) > limit
-            remaining -= len(check['log_excerpt'])
-        context['instruction'] = ('Repair the restored previous candidate in place. Preserve working behavior and tests. '
-                                  'The log excerpts are bounded; full logs remain at their recorded evidence references. '
-                                  'Do not weaken checks or expand scope to pass verification.')
-        return context
+        source = corrective or {}
+        omitted = len(set(source) - {'findings', 'registered_evidence', 'txn_id', 'phase', 'reviewed_commit', 'candidate_proof'})
+        omitted += sum(f.get('category') != 'CHECK_FAILURE' for f in failures)
+        failures = [f for f in failures if f.get('category') == 'CHECK_FAILURE']
+        def select(values, predicate):
+            nonlocal omitted
+            result = []
+            for value in values if isinstance(values, list) else []:
+                if predicate(value):
+                    result.append(value)
+                else:
+                    omitted += 1
+            return result
+        registered = source.get('registered_evidence', {})
+        registered = {k: v for k, v in registered.items()
+                      if isinstance(k, str) and isinstance(v, str) and re.fullmatch(r'[a-f0-9]{64}', v)}
+        ids = set(self._plan_index())
+        paths = {p for t in self.plan['tasks'] for p in t['target_files']}
+        obligations = set()
+        for text in self.context.values():
+            if isinstance(text, str):
+                try:
+                    obligations.update(requirement_catalogue(text)['required_ids'])
+                except CatalogueError:
+                    pass
+        def safe_path(value):
+            if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9_./-]{1,200}', value) or value not in paths:
+                return False
+            try:
+                confined(self.wt, value, protect=False)
+                return True
+            except (TaskError, ValueError):
+                return False
+        findings = []
+        for finding in source.get('findings', []):
+            item = {}
+            rules = {'id': lambda v: isinstance(v, str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', v),
+                     'severity': lambda v: v in ('critical', 'high', 'medium', 'low', 'info'),
+                     'classification': lambda v: v in ('mandatory_violation_or_regression', 'necessary_gap', 'optional_improvement', 'uncertain_needs_diagnosis')}
+            for key, value in finding.items():
+                if key in rules and rules[key](value):
+                    item[key] = value
+                elif key in ('task_attribution', 'file_refs', 'obligation_refs', 'evidence_refs'):
+                    allowed = {'task_attribution': lambda v: isinstance(v, str) and v in ids,
+                               'file_refs': safe_path,
+                               'obligation_refs': lambda v: isinstance(v, str) and v in obligations,
+                               'evidence_refs': lambda v: isinstance(v, str) and v in registered}
+                    item[key] = select(value, allowed[key])
+                    if key == 'evidence_refs':
+                        item[key] = [dict(ref=v, sha256=registered[v]) for v in item[key]]
+                elif key in ('violates_existing_obligation', 'introduces_regression', 'necessary_for_requested_correctness') and type(value) is bool:
+                    item[key] = value
+                else:
+                    omitted += 1
+            findings.append(item)
+        check_ids = {c['check_id'] for c in self.quality.get('checks', [])}
+        check_ids.update(c['check_id'] for t in self.plan['tasks']
+                         for c in t.get('verification', {}).get('checks', []))
+        history = []
+        for failure in failures:
+            checks = []
+            for check in failure.get('checks', []):
+                if (check.get('check_id') not in check_ids
+                        or type(check.get('exit_code')) is not int
+                        or type(check.get('empty_suite')) is not bool
+                        or not isinstance(check.get('log_ref'), str)
+                        or not re.fullmatch(r'[A-Za-z0-9_./-]{1,200}', check['log_ref'])
+                        or not isinstance(check.get('sha256'), str)
+                        or not re.fullmatch(r'[a-f0-9]{64}', check['sha256'])):
+                    omitted += 1
+                    continue
+                confined(self.directory, check['log_ref'], protect=False)
+                item = {k: check[k] for k in ('check_id', 'exit_code', 'empty_suite', 'log_ref', 'sha256')}
+                omitted += len(set(check) - set(item))
+                ref = item['log_ref']
+                proof = next((p for p in source.get('candidate_proof', [])
+                              if p.get('check_id') == item['check_id']
+                              and p.get('log_ref') == ref
+                              and p.get('log_sha256') == item['sha256']
+                              and isinstance(p.get('record_ref'), str)
+                              and re.fullmatch(r'[A-Za-z0-9_./-]{1,200}', p['record_ref'])
+                              and p.get('record_sha256') is not None
+                              and registered.get(p['record_ref']) == p['record_sha256']), None)
+                if proof:
+                    item.update(log_ref=proof['record_ref'], sha256=proof['record_sha256'])
+                elif registered.get(ref) != item['sha256']:
+                    path = confined(self.directory, ref, protect=False)
+                    if not path.is_file() or file_hash(path) != item['sha256']:
+                        raise TaskError('Repair verification evidence changed or disappeared')
+                    item['log_excerpt'] = self._scrub_prompt(path.read_text())[:2000]
+                checks.append(item)
+            omitted += len(set(failure) - {'attempt', 'category', 'checks'})
+            history.append(dict(attempt=failure['attempt'], category='CHECK_FAILURE', checks=checks))
+        result = dict(findings=findings, history=history, omitted_count=omitted)
+        if history:
+            result.update(history[-1])
+        for key, pattern in (('txn_id', r'[A-Za-z0-9_-]{1,64}'),
+                             ('phase', r'code_review|qa|appsec'),
+                             ('reviewed_commit', r'[a-f0-9]{40,64}')):
+            value = source.get(key)
+            if isinstance(value, str) and re.fullmatch(pattern, value):
+                result[key] = value
+            elif value is not None:
+                result['omitted_count'] += 1
+        return self._scrub_prompt(result)
 
     def _restore_candidate(self, task: dict, record: dict, *, protocol_recovery=False) -> None:
         failures = record.get('failed_attempts', [])[record.get('failed_floor', 0):]
@@ -1418,13 +1526,17 @@ class TaskScheduler:
             self.state['bootstrap'].update(status='PROVEN', proven_head=head)
             self._save('BOOTSTRAP_PROVEN')
 
-    def _developer_prompt(self, task, record):
-        repair = self._repair_context(record)
-        return ('Implement only this task, reusing project conventions. Do not commit, change Git metadata, '
+    def _developer_prompt(self, task, record, corrective=None):
+        repair = self._repair_context(record, corrective)
+        encoded = json.dumps(repair, indent=2)
+        if len(encoded) > 12000:
+            raise TaskError("Corrective context exceeds 12000 characters")
+        return self._scrub_prompt(('Implement only this task, reusing project conventions. Do not commit, change Git metadata, '
                   'or modify protected SSDLC artifacts. Stay within target_files. '
                   'Finish all source and test edits before starting verification. Do not edit files while '
                   'a test command is running; the suite checks controller integrity and concurrent edits invalidate it. '
-                  'If repair context is supplied, the previous failed candidate is already restored: repair it in place. '
+                  'If repair context is supplied, the previous failed candidate is already restored. '
+                  'Repair the restored previous candidate in place. '
                   'When ready for independent verification, end with TASK_DEV_STATUS: COMPLETE. '
                   'If completion requires changes outside target_files, end with TASK_DEV_STATUS: SCOPE_REQUIRED. '
                   'For a missing environment prerequisite, end with TASK_DEV_STATUS: ENVIRONMENT_BLOCKED. '
@@ -1433,8 +1545,14 @@ class TaskScheduler:
                   + json.dumps(self.quality, indent=2) + '\nAPPROVED CONTEXT:\n'
                   + json.dumps(self.context, indent=2) + '\nDEPENDENCY CHECKPOINTS:\n'
                   + json.dumps({dep: self.state['tasks'][dep]['commit'] for dep in task['depends_on']})
-                  + '\nREPAIR CONTEXT:\n' + json.dumps(repair, indent=2)
-                  + ('\nPREVIOUS FAILURE:\n' + record.get('failure', '') if repair is None else ''))
+                  + '\nREPAIR CONTEXT:\n' + encoded))
+
+    @staticmethod
+    def _assert_prompt_bound(prompt):
+        context = prompt.split('\nREPAIR CONTEXT:\n', 1)[-1]
+        if len(context) > 12000:
+            raise TaskError('Corrective context exceeds 12000 characters')
+        assert len(context) <= 12000
 
     def _capture_binding(self, task, record):
         historical = self.state.get('historical_capture_bindings', {}).get(task['task_id'], {}).get(str(record['attempts']))
@@ -1495,6 +1613,7 @@ class TaskScheduler:
         self._finish_attempt(task, record, result, attempt_dir)
 
     def _capture_developer(self, task, record, prompt, attempt_dir):
+        self._assert_prompt_bound(prompt)
         from ssdlc_candidates import CandidateStore, CandidateError, checkout, git_identity, inventory, overlay
         from ssdlc_recovery import NotDispatched
         workspace = attempt_dir / 'developer-workspace'
@@ -1506,6 +1625,7 @@ class TaskScheduler:
             record['status'] = 'RUNNING'
             self._save('TASK_STARTED')
             try:
+                self._assert_prompt_bound(prompt)
                 result = self.developer(task, record['attempts'], prompt, workspace)
                 result = dict(result, termination='returned')
             except NotDispatched:
@@ -1870,6 +1990,7 @@ class TaskScheduler:
 
     def repair(self, ordered, roots, corrective, *, txn_id, on_step):
         """Repair selected roots and verify their closure under one scheduler lock."""
+        corrective = dict(corrective, txn_id=txn_id)
         with ticket_lock(self.directory / 'scheduler.lock'):
             self.guard()
             self.state = self.journal.load()
@@ -1989,12 +2110,13 @@ class TaskScheduler:
             else:
                 self._save('TASK_STARTED')
             attempt_dir = self._attempt_directory(task, record)
-            prompt = self._developer_prompt(task, record)
+            prompt = self._developer_prompt(task, record, corrective)
             print(f"[task-dev] {task['task_id']} attempt {attempt}/{self.max_attempts}: "
                   + (f"repairing archived attempt {repair['attempt']}" if repair else 'implementing from verified checkpoint'), flush=True)
             if self.isolate_candidates:
                 result = self._capture_developer(task, record, prompt, attempt_dir)
             else:
+                self._assert_prompt_bound(prompt)
                 result = self.developer(task, attempt, prompt)
             self._finish_attempt(task, record, result, attempt_dir, strict_scope=strict_scope)
             if record['status'] == 'COMPLETED':
