@@ -383,7 +383,9 @@ class PreviewTests(GateFixture):
 
     def test_docs_required_facts_and_limits(self):
         root = Path(orchestrator.__file__).parent
-        for name in ('README.md', 'PLAN_TASK_ROUTING_AND_SUBGOALS.md'):
+        # The README is a landing page; the facts live in the guide it links.
+        self.assertIn('(docs/bounce-preview.md)', (root / 'README.md').read_text())
+        for name in ('docs/bounce-preview.md', 'PLAN_TASK_ROUTING_AND_SUBGOALS.md'):
             text = (root / name).read_text()
             if name.startswith('PLAN_'):
                 text = text.split('## 12. Stato del bootstrap progressivo', 1)[1]
