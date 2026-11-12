@@ -609,6 +609,9 @@ class TaskScheduler:
 
     def _save(self, event: str) -> None:
         self.journal.append(event, self.state)
+        boundary = getattr(self, 'corrective_boundary', None)
+        if boundary is not None:
+            boundary(event)
 
     def _assert_candidate_runtime(self, state):
         for tid, floor in self.historical_task_floors.items():
@@ -639,7 +642,6 @@ class TaskScheduler:
 
     def _closure(self, roots: set[str]) -> tuple[list[str], dict[str, int]]:
         tasks = self._plan_index()
-        order = {tid: index for index, tid in enumerate(tasks)}
         reverse = {tid: [] for tid in tasks}
         try:
             for tid, task in tasks.items():
@@ -647,8 +649,18 @@ class TaskScheduler:
                     if dependency not in tasks:
                         raise TaskError('Plan has unknown dependency')
                     reverse[dependency].append(tid)
+            pending, completed, topological = dict(tasks), set(), []
+            while pending:
+                ready = sorted(tid for tid, task in pending.items() if set(task['depends_on']) <= completed)
+                if not ready:
+                    raise TaskError('Plan dependencies are cyclic')
+                for tid in ready:
+                    topological.append(tid)
+                    completed.add(tid)
+                    del pending[tid]
         except (KeyError, TypeError) as exc:
             raise TaskError('Malformed plan') from exc
+        order = {tid: index for index, tid in enumerate(topological)}
         visited = set(roots)
         pending = deque(roots)
         while pending:
@@ -656,7 +668,7 @@ class TaskScheduler:
                 if dependent not in visited:
                     visited.add(dependent)
                     pending.append(dependent)
-        return [tid for tid in tasks if tid in visited], order
+        return [tid for tid in topological if tid in visited], order
 
     def _require_all_completed(self, state: dict) -> None:
         tasks = self._plan_index()
@@ -1016,7 +1028,7 @@ class TaskScheduler:
         self._assert_evidence_dir(path)
 
     def _verify(self, task: dict, record: dict, attempt_dir: Path, event='CHECK_FINISHED',
-                before_check=None, after_check=None, exclusive=False) -> list[dict]:
+                before_check=None, after_check=None, exclusive=False, mutation_watch=None) -> list[dict]:
         checks = self._check_plan(task)
         results = []
         for index, check in enumerate(checks):
@@ -1068,7 +1080,11 @@ class TaskScheduler:
             results.append({'check_id': check['check_id'], 'exit_code': rc, 'empty_suite': empty,
                             'log_ref': str(log.relative_to(self.directory)), 'sha256': file_hash(log)})
             record['checks'] = results
+            if mutation_watch is not None and mutation_watch():
+                record['mutation_observed'] = True
             self._save(event)
+            if record.get('mutation_observed'):
+                return results
             if after_check is not None:
                 after_check(index, results[-1])
             self.guard()
@@ -1220,7 +1236,7 @@ class TaskScheduler:
         problems = self._inventory_problems(self.state)
         allowed = set()
         for tid, record in self.state['tasks'].items():
-            if tid == active and record['status'] in ('RUNNING', 'VERIFYING'):
+            if tid == active and record['status'] in ('RUNNING', 'VERIFYING', 'DISPATCH_RESERVED', 'CANDIDATE_CAPTURED'):
                 # A status label alone does not establish an active corrective
                 # generation. Ordinary retained evidence must still fail closed.
                 repairs = record.get('repairs', [])
@@ -1251,7 +1267,9 @@ class TaskScheduler:
         directory.mkdir(parents=True, exist_ok=False)
         protected = self._protected()
         print(f'[task-dev] Checkpoint preflight in {self.wt}; no developer attempts consumed.', flush=True)
-        results = self._verify({'verification': {'checks': []}}, record, directory)
+        watch = (lambda: self._protected() != protected or self._changed()
+                 or self._ignored() != self.state['ignored_paths']) if getattr(self, 'corrective_boundary', None) else None
+        results = self._verify({'verification': {'checks': []}}, record, directory, mutation_watch=watch)
         if self._protected() != protected or self._changed() or self._ignored() != self.state['ignored_paths']:
             record['status'] = 'MUTATED'
             self._save('PREFLIGHT_BLOCKED')
@@ -1392,7 +1410,18 @@ class TaskScheduler:
                 checks.append(item)
             omitted += len(set(failure) - {'attempt', 'category', 'checks'})
             history.append(dict(attempt=failure['attempt'], category='CHECK_FAILURE', checks=checks))
+        references = []
+        for proof in source.get('candidate_proof', []):
+            if (proof.get('check_id') in check_ids
+                    and registered.get(proof.get('record_ref')) == proof.get('record_sha256')
+                    and registered.get(proof.get('log_ref')) == proof.get('log_sha256')
+                    and all(isinstance(proof.get(key), str) for key in
+                            ('record_ref', 'record_sha256', 'log_ref', 'log_sha256'))):
+                references.append({key: proof[key] for key in
+                    ('check_id', 'record_ref', 'record_sha256', 'log_ref', 'log_sha256')})
         result = dict(findings=findings, history=history, omitted_count=omitted)
+        if references:
+            result['candidate_proof'] = references
         if history:
             result.update(history[-1])
         for key, pattern in (('txn_id', r'[A-Za-z0-9_-]{1,64}'),
@@ -1480,7 +1509,7 @@ class TaskScheduler:
         self._rollback_attempt(record, changed)
         self._log_failed_checks(results)
 
-    def _rollback_attempt(self, record: dict, changed: list[str]) -> None:
+    def _restore_attempt_paths(self, record: dict, changed: list[str]) -> None:
         for path in changed:
             tracked = subprocess.run(['git', '--literal-pathspecs', 'cat-file', '-e', f'{record["start_commit"]}:{path}'], cwd=self.wt, capture_output=True).returncode == 0
             if tracked:
@@ -1493,6 +1522,9 @@ class TaskScheduler:
                     target.unlink()
         if self._changed():
             raise TaskError('Attempt rollback left unexpected changes')
+
+    def _rollback_attempt(self, record: dict, changed: list[str]) -> None:
+        self._restore_attempt_paths(record, changed)
         self._save('ATTEMPT_RESTORED')
 
     def _complete_intent(self, task: dict, record: dict) -> None:
@@ -1512,6 +1544,9 @@ class TaskScheduler:
             else:
                 git(self.wt, 'commit', '-m', record['commit_message'])
             head = git(self.wt, 'rev-parse', 'HEAD')
+            fault = getattr(self, 'corrective_fault', None)
+            if fault:
+                fault('repair.after_git_commit_before_complete')
         if (git(self.wt, 'rev-parse', 'HEAD^') != parent or git(self.wt, 'rev-parse', 'HEAD^{tree}') != tree
                 or record['commit_message'] != git(self.wt, 'log', '-1', '--format=%B') or self._changed()):
             raise TaskError('Checkpoint differs from verified content; manual reconciliation required')
@@ -1585,20 +1620,25 @@ class TaskScheduler:
             atomic_json(path, manifest)
         return directory
 
-    def _resume_reserved(self, task, record):
-        """A reserved invocation has never crossed TASK_STARTED/provider dispatch."""
+    def _assert_reserved_source(self, record):
+        """Accept only the exact restored candidate preceding a safe reservation."""
         self._assert_tree()
-        self.guard()
-        self.dispatch_budget()
         if self._ignored() != self.state['ignored_paths']:
             raise TaskError('Ignored source changed before reserved dispatch')
         if self._changed():
-            previous = record.get('failed_attempts', [])
-            if (not previous or git(self.wt, 'write-tree') != previous[-1]['tree']
+            previous = record.get('failed_attempts', [])[record.get('failed_floor', 0):]
+            if (not previous or previous[-1]['category'] != 'CHECK_FAILURE'
+                    or git(self.wt, 'write-tree') != previous[-1]['tree']
                     or git(self.wt, 'diff', '--name-only')
                     or sorted(self._changed()) != sorted(previous[-1]['changed_files'])):
                 raise TaskError('Reserved dispatch source needs explicit reconciliation')
-        else:
+
+    def _resume_reserved(self, task, record, corrective=None):
+        """A reserved invocation has never crossed TASK_STARTED/provider dispatch."""
+        self._assert_reserved_source(record)
+        self.guard()
+        self.dispatch_budget()
+        if not self._changed():
             self._restore_candidate(task, record)
         attempt_dir = self._attempt_directory(task, record)
         if (attempt_dir / 'capture').exists():
@@ -1609,8 +1649,8 @@ class TaskScheduler:
                 raise TaskError('Reserved workspace is unsafe')
             # Preserve interrupted host preparation, never silently delete it.
             os.rename(workspace, attempt_dir / ('interrupted-preparation-' + uuid.uuid4().hex))
-        result = self._capture_developer(task, record, self._developer_prompt(task, record), attempt_dir)
-        self._finish_attempt(task, record, result, attempt_dir)
+        result = self._capture_developer(task, record, self._developer_prompt(task, record, corrective), attempt_dir)
+        self._finish_attempt(task, record, result, attempt_dir, strict_scope=corrective is not None)
 
     def _capture_developer(self, task, record, prompt, attempt_dir):
         self._assert_prompt_bound(prompt)
@@ -1624,6 +1664,8 @@ class TaskScheduler:
             metadata = git_identity(workspace)
             record['status'] = 'RUNNING'
             self._save('TASK_STARTED')
+            if getattr(self, 'corrective_boundary', None):
+                self.dispatch_budget()
             try:
                 self._assert_prompt_bound(prompt)
                 result = self.developer(task, record['attempts'], prompt, workspace)
@@ -1776,6 +1818,9 @@ class TaskScheduler:
                         or developer_blocker(result['output']) == 'SCOPE_REQUIRED')
         if strict_scope and (protected_change or scope_change):
             (attempt_dir / 'implementation.diff').write_text(git(self.wt, 'diff', 'HEAD', '--binary'))
+            self._restore_attempt_paths(record, changed)
+            record.update(status='VERIFYING', checks=[], changed_files=changed)
+            self._save('VERIFYING')
             record.setdefault('failed_attempts', []).append(dict(
                 attempt=record['attempts'], category='PROTECTED_PATH' if protected_change else 'SCOPE_REQUIRED',
                 base_commit=record['start_commit'], changed_files=changed, checks=[],
@@ -2011,9 +2056,16 @@ class TaskScheduler:
             for tid in roots:
                 rec = self.state['tasks'][tid]
                 done = rec['status'] == 'COMPLETED' and rec.get('repairs', [{}])[-1].get('txn_id') == txn_id
-                if not done and rec['attempts'] >= self.max_attempts:
+                reserved = self.isolate_candidates and rec['status'] == 'DISPATCH_RESERVED'
+                if not done and (rec['attempts'] > self.max_attempts
+                                 or rec['attempts'] == self.max_attempts and not reserved):
                     raise TaskError('attempts_exhausted')
-            self._assert_clean()
+            reserved = [self.state['tasks'][tid] for tid in roots
+                        if self.state['tasks'][tid]['status'] == 'DISPATCH_RESERVED']
+            if self.isolate_candidates and len(reserved) == 1 and self._changed():
+                self._assert_reserved_source(reserved[0])
+            else:
+                self._assert_clean()
             runs = self.state.setdefault('revalidation_runs', [])
             run = next((r for r in runs if r.get('txn_id') == txn_id), None)
             if run is None:
@@ -2048,13 +2100,24 @@ class TaskScheduler:
                         record['failed_floor'] = len(record.get('failed_attempts', []))
                     if record['status'] in ('RUNNING', 'VERIFYING'):
                         raise TaskError('uncertain_dispatch')
+                    if getattr(self, 'corrective_boundary', None):
+                        step('REPAIR_RESERVED', root=tid, closure_index=index)
+                    self.budget()
                     try:
                         if record['status'] == 'COMMIT_INTENT':
                             self._complete_intent(tasks[tid], record)
+                        elif record['status'] == 'DISPATCH_RESERVED':
+                            self._resume_reserved(tasks[tid], record, corrective)
+                            if record['status'] != 'COMPLETED':
+                                self._execute_task(tasks[tid], record, corrective=corrective, strict_scope=True)
                         else:
                             self._execute_task(tasks[tid], record, corrective=corrective, strict_scope=True)
                     except DevelopmentBlocked as exc:
+                        if exc.category in ('LIMIT_REACHED', 'OUTCOME_UNCERTAIN', 'GIT_LOCK_UNOWNED'):
+                            raise
                         step('REPAIR_BLOCKED', root=tid, category=exc.category)
+                        if exc.category == 'SCOPE_REQUIRED':
+                            raise TaskError('scope_changed') from exc
                         raise TaskError('repair_failed') from exc
                     step('REPAIR_COMMITTED', root=tid, commit=record['commit'], closure_index=index)
                 elif record['status'] != 'COMPLETED':
@@ -2068,17 +2131,15 @@ class TaskScheduler:
                 self._finalize_txn_run(run)
                 step('REVALIDATION_RUN_FINISHED')
             preflight = run.get('final_preflight')
-            if preflight is not None:
-                if (preflight >= len(self.state.get('preflights', []))
-                        or self.state['preflights'][preflight]['status'] != 'PASSED'):
-                    raise TaskError('final_checkpoint_failed')
-            else:
+            if preflight is not None and preflight < len(self.state.get('preflights', [])) and self.state['preflights'][preflight]['status'] in ('FAILED', 'MUTATED'):
+                raise TaskError('final_checkpoint_failed')
+            if preflight is None or self.state['preflights'][preflight]['status'] == 'RUNNING':
                 self.budget()
                 run['final_preflight'] = len(self.state.get('preflights', []))
                 try:
                     self._preflight()
                 except DevelopmentBlocked as exc:
-                    step('PREFLIGHT_FAILED_RECORDED', status=self.state['preflights'][-1]['status'])
+                    step('PREFLIGHT_FAILED_RECORDED', preflight_status=self.state['preflights'][-1]['status'])
                     raise TaskError('final_checkpoint_failed') from exc
                 step('FINAL_PREFLIGHT_PASSED')
             if self._inventory_problems(self.state):
@@ -2103,6 +2164,7 @@ class TaskScheduler:
                           protected_snapshot=self._protected())
             if self.isolate_candidates:
                 record.pop('capture_sha256', None)
+                record.pop('capture_rejection', None)
             if self.isolate_candidates:
                 record.update(status='DISPATCH_RESERVED', invocation_id=uuid.uuid4().hex)
                 record.pop('producer', None)
@@ -2117,7 +2179,12 @@ class TaskScheduler:
                 result = self._capture_developer(task, record, prompt, attempt_dir)
             else:
                 self._assert_prompt_bound(prompt)
+                if getattr(self, 'corrective_boundary', None):
+                    self.dispatch_budget()
                 result = self.developer(task, attempt, prompt)
+            fault = getattr(self, 'corrective_fault', None)
+            if fault:
+                fault('repair.after_dispatch_before_verify')
             self._finish_attempt(task, record, result, attempt_dir, strict_scope=strict_scope)
             if record['status'] == 'COMPLETED':
                 break

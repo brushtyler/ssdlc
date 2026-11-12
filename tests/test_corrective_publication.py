@@ -12,7 +12,8 @@ from unittest.mock import Mock, patch
 
 import orchestrator
 import ssdlc_corrective as corrective
-from ssdlc_tasks import TaskError
+from ssdlc_tasks import TaskError, ticket_lock
+from test_gate_reports import GateFixture
 
 
 class Crash(BaseException):
@@ -156,6 +157,7 @@ class LimitsTests(unittest.TestCase):
                         ssdlc_root=Path(directory), state={'artifacts': artifacts},
                         PHASE_ORDER=orchestrator.SSDLCOrchestrator.PHASE_ORDER,
                         _ensure_task_plan=lambda: None,
+                        _reconcile_open_txn=Mock(return_value=None),
                         run_phase_dev=Mock(side_effect=RuntimeError('reached_dev')))
                     with patch.dict('os.environ', {'SSDLC_MAX_DEV_RETRIES': '3',
                                                   'SSDLC_BUDGET_CAP_USD': 'invalid'}), \
@@ -165,21 +167,22 @@ class LimitsTests(unittest.TestCase):
                                 pipeline, 'goal', from_phase='03-dev')
                     pipeline.run_phase_dev.assert_called_once_with()
 
-    def test_gate_setup_with_transaction_uses_frozen_ceiling(self):
-        with tempfile.TemporaryDirectory() as directory:
-            pipeline = SimpleNamespace(
-                ssdlc_root=Path(directory),
-                state={'artifacts': {'bounce-txn/test/transaction.json': {}}},
-                PHASE_ORDER=orchestrator.SSDLCOrchestrator.PHASE_ORDER,
-                _ensure_task_plan=lambda: None,
-                _corrective_limits=Mock(return_value={'gate_round_ceiling': 1}),
-                run_phase_dev=Mock(side_effect=RuntimeError('reached_dev')))
-            with patch.dict('os.environ', {'SSDLC_MAX_DEV_RETRIES': '0'}), \
-                 patch.object(orchestrator._dispatch_local, 'limits', None, create=True):
-                with self.assertRaisesRegex(RuntimeError, 'reached_dev'):
-                    orchestrator.SSDLCOrchestrator._run_pipeline(
-                        pipeline, 'goal', from_phase='03-dev')
-            pipeline._corrective_limits.assert_called_once_with()
+    def test_existing_transaction_reconciles_before_development(self):
+        fixture = GateFixture()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        pipeline = fixture.orch
+        pipeline.state['artifacts']['bounce-txn/test/transaction.json'] = {}
+        pipeline._save_state()
+        with patch.object(pipeline, '_reconcile_open_txn',
+                          side_effect=RuntimeError('reached_reconcile'), create=True) as reconcile, \
+             patch.object(pipeline, 'run_phase_dev',
+                          side_effect=AssertionError('ordinary development must not run')) as develop:
+            with ticket_lock(pipeline.ticket_lock_path), \
+                 self.assertRaisesRegex(RuntimeError, 'reached_reconcile'):
+                pipeline._run_pipeline('goal', from_phase='03-dev')
+            reconcile.assert_called_once_with()
+            develop.assert_not_called()
 
     def test_raised_disabled_and_lowered_limits(self):
         txns = [{'limits': dict(max_attempts=3, gate_round_ceiling=2, budget_cap_usd=8)}]

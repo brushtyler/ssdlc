@@ -381,11 +381,14 @@ class DeliveryDisclosureTests(unittest.TestCase):
                      patch.object(owner, 'run_phase_dev') as developer, \
                      patch.object(owner, 'run_phase_review', return_value=(False, 'rejected')), \
                      patch.object(owner, '_stop_on_terminal_gate'), patch.object(owner, 'check_budget_circuit_breaker'), \
-                     patch.object(owner, 'compile_evidence_pack', return_value=root / 'evidence.md'):
-                    with self.assertRaisesRegex(TaskError, 'explicit invalidation'):
-                        owner._run_pipeline('offline', from_phase='03-dev')
-                # A frozen two-round ceiling cannot authorize free-text repair.
+                     patch.object(owner, '_corrective_round', return_value={'next_gate_attempt': 2}) as repair, \
+                     patch.object(owner, '_corrective_limits', return_value={'gate_round_ceiling': 9}), \
+                     patch.object(owner, 'compile_evidence_pack', return_value=root / 'evidence.md') as pack:
+                    owner._run_pipeline('offline', from_phase='03-dev')
+                # Frozen policy bounds the outer cycle even if local limits are broader.
                 self.assertEqual(developer.call_count, 1)
+                repair.assert_called_once_with('04-review', 1)
+                pack.assert_called_once_with(ready_for_signoff=False)
                 envelope['policy']['development_attempts'] = 1
                 developer.reset_mock()
                 with patch.dict('os.environ', {'SSDLC_MAX_DEV_RETRIES': '9'}), \

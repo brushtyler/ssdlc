@@ -96,7 +96,9 @@ def verify_evidence(record, root, registry, *, inputs_sha256=None,
 
 
 EVENT_KINDS = frozenset('TASKS_INVALIDATED ATTEMPT_RESTORED TASK_STARTED VERIFYING CHECK_FINISHED ATTEMPT_FAILED COMMIT_INTENT TASK_COMPLETED REVALIDATION_STARTED REVALIDATION_TASK_STARTED REVALIDATION_CHECK_STARTED REVALIDATION_CHECK_FINISHED REVALIDATION_TASK_PASSED REVALIDATION_TASK_FAILED REVALIDATION_TASK_BLOCKED REVALIDATION_ABORTED REVALIDATION_FINISHED REVALIDATION_INTERRUPTED PREFLIGHT_STARTED PREFLIGHT_PASSED PREFLIGHT_BLOCKED'.split())
-FORBIDDEN_KINDS = frozenset('INITIALIZED PROTOCOL_RECOVERY_RESERVED PROTOCOL_RECOVERY_VERIFYING PROTOCOL_RECOVERY_FAILED PREFLIGHT_BOOTSTRAP_EXEMPT BOOTSTRAP_PROVEN DISPATCH_RESERVED DISPATCH_PROVEN_NOT_STARTED CAPTURE_INTEGRITY_REJECTED CANDIDATE_CAPTURED CAPTURE_REJECTION_RECOVERED CAPTURE_VERIFICATION_STARTED'.split())
+FORBIDDEN_KINDS = frozenset('INITIALIZED PROTOCOL_RECOVERY_RESERVED PROTOCOL_RECOVERY_VERIFYING PROTOCOL_RECOVERY_FAILED PREFLIGHT_BOOTSTRAP_EXEMPT BOOTSTRAP_PROVEN'.split())
+NATIVE_CAPTURE_KINDS = frozenset('DISPATCH_RESERVED DISPATCH_PROVEN_NOT_STARTED CAPTURE_INTEGRITY_REJECTED CANDIDATE_CAPTURED CAPTURE_REJECTION_RECOVERED CAPTURE_VERIFICATION_STARTED'.split())
+EVENT_KINDS = EVENT_KINDS | NATIVE_CAPTURE_KINDS
 TRANSITIONS = {}
 for states, kind, target, effect in [
     ('G', 'TASKS_INVALIDATED', 'T_PRE', 'E1'),
@@ -126,6 +128,17 @@ for states, kind, target, effect in [
         TRANSITIONS[state, kind] = (target, effect)
 for state in ('T_PRE', 'T', 'D_RUN', 'D_CHECK', 'DONE'):
     TRANSITIONS[state, 'REVALIDATION_INTERRUPTED'] = ('T' if state.startswith('D_') else state, 'E7')
+
+
+# Native isolation uses a reserved dispatch and immutable capture receipts.
+# Recovery still stops in R_RUN/R_VER; none of these events permits redispatch.
+for state in ('T', 'R_READY', 'R_FAILED'):
+    TRANSITIONS[state, 'DISPATCH_RESERVED'] = ('R_RESERVED', 'E5')
+TRANSITIONS['R_RESERVED', 'TASK_STARTED'] = ('R_RUN', 'native_start')
+TRANSITIONS['R_RUN', 'DISPATCH_PROVEN_NOT_STARTED'] = ('R_RESERVED', 'capture')
+for kind in NATIVE_CAPTURE_KINDS - {'DISPATCH_RESERVED', 'CAPTURE_VERIFICATION_STARTED', 'DISPATCH_PROVEN_NOT_STARTED'}:
+    TRANSITIONS['R_RUN', kind] = ('R_RUN', 'capture')
+TRANSITIONS['R_VER', 'CAPTURE_VERIFICATION_STARTED'] = ('R_VER', 'capture_verify')
 
 
 def _require(condition):
@@ -184,7 +197,7 @@ def walk_lineage(anchor, events, closure, roots, limits):
         _require(growth == (1 if kind == 'PREFLIGHT_STARTED' else 0))
         tid = closure[index] if index < len(closure) else None
         rec, old = tasks.get(tid, {}), pred.get(tid, {})
-        if kind in ('TASK_STARTED', 'ATTEMPT_RESTORED', 'VERIFYING', 'ATTEMPT_FAILED', 'COMMIT_INTENT', 'TASK_COMPLETED') or (kind == 'CHECK_FINISHED' and mode == 'R_VER'):
+        if kind in ('TASK_STARTED', 'DISPATCH_RESERVED', 'ATTEMPT_RESTORED', 'VERIFYING', 'ATTEMPT_FAILED', 'COMMIT_INTENT', 'TASK_COMPLETED') or (kind == 'CHECK_FINISHED' and mode == 'R_VER'):
             _require(tid in roots)
             _require(all(tasks[t] == pred[t] for t in tasks if t != tid))
         if effect == 'E1':
@@ -198,7 +211,7 @@ def walk_lineage(anchor, events, closure, roots, limits):
             _require(run['txn_id'] == anchor['txn_id'] and run['status'] == 'RUNNING')
         elif effect == 'E5':
             _require(rec['attempts'] == old['attempts'] + 1 <= limits['max_attempts'])
-            _require(rec['status'] == 'RUNNING' and rec['checks'] == [])
+            _require(rec['status'] == ('DISPATCH_RESERVED' if kind == 'DISPATCH_RESERVED' else 'RUNNING') and rec['checks'] == [])
             if mode == 'R_FAILED':
                 _require(rolled and old['failed_attempts'][-1]['category'] == 'CHECK_FAILURE')
             counts[tid] += 1
@@ -207,6 +220,14 @@ def walk_lineage(anchor, events, closure, roots, limits):
             _require(rec['attempts'] == old['attempts'] and rec.get('failed_attempts') == old.get('failed_attempts'))
             _require(len(rec.get('failed_attempts', [])) > rec.get('failed_floor', 0))
             rolled = effect == 'E8r'
+        elif effect == 'native_start':
+            _require(rec['attempts'] == old['attempts'] and rec['status'] == 'RUNNING' and rec['checks'] == [])
+        elif effect in ('capture', 'capture_verify'):
+            _require(rec['attempts'] == old['attempts'])
+            _require(all(tasks[t] == pred[t] for t in tasks if t != tid))
+            expected_status = ('VERIFYING' if effect == 'capture_verify' else
+                               'DISPATCH_RESERVED' if kind == 'DISPATCH_PROVEN_NOT_STARTED' else 'CANDIDATE_CAPTURED')
+            _require(rec['status'] == expected_status)
         elif effect == 'status':
             _require(rec['status'] == 'VERIFYING' and rec['attempts'] == old['attempts'])
         elif effect == 'E8':
@@ -216,7 +237,7 @@ def walk_lineage(anchor, events, closure, roots, limits):
             f = failures[-1]
             _require(f.get('diff_ref') and f.get('diff_sha256') and f.get('category'))
             _require(f['checks'] == rec['checks'])
-            if f['category'] in ('CHECK_FAILURE', 'REPAIR_STALLED'):
+            if f['category'] in ('CHECK_FAILURE', 'REPAIR_STALLED', 'ENVIRONMENT_DIAGNOSIS'):
                 _require(_checks(rec['checks']))
             else:
                 _require(rec['checks'] == [])
@@ -287,7 +308,7 @@ def verify_lineage(path, anchor, closure, roots, limits):
 def derive_substate(automaton_state, record, git_obs):
     walk = automaton_state if isinstance(automaton_state, dict) else dict(state=automaton_state)
     mode = walk['state']
-    mapping = dict(G='IDLE', T_PRE='IDLE', T='IDLE', DONE='IDLE', FIN_RUN='IDLE', R_READY='RESERVED', R_RUN='RUNNING', R_VER='VERIFYING', R_INTENT='COMMIT_INTENT', D_RUN='DEPENDENT_REVALIDATING', D_CHECK='DEPENDENT_REVALIDATING', D_FAIL='DEPENDENT_FAILED', F_OPEN='PREFLIGHT_OPEN', F_PASSED='PREFLIGHT_PASSED_UNACKED', F_BLOCKED='PREFLIGHT_FAILED')
+    mapping = dict(G='IDLE', T_PRE='IDLE', T='IDLE', DONE='IDLE', FIN_RUN='IDLE', R_READY='RESERVED', R_RESERVED='RESERVED', R_RUN='RUNNING', R_VER='VERIFYING', R_INTENT='COMMIT_INTENT', D_RUN='DEPENDENT_REVALIDATING', D_CHECK='DEPENDENT_REVALIDATING', D_FAIL='DEPENDENT_FAILED', F_OPEN='PREFLIGHT_OPEN', F_PASSED='PREFLIGHT_PASSED_UNACKED', F_BLOCKED='PREFLIGHT_FAILED')
     if mode == 'R_FAILED':
         category = record['failed_attempts'][-1]['category']
         sub = 'FAILED_UNROLLED' if not walk.get('rolled') else ('FAILED_ROLLED' if category == 'CHECK_FAILURE' else 'FAILED_UNVERIFIED')
@@ -298,7 +319,7 @@ def derive_substate(automaton_state, record, git_obs):
             raise CorrectiveError('txn_record_conflict')
     conflict(sub is not None)
     expected = git_obs['expected_head']
-    dirty_allowed = mode in ('R_RUN', 'R_VER', 'R_FAILED') and sub != 'FAILED_UNVERIFIED' and not walk.get('rolled')
+    dirty_allowed = mode in ('R_RUN', 'R_VER', 'R_FAILED', 'R_RESERVED') and sub != 'FAILED_UNVERIFIED' and not walk.get('rolled')
     if mode == 'R_INTENT':
         conflict(record.get('status') == 'COMMIT_INTENT' and record.get('start_commit') == expected)
         before = git_obs['head'] == expected and git_obs.get('index_tree') == record.get('candidate_tree') and not git_obs.get('unstaged') and set(git_obs.get('changed_files', [])) == set(record.get('changed_files', []))
@@ -306,12 +327,15 @@ def derive_substate(automaton_state, record, git_obs):
         conflict(before or after)
     else:
         conflict(git_obs['head'] == expected)
-        mutated = mode == 'F_BLOCKED' and record.get('preflights', [{}])[-1].get('status') == 'MUTATED'
+        mutated = (mode == 'F_BLOCKED' and record.get('preflights', [{}])[-1].get('status') == 'MUTATED'
+                   or mode == 'F_OPEN' and record.get('preflights', [{}])[-1].get('mutation_observed') is True)
         conflict(git_obs.get('clean') or dirty_allowed or mutated)
         if dirty_allowed:
             conflict(set(git_obs.get('changed_files', [])) <= set(git_obs.get('target_files', [])))
+    if mode == 'R_RESERVED':
+        conflict(record.get('status') == 'DISPATCH_RESERVED' and record.get('checks') == [])
     if mode in ('R_RUN', 'R_VER'):
-        conflict(record.get('status') == ('RUNNING' if mode == 'R_RUN' else 'VERIFYING'))
+        conflict(record.get('status') in (('RUNNING', 'DISPATCH_RESERVED', 'CANDIDATE_CAPTURED') if mode == 'R_RUN' else ('VERIFYING',)))
         conflict(mode != 'R_RUN' or record.get('checks') == [])
     if mode in ('F_OPEN', 'F_PASSED', 'F_BLOCKED'):
         p = record['preflights'][-1]
@@ -354,15 +378,26 @@ def plan_next(txn_state, walk_result, observed):
         return 'publish_step_' + str(observed.get('publish_step', 1)) if not observed.get('published') else 'complete'
     if mode == 'T':
         return 'reserve_repair' if observed.get('is_root') else 'verify_dependent'
-    return dict(G='apply_invalidation', T_PRE='ack_invalidation' if status == 'INVALIDATING' else 'reserve_repair', R_READY='reserve_repair', R_FAILED='reserve_repair', DONE='finalize_run', FIN_RUN='final_preflight').get(mode, 'refuse')
+    return dict(G='apply_invalidation', T_PRE='ack_invalidation' if status == 'INVALIDATING' else 'reserve_repair', R_READY='reserve_repair', R_RESERVED='reserve_repair', R_FAILED='reserve_repair', DONE='finalize_run', FIN_RUN='final_preflight').get(mode, 'refuse')
 
 
-def effective_limits(env, txns):
-    attempts = int(env.get('SSDLC_MAX_DEV_RETRIES', '3'))
+def effective_limits(env, txns, *, policy=None, combined_cap=None):
+    # A bounded I2 run has explicit cumulative authority. Legacy tier defaults
+    # apply only without that policy; environment settings may still tighten it.
+    default_attempts = policy['development_attempts'] if policy is not None else 3
+    attempts = int(env.get('SSDLC_MAX_DEV_RETRIES', str(default_attempts)))
+    if policy is not None:
+        attempts = min(attempts, default_attempts)
     tier = (env.get('risk_tier') or 'M').upper()
     raw = env.get('SSDLC_BUDGET_CAP_USD', '').strip()
-    cap = float(raw) if raw else {'S': 3., 'M': 6., 'L': 20.}.get(tier, 6.)
+    default_cap = (policy['metered_usd'] + policy['cli_estimate_usd'] if policy is not None
+                   else {'S': 3., 'M': 6., 'L': 20.}.get(tier, 6.))
+    cap = float(raw) if raw else default_cap
     caps = [cap] if cap > 0 else []
+    if policy is not None:
+        caps.append(default_cap)
+    if combined_cap is not None:
+        caps.append(combined_cap)
     rounds = attempts
     for txn in txns:
         limits = txn['limits']

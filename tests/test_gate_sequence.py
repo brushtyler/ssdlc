@@ -19,7 +19,7 @@ class SequenceTests(checkpoint.FullCheckpointReviewTests):
         legacy = SimpleNamespace(
             ssdlc_root=self.repo / '.ssdlc/legacy', state={},
             PHASE_ORDER=checkpoint.SSDLCOrchestrator.PHASE_ORDER,
-            _ensure_task_plan=lambda: None, run_phase_dev=develop)
+            _ensure_task_plan=lambda: None, _reconcile_open_txn=lambda: None, run_phase_dev=develop)
         with patch('orchestrator.candidate_reports.reconcile_candidate_store') as reconcile:
             with self.assertRaisesRegex(RuntimeError, 'reached_dev'):
                 checkpoint.SSDLCOrchestrator._run_pipeline(legacy, 'goal', from_phase='03-dev')

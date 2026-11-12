@@ -73,8 +73,16 @@ def select_response(evaluator_dir_listing):
 
 def validate_controls(gate, controls, scanner_status=None):
     keys = {'review': set(), 'qa': {'det_ok'}, 'appsec': {'scanners'}}
-    if (gate not in keys or type(controls) is not dict or
-            set(controls) != keys[gate] or any(type(v) is not bool for v in controls.values())):
+    if gate not in keys or type(controls) is not dict:
+        raise BounceError('malformed_record')
+    # Native typed-check evidence supplements the legacy gate controls. Keep
+    # their original boolean contract and reject every other field/value.
+    if set(controls) not in (keys[gate], keys[gate] | {'candidate_checks'}):
+        raise BounceError('malformed_record')
+    if any(type(controls[k]) is not bool for k in keys[gate]):
+        raise BounceError('malformed_record')
+    if 'candidate_checks' in controls and (type(controls['candidate_checks']) is not str
+            or controls['candidate_checks'] not in ('passed', 'failed', 'unmet')):
         raise BounceError('malformed_record')
     if gate == 'appsec':
         if (type(scanner_status) is not dict or type(scanner_status.get('scanners')) is not list or
@@ -157,7 +165,7 @@ def plan_bounce(*, repo, plan, requirements_text, quality, reviewed_commit,
                                   ('diagnosis', 'diagnosis_required'),
                                   ('optional_observations', 'optional_observations')):
                 result[target].extend(ids[f] for f in getattr(assessment, field))
-            if not all(controls.values()):
+            if any(v is not True and v != 'passed' for v in controls.values()):
                 block('control_failed', identity)
             verdict = e['verdict']
             if verdict not in {'review': ('APPROVED', 'CHANGES_REQUESTED'),

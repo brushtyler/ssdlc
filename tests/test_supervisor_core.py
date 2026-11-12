@@ -973,6 +973,7 @@ class TestCompletionModeAndForegroundRegressions(CoreCase):
         root = self.repo / '.ssdlc/T-1'
         fake = types.SimpleNamespace(ssdlc_root=root, state={},
             PHASE_ORDER=o.SSDLCOrchestrator.PHASE_ORDER, _ensure_task_plan=lambda: None,
+            _reconcile_open_txn=lambda: None,
             run_phase_dev=lambda **kwargs: (_ for _ in ()).throw(RuntimeError('reached_dev')))
         with self.assertRaisesRegex(RuntimeError, 'reached_dev'), contextlib.redirect_stdout(io.StringIO()):
             o.SSDLCOrchestrator._run_pipeline(fake, 'goal', from_phase='03-dev')

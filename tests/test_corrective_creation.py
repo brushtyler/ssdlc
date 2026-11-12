@@ -34,7 +34,7 @@ class CreationTests(GateFixture):
 
     def execute(self, preview):
         with ticket_lock(self.orch.ticket_lock_path):
-            return self.orch._execute_corrective('04-review', 1, preview)
+            return self.orch._create_corrective('04-review', 1, preview)
 
     def events(self):
         return [json.loads(line) for line in self.journal.path.read_text().splitlines()]
@@ -250,7 +250,8 @@ class CreationTests(GateFixture):
 
     def test_corrective_round_uses_locked_preview_without_lock_reentry(self):
         self.run_review(lambda *a, **k: (framed('review', self.orch, [finding()]), 0, 0, 0, 'fake'))
-        with ticket_lock(self.orch.ticket_lock_path):
+        with ticket_lock(self.orch.ticket_lock_path), \
+             patch.object(self.orch, '_execute_corrective', self.orch._create_corrective):
             result = self.orch._corrective_round('04-review', 1)
         self.assertEqual(result['status'], 'INVALIDATED')
 
