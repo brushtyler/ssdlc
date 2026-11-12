@@ -101,9 +101,71 @@ removes only the recorded staged worktree. It never removes the selected parent.
 
 ## Remaining boundaries
 
-This rule does not merge/split tasks, alter requirements, loosen checks, change
+The ordinary scope-only rule does not merge/split tasks, alter requirements, loosen checks, change
 verification environments, grant attempts or raise budgets. Arbitrary controller
 migration, invalidated-task recovery and automatic replanning still require their
 own compatibility rules. Final review/QA/AppSec and delivery requirements remain
 those of the original run. #36 separately tracks native phase-boundary stops and
 retaining failed-baseline diagnostics during I1/I2 preparation.
+
+## Operator repair after a verification timeout
+
+`operator-verification-repair-v1` is a separate, exact operator capability for a
+single failed task with a durable, quiescent candidate and an observed verifier
+timeout (`ENVIRONMENT_DIAGNOSIS`, check exit 124). Other failed checks must have
+exit 0 or 124. It is not an automatic retry and does not reinterpret a timeout
+as a successful test run.
+
+The proposal may add at most four literal Python test paths to that task, grant
+exactly one next attempt when the current attempt allowance is exhausted, and
+increase timeouts of quality checks that actually timed out. The check command,
+working directory, requirement coverage, required status and all other quality
+fields stay identical. Each new timeout is bounded by the existing invocation
+timeout. Existing owner obligations are inherited and require exact coverage
+review and fresh candidate checks, including separately reviewed fixture edits.
+Production source already in the task manifest can be repaired by its next
+developer; this capability cannot add production targets.
+
+`development_attempts` is the run's default ceiling, so its one-step increase
+also applies to other uncompleted tasks. Their counters are not reset. For
+example, changing 4 to 5 gives an exhausted T12 only attempt 5, while a pending
+T13 receives the new default ceiling of 5. Review this effect explicitly.
+
+Budget caps, historical unknown-usage reserves, invocation and role caps,
+deadline, invocation timeout, transport retries and automatic feedback grants
+cannot change. Consumed attempts, failed-attempt records, captures and usage
+remain historical facts. A new development call consumes the next attempt and
+one invocation; preview, preparation and activation dispatch no model.
+
+Prepare `PLAN`, `QUALITY` and `PROFILE` from the stopped generation. `PLAN` is
+the ordinary scope-only addition; `QUALITY` changes only observed timeouts;
+`PROFILE` differs only in `development_attempts`, increased by exactly one.
+Preview and prepare use the existing CLI with a separate capability:
+
+```bash
+./ssdlc continuation-scope-preview --repo TARGET --ticket TICKET \
+  --plan PLAN --reason REASON \
+  --verification-repair-quality QUALITY --verification-repair-profile PROFILE
+
+./ssdlc continuation-scope-prepare --repo TARGET --ticket TICKET \
+  --plan PLAN --reason REASON --review REVIEW \
+  --verification-repair-quality QUALITY --verification-repair-profile PROFILE
+```
+
+The independent review binds the preview's exact subject, scope diff and owner
+coverage contract. The ordinary fenced authorization additionally requires the
+proposal's `profile_sha256`, `quality_contract_sha256`,
+`verification_repair_sha256`, and `authorize_extensions: true`. Ordinary scope
+or owner-feedback consent cannot authorize this operation. Activation and
+discard use the existing commands; resume still uses native
+`run --from-phase 03-dev` and the run's previously agreed phase boundary.
+
+If feedback recording already exists, the source must be an admitted generation.
+Its authority, requests and funded responses remain immutable. A separate manual
+receipt counts the added scope against cumulative amendment/file consumption,
+even when the operator explicitly exceeds the automatic grant. Automatic grants
+are not enlarged. The selected generation remains fenced until that receipt is
+reconciled; replay creates neither a second receipt nor another extension.
+
+This repairs execution capacity and reviewed scope. It neither establishes code
+correctness nor replaces final review, QA, AppSec or integration evidence.

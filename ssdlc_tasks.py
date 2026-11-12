@@ -1241,7 +1241,10 @@ class TaskScheduler:
         if not authority or self.scope_reconciliations.get(authority.get('task_id')) != authority:
             return False
         failures = record.get('failed_attempts', [])
-        return bool(failures and failures[-1]['category'] in {'SCOPE_REQUIRED', 'CHECK_FAILURE'}
+        admitted_timeout = (authority.get('verification_repair', {}).get('capability')
+                            == 'operator-verification-repair-v1')
+        return bool(failures and (failures[-1]['category'] in {'SCOPE_REQUIRED', 'CHECK_FAILURE'}
+                                 or admitted_timeout and failures[-1]['category'] == 'ENVIRONMENT_DIAGNOSIS')
                     and digest(failures[-1]) == authority['failure_sha256']
                     and digest(self.plan) == authority['plan_sha256'])
 

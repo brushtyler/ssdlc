@@ -591,6 +591,7 @@ class FeedbackStore:
                     operator_owner_amendments=len(state.get('owner_amendments', [])),
                     operator_owner_allowances=sum('operator_allowance' in r for r in state.get('owner_amendments', [])),
                     operator_owner_recoveries=sum('operator_recovery' in r for r in state.get('owner_amendments', [])),
+                    operator_verification_repairs=sum('verification_repair' in r for r in state.get('owner_amendments', [])),
                     repair_returns=len(state.get('repair_returns', [])),
                     operator_repair_returns=sum(r['operator'] for r in state.get('repair_returns', [])))
 
