@@ -78,12 +78,12 @@ class VerificationRepairTests(unittest.TestCase):
             historical_task_floors=envelope['binding'].get('task_floors'),
             scope_reconciliations=envelope['binding'].get('scope_reconciliations'))
 
-    def value(self, quality=None, profile=None, plan=None):
+    def value(self, quality=None, profile=None, plan=None, deadline_at=None):
         return subject(self.source, plan or self.plan, quality or self.quality,
-                       profile or self.profile, self.reason)
+                       profile or self.profile, self.reason, deadline_at=deadline_at)
 
-    def stage(self, **kwargs):
-        value = self.value()
+    def stage(self, deadline_at=None, **kwargs):
+        value = self.value(deadline_at=deadline_at)
         changes = []
         if 'tests/test_extra.py' in value['owner_revalidation']['files']:
             changes = [dict(path='tests/test_extra.py',
@@ -94,26 +94,46 @@ class VerificationRepairTests(unittest.TestCase):
             report=dict(verdict='APPROVED', findings=[]), scope_diff=value['scope_diff'],
             owner_coverage=dict(contract_sha256=digest(value['owner_revalidation']),
                                 coverage_preserved=True, approved_test_changes=changes))
+        verification = dict(quality=self.quality, profile=self.profile)
+        if deadline_at is not None: verification['deadline_at'] = deadline_at
         return prepare(self.ticket, self.repo, self.plan, review, self.reason,
             runtime_identity=self.identity, controller_snapshot=self.controller,
-            verification_repair=dict(quality=self.quality, profile=self.profile), **kwargs)
+            verification_repair=verification, **kwargs)
 
     def auth(self, staged):
         p = staged['proposal']
-        return dict(schema_version=1, transition_id=p['transition_id'], proposal_sha256=digest(p),
+        value = dict(schema_version=1, transition_id=p['transition_id'], proposal_sha256=digest(p),
             authorized=True, source_fenced=True, authorize_extensions=True,
             old_controller_sha256=p['old_controller_sha256'], new_controller_sha256=p['new_controller_sha256'],
             scope_diff_sha256=digest(p['scope_diff']), profile_sha256=p['profile_sha256'],
             quality_contract_sha256=p['quality_contract_sha256'],
             verification_repair_sha256=p['verification_repair_sha256'])
+        if 'deadline_extension_sha256' in p:
+            value.update(deadline_extension_sha256=p['deadline_extension_sha256'], authorize_deadline_extension=True)
+        return value
 
     def test_native_development_restores_candidate_and_revalidates_owners(self):
+        self.native_development()
+
+    def test_native_development_after_expiry_uses_the_extended_bound(self):
+        self.native_development(extend_deadline=True)
+
+    def native_development(self, extend_deadline=False):
+        deadline = self.source['counters']['deadline_at']
+        if extend_deadline:
+            self.profile['wall_seconds'] += 3600
+            options = dict(deadline_at=deadline + 3600, clock=lambda: deadline + 1)
+        else:
+            options = {}
         original = {ref: (self.root / ref).read_bytes() for ref in self.source['files']}
-        staged = self.stage(); activate(self.ticket, staged['preparation'], self.auth(staged))
+        staged = self.stage(**options)
+        activate(self.ticket, staged['preparation'], self.auth(staged),
+                 **({'clock': options['clock']} if extend_deadline else {}))
         root = runtime_root(self.ticket)
         envelope, counters = LimitsStore(root)._load(repair=False)
         self.assertEqual(envelope['policy'], self.profile)
-        self.assertEqual(counters, dict(self.source['counters'], policy_sha256=digest(envelope)))
+        self.assertEqual(counters, dict(self.source['counters'],
+            deadline_at=deadline + (3600 if extend_deadline else 0), policy_sha256=digest(envelope)))
         self.assertEqual(TaskJournal(root / '03-dev/tasks').peek()['tasks']['T2']['attempts'], 1)
         import orchestrator
         dispatches = []; timeouts = []
@@ -127,7 +147,11 @@ class VerificationRepairTests(unittest.TestCase):
         def verifier(argv, cwd, timeout, **kwargs):
             timeouts.append(timeout)
             return 'Ran 1 test\nOK', '', 0
-        with (patch.object(orchestrator.ProjectRuntimeIsolation, 'activate', return_value={'project_id':'offline'}),
+        original_init = LimitsStore.__init__
+        def init_with_clock(store, root, *args, **kwargs):
+            return original_init(store, root, clock=options['clock'])
+        timed = patch.object(LimitsStore, '__init__', init_with_clock) if extend_deadline else contextlib.nullcontext()
+        with (timed, patch.object(orchestrator.ProjectRuntimeIsolation, 'activate', return_value={'project_id':'offline'}),
               patch.object(orchestrator.ProjectRuntimeIsolation, 'ensure_trusted_path'),
               patch.object(orchestrator, 'assert_controller'),
               patch.object(orchestrator.SSDLCOrchestrator, '_verification_environment', return_value=self.identity['environment']),
@@ -278,3 +302,60 @@ class VerificationRepairTests(unittest.TestCase):
         self.assertFalse(result['execution_authorized'])
         self.assertEqual(result['model_dispatches'], 0)
         self.assertFalse((self.ticket / 'execution/pending.json').exists())
+
+    def test_expired_source_admits_exact_deadline_without_resetting_elapsed_history(self):
+        old = self.source['counters']; extension = 3600
+        now = old['deadline_at'] + 1
+        self.profile['wall_seconds'] += extension
+        with self.assertRaisesRegex(TaskError, 'wall-time exhausted'):
+            LimitsStore(self.root, clock=lambda: now).require_capacity('03-dev', '03-dev')
+        staged = self.stage(deadline_at=old['deadline_at'] + extension, clock=lambda: now)
+        original = {ref: (self.root / ref).read_bytes() for ref in self.source['files']}
+        selected = activate(self.ticket, staged['preparation'], self.auth(staged), clock=lambda: now)
+        root = runtime_root(self.ticket); store = LimitsStore(root, clock=lambda: now)
+        envelope, counters = store._load(repair=False)
+        store.require_capacity('03-dev', '03-dev')
+        self.assertEqual(counters['started_at'], old['started_at'])
+        self.assertEqual(counters['deadline_at'], old['deadline_at'] + extension)
+        self.assertEqual(envelope['binding']['accounting_anchor'], self.source['envelope']['binding']['accounting_anchor'])
+        self.assertEqual(counters, dict(old, deadline_at=old['deadline_at'] + extension, policy_sha256=digest(envelope)))
+        self.assertEqual({ref: (self.root / ref).read_bytes() for ref in original}, original)
+        self.assertEqual(TaskJournal(root/'03-dev/tasks').peek()['tasks']['T2']['attempts'], 1)
+        self.assertEqual(activate(self.ticket, staged['preparation'], self.auth(staged), clock=lambda: now), selected)
+        self.assertEqual(self.calls, [1])
+
+    def test_deadline_requires_extra_exact_authorization_and_future_capacity(self):
+        old = self.source['counters']['deadline_at']; self.profile['wall_seconds'] += 3600
+        staged = self.stage(deadline_at=old + 3600, clock=lambda: old + 1)
+        auth = self.auth(staged)
+        for field in ('deadline_extension_sha256', 'authorize_deadline_extension'):
+            wrong = dict(auth); wrong.pop(field)
+            with self.subTest(field=field), self.assertRaises(TaskError):
+                activate(self.ticket, staged['preparation'], wrong, clock=lambda: old + 1)
+        with self.assertRaisesRegex(TaskError, 'wall-time exhausted'):
+            activate(self.ticket, staged['preparation'], auth, clock=lambda: old + 3601)
+        self.assertEqual(json.loads((self.ticket/'execution/active.json').read_text()), self.source['parent_selector'])
+
+    def test_deadline_cannot_borrow_v1_or_hide_other_limit_changes(self):
+        old = self.source['counters']['deadline_at']; self.profile['wall_seconds'] += 3600
+        with self.assertRaises(TaskError): self.value()
+        for deadline in (old, old - 1, old + 1800, old + 3600.5, True, float('inf')):
+            with self.subTest(deadline=deadline), self.assertRaises(TaskError): self.value(deadline_at=deadline)
+        self.profile['metered_usd'] += 1
+        with self.assertRaises(TaskError): self.value(deadline_at=old + 3600)
+
+    def test_native_deadline_counter_and_extension_chain_tampering_are_refused(self):
+        old = self.source['counters']['deadline_at']; self.profile['wall_seconds'] += 3600
+        staged = self.stage(deadline_at=old + 3600)
+        activate(self.ticket, staged['preparation'], self.auth(staged))
+        root = runtime_root(self.ticket); store = LimitsStore(root)
+        _, counters = store._load(repair=False)
+        store.journal.load(); store.journal.append('TAMPERED_DEADLINE', dict(counters, deadline_at=old + 7200))
+        with self.assertRaisesRegex(TaskError, 'anchor changed'): store._load(repair=False)
+        from ssdlc_deadline_extensions import accounting_anchor
+        envelope = copy.deepcopy(self.source['envelope'])
+        envelope['binding']['deadline_extensions'] = [self.value(deadline_at=old + 3600)['verification_repair']['deadline_extension']]
+        envelope['policy'] = self.profile
+        self.assertEqual(accounting_anchor(envelope)['deadline_at'], old + 3600)
+        envelope['binding']['deadline_extensions'][0]['started_at'] += 1
+        with self.assertRaises(TaskError): accounting_anchor(envelope)

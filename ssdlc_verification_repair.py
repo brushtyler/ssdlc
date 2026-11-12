@@ -1,7 +1,8 @@
 """Exact operator admission after a captured verifier timeout.
 
 This grants one repair attempt, literal test scope and longer timed-out quality
-checks. It never changes test commands, acceptance criteria, money or clocks.
+checks. A separate capability may extend the deadline. Test commands,
+acceptance criteria, money and consumed history stay unchanged.
 """
 import copy
 
@@ -9,6 +10,8 @@ from ssdlc_tasks import TaskError, digest, validate_document
 
 
 CONTRACT = 'operator-verification-repair-v1'
+CLOCK_CONTRACT = 'operator-verification-repair-deadline-v1'
+CONTRACTS = {CONTRACT, CLOCK_CONTRACT}
 
 
 def require_timeout(source):
@@ -24,7 +27,7 @@ def require_timeout(source):
         raise TaskError('Verification repair requires a quiescent captured verifier timeout')
 
 
-def subject(source, plan, quality, profile, reason):
+def subject(source, plan, quality, profile, reason, *, deadline_at=None):
     from ssdlc_scope_amendments import subject as scope_subject
     require_timeout(source)
     validate_document('quality-contract', quality)
@@ -33,6 +36,11 @@ def subject(source, plan, quality, profile, reason):
     row = source['journal']['tasks'][source['task_id']]
     expected = copy.deepcopy(old_profile)
     expected['development_attempts'] += 1
+    extension = None
+    if deadline_at is not None:
+        from ssdlc_deadline_extensions import specification
+        extension = specification(source, profile, deadline_at)
+        expected['wall_seconds'] = profile['wall_seconds']
     if row['attempts'] != old_profile['development_attempts'] or profile != expected:
         raise TaskError('Verification repair permits exactly one exhausted development attempt; other limits stay frozen')
     value = scope_subject(source, plan, reason)
@@ -60,6 +68,8 @@ def subject(source, plan, quality, profile, reason):
         old_quality_sha256=digest(old), new_quality_sha256=digest(quality),
         old_profile_sha256=digest(old_profile), new_profile_sha256=digest(profile),
         timeout_changes=changes, consumed_attempts=row['attempts'])
+    if extension is not None:
+        value['verification_repair'].update(capability=CLOCK_CONTRACT, deadline_extension=extension)
     from ssdlc_feedback import FeedbackStore
     store = FeedbackStore(source['root'].parent.parent)
     if store.root.exists():
@@ -75,15 +85,21 @@ def subject(source, plan, quality, profile, reason):
 def validate_binding(proposal, recipe):
     value = recipe['subject'].get('verification_repair')
     if value is None:
-        if proposal.get('authorization_contract') == CONTRACT:
+        if proposal.get('authorization_contract') in CONTRACTS:
             raise TaskError('Verification repair capability is missing')
         return
-    if (proposal.get('authorization_contract') != CONTRACT
+    capability = value.get('capability')
+    if (capability not in CONTRACTS or proposal.get('authorization_contract') != capability
             or proposal.get('verification_repair_sha256') != digest(value)
             or proposal.get('quality_contract_sha256') != value['new_quality_sha256']
             or proposal.get('profile_sha256') != value['new_profile_sha256']
             or digest(recipe['envelope']['policy']) != value['new_profile_sha256']):
         raise TaskError('Verification repair differs from its exact quality/profile capability')
+    extension = value.get('deadline_extension')
+    if ((extension is not None) != (capability == CLOCK_CONTRACT)
+            or extension is not None and proposal.get('deadline_extension_sha256') != digest(extension)
+            or extension is None and 'deadline_extension_sha256' in proposal):
+        raise TaskError('Deadline extension requires its separate exact capability')
 
 
 def _receipt(proposal, recipe, projection):

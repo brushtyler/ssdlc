@@ -202,7 +202,7 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
         with transition_lock(source['root'] / '03-dev/tasks/scheduler.lock', held_locks):
             guard()
             if verification_repair is not None and (not isinstance(verification_repair, dict)
-                    or set(verification_repair) != {'quality', 'profile'}
+                    or set(verification_repair) not in ({'quality', 'profile'}, {'quality', 'profile', 'deadline_at'})
                     or any(x is not None for x in (delegation, profile_update, repair_return,
                         feedback_request_id, operator_owner_limit, operator_recovery_profile))
                     or reconcile_feedback_evidence):
@@ -251,7 +251,8 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
             elif verification_repair is not None:
                 from ssdlc_verification_repair import subject as verification_subject
                 reviewed = verification_subject(source, plan, verification_repair['quality'],
-                                                verification_repair['profile'], reason)
+                                                verification_repair['profile'], reason,
+                                                deadline_at=verification_repair.get('deadline_at'))
             elif operator_recovery_profile is not None:
                 from ssdlc_operator_recovery import subject as recovery_subject
                 reviewed = recovery_subject(source, plan, reason, profile=operator_recovery_profile,
@@ -289,10 +290,16 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                 raise TransitionError('Controller snapshot does not match the proposed runtime')
             quality = verification_repair['quality'] if verification_repair else source['quality']
             limits = LimitsStore(source['root'], clock)
-            limits.check(source['counters'], source['envelope']['policy'])
-            limits.require_capacity('03-dev', '03-dev')
             attempt_profile = (verification_repair['profile'] if verification_repair else
                                operator_recovery_profile or source['envelope']['policy'])
+            extension = reviewed.get('verification_repair', {}).get('deadline_extension')
+            if extension is None:
+                limits.check(source['counters'], source['envelope']['policy'])
+                limits.require_capacity('03-dev', '03-dev')
+            else:
+                proposed_envelope = copy.deepcopy(source['envelope']); proposed_envelope['policy'] = attempt_profile
+                proposed_counters = dict(source['counters'], deadline_at=extension['new_deadline_at'])
+                limits.check_capacity(proposed_envelope, proposed_counters, '03-dev', '03-dev')
             if source['journal']['tasks'][source['task_id']]['attempts'] >= attempt_profile['development_attempts']:
                 raise RecoveryStop('LIMIT_REACHED', 'Scope amendment cannot grant another development attempt')
             identity = uuid.uuid4().hex
@@ -342,6 +349,9 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                 if verification_repair is not None:
                     envelope['policy'] = copy.deepcopy(verification_repair['profile'])
                     current['attempt_limit'] = envelope['policy']['development_attempts']
+                    if extension is not None:
+                        envelope['binding'].setdefault('deadline_extensions', []).append(copy.deepcopy(extension))
+                        counters['deadline_at'] = extension['new_deadline_at']
                 envelope['binding'].update(controller=controller_snapshot, reconciliation_id=identity,
                     historical_capture_bindings_sha256=digest(source['capture_bindings']), scope_reconciliations=scope,
                     historical_invocations=copy.deepcopy(counters['invocations']),
@@ -410,10 +420,11 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
                         profile_sha256=digest(operator_recovery_profile),
                         operator_recovery_sha256=digest(reviewed['operator_recovery']))
                 if verification_repair is not None:
-                    from ssdlc_verification_repair import CONTRACT as VERIFICATION_CONTRACT
-                    proposal.update(authorization_contract=VERIFICATION_CONTRACT,
+                    proposal.update(authorization_contract=reviewed['verification_repair']['capability'],
                         profile_sha256=digest(envelope['policy']), quality_contract_sha256=digest(quality),
                         verification_repair_sha256=digest(reviewed['verification_repair']))
+                    if extension is not None:
+                        proposal['deadline_extension_sha256'] = digest(extension)
                 if return_proof is not None:
                     from ssdlc_feedback_return import CONTRACT as RETURN_CONTRACT, OPERATOR_CONTRACT
                     proposal.update(authorization_contract=OPERATOR_CONTRACT if operator else RETURN_CONTRACT,
@@ -441,9 +452,9 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
     proposal, recipe = _read(preparation, 'proposal.json'), _read(preparation, 'recipe.json')
     from ssdlc_operator_recovery import CONTRACT as RECOVERY_CONTRACT, validate_binding as validate_recovery
     validate_recovery(proposal, recipe)
-    from ssdlc_verification_repair import CONTRACT as VERIFICATION_CONTRACT, validate_binding as validate_verification
+    from ssdlc_verification_repair import CONTRACTS as VERIFICATION_CONTRACTS, validate_binding as validate_verification
     validate_verification(proposal, recipe)
-    if proposal.get('authorization_contract') == VERIFICATION_CONTRACT:
+    if proposal.get('authorization_contract') in VERIFICATION_CONTRACTS:
         for ref, sha in proposal['artifacts'].items():
             if file_hash(_regular(preparation, ref)) != sha:
                 raise TransitionError('Prepared verification repair changed')
@@ -454,12 +465,12 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
     delegated = proposal.get('authorization_contract') == CONTRACT
     profile_admission = proposal.get('authorization_contract') == 'feedback-profile-admission-v1'
     operator_recovery = proposal.get('authorization_contract') == RECOVERY_CONTRACT
-    verification_repair = proposal.get('authorization_contract') == VERIFICATION_CONTRACT
+    verification_repair = proposal.get('authorization_contract') in VERIFICATION_CONTRACTS
     from ssdlc_feedback_return import CONTRACTS as RETURN_CONTRACTS, CONTRACT as RETURN_CONTRACT
     repair_return = proposal.get('authorization_contract') in RETURN_CONTRACTS
     repair_delegated = proposal.get('authorization_contract') == RETURN_CONTRACT
     if (preparation != ticket / 'execution' / ('prepared-' + proposal['transition_id'])
-            or proposal.get('authorization_contract') not in {'scope-amendment-v1', CONTRACT, RECOVERY_CONTRACT, VERIFICATION_CONTRACT, 'feedback-profile-admission-v1', *RETURN_CONTRACTS}
+            or proposal.get('authorization_contract') not in {'scope-amendment-v1', CONTRACT, RECOVERY_CONTRACT, *VERIFICATION_CONTRACTS, 'feedback-profile-admission-v1', *RETURN_CONTRACTS}
             or delegated and (not isinstance(delegation, FencedSession) or delegation.ticket != ticket
                               or delegation.root != Path(recipe['source_root']))
             or not delegated and delegation is not None):
@@ -501,7 +512,8 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
                 runtime = ticket / 'execution-runtimes' / proposal['transition_id']
                 if verification_subject(source, _read(runtime, '02-design/plan.json'),
                         _read(runtime, '00-recon/quality-contract.json'), recipe['envelope']['policy'],
-                        recipe['subject']['reason']) != recipe['subject']:
+                        recipe['subject']['reason'], deadline_at=recipe['subject']['verification_repair'].get(
+                            'deadline_extension', {}).get('new_deadline_at')) != recipe['subject']:
                     raise TransitionError('Verification repair source or quality changed after review')
             if 'owner_feedback_sha256' in proposal:
                 subject_builder = subject
@@ -615,6 +627,8 @@ def main(argv=None):
                 help='Exact quality contract with longer observed timed-out checks; requires a separate operator capability')
             command.add_argument('--verification-repair-profile',
                 help='Exact profile granting one repair attempt; all other limits remain unchanged')
+            command.add_argument('--verification-repair-deadline', type=float,
+                help='Exact future Unix deadline; uses a separate explicit deadline-extension capability')
         if name == 'prepare': command.add_argument('--review', required=True)
         if name in {'activate', 'discard'}: command.add_argument('--preparation', required=True)
         if name == 'activate': command.add_argument('--authorization', required=True)
@@ -633,6 +647,10 @@ def main(argv=None):
                 if args.feedback_request or args.operator_owner_limit is not None or args.operator_recovery_profile or args.reconcile_feedback_evidence:
                     raise TransitionError('Verification repair cannot borrow owner-feedback authorization')
                 verification = dict(quality=read(args.verification_repair_quality), profile=read(args.verification_repair_profile))
+                if args.verification_repair_deadline is not None:
+                    verification['deadline_at'] = args.verification_repair_deadline
+            elif args.verification_repair_deadline is not None:
+                raise TransitionError('Deadline extension requires the explicit verification repair quality and profile')
         if args.command in {'continuation-scope-inspect', 'continuation-scope-preview'}:
             with ticket_lock(ticket / 'ticket.lock'):
                 source = inspect(ticket, verification_repair=verification is not None)
@@ -645,7 +663,8 @@ def main(argv=None):
                             extra['profile'] = read(args.operator_recovery_profile)
                         if verification is not None:
                             from ssdlc_verification_repair import subject as verification_subject
-                            value = verification_subject(source, read(args.plan), verification['quality'], verification['profile'], args.reason)
+                            value = verification_subject(source, read(args.plan), verification['quality'], verification['profile'], args.reason,
+                                                         deadline_at=verification.get('deadline_at'))
                         else:
                             value = subject_builder(source, read(args.plan), args.reason, feedback_request_id=args.feedback_request,
                                             reconcile_feedback_evidence=args.reconcile_feedback_evidence,

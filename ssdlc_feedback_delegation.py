@@ -354,7 +354,7 @@ def finalize(session, proposal, recipe, selected, *, fault=lambda point: None):
 
 def ensure_reconciled(ticket, projection, proposal):
     """Read-only native entrypoint fence, including crash after selector replace."""
-    if proposal.get('authorization_contract') == 'operator-verification-repair-v1':
+    if proposal.get('authorization_contract') in {'operator-verification-repair-v1', 'operator-verification-repair-deadline-v1'}:
         from ssdlc_verification_repair import ensure_reconciled as verification_reconciled
         verification_reconciled(ticket, projection, proposal)
         return
