@@ -55,7 +55,7 @@ class StartupJourneys(unified.UnifiedExecutionTests):
             git(self.repo, 'commit', '-m', 'test convention')
         orch = self.make_orchestrator()
         self.active_orch = orch
-        orch.state['specialists_triggered'] = ['APPSEC_SUPPLY_CHAIN_REDTEAM']
+        orch.state['specialists_triggered'] = []
         orch._save_state()
         planned = copy.deepcopy(self.plan)
         planned['base_commit'] = orch.state['base_commit']

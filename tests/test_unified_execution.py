@@ -44,7 +44,7 @@ class UnifiedExecutionTests(fixtures.RepositoryTests):
         git(self.repo, 'add', 'tests/test_app.py')
         git(self.repo, 'commit', '-m', 'test convention')
         orch = self.make_orchestrator()
-        orch.state['specialists_triggered'] = ['APPSEC_SUPPLY_CHAIN_REDTEAM']
+        orch.state['specialists_triggered'] = []
         orch._save_state()
         planned = copy.deepcopy(self.plan)
         planned['base_commit'] = orch.state['base_commit']

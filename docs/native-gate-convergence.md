@@ -32,8 +32,14 @@ rejections and invalidation are recorded in structured decision artifacts.
 
 Checks run before review dispatch, and later QA/AppSec evidence is not demanded
 by that review. Source or controller mutation invalidates proof. Passing checks
-never grant readiness: all configured review, QA and AppSec approvals remain
-required, with the existing structured assessment and blocker rules intact.
+never grant readiness: Review, QA and AppSec approval is required for every tier,
+including an ordinary Tier S run without a specialist trigger. Plan size does
+not waive a global gate. Structured assessment and blocker rules remain active.
+
+Console diagnostics use the same credential redaction as corrective prompts.
+Redaction happens before truncation so a partial secret cannot survive the
+excerpt boundary. Full private evidence and its registered digest are preserved;
+sanitized public attestations remain separate from raw private logs.
 
 ## Diagnosis and history
 

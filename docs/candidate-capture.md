@@ -5,10 +5,13 @@ Scope: [issue #23](https://github.com/brushtyler/ssdlc/issues/23), increment I0 
 autonomous SSDLC delivery demonstration. Offline validation is recorded in
 `docs/evidence/i0-offline-validation.json`; final full-suite CI binds to the PR head.
 
-I0 applies to new task-mode runs. The CLI always selects version 1 capture;
-historical journals without `candidate_isolation: 1` are refused and need the
-explicit migration work in I1. Legacy execution is unchanged. A new controller
-must not be copied into an executing or suspended run as a migration shortcut.
+New task runs use version 1 capture. An admitted sealed task journal retains its
+recorded execution mode: an absent isolation marker denotes the pre-I0 format
+and is not silently converted. A captured journal still requires its recorded
+runtime identity. Controller or bounded-recovery changes require the explicit
+I1/I2 admission path; copying a controller into a suspended run is not migration.
+Historical non-task runs remain readable but cannot execute; see the
+[task-mode compatibility guide](task-mode.md#unified-execution-and-greenfield-bootstrap).
 
 ## Trust and state contract
 

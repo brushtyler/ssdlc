@@ -3586,6 +3586,7 @@ class SSDLCOrchestrator:
             self.check_budget_circuit_breaker()
             limits.require_capacity('03-dev', '03-dev')
         history_authority = limits._load(repair=False)[0]['binding'].get('historical_capture_bindings_sha256') if limits is not None else None
+        saved_scheduler = TaskJournal(self.dir_dev / 'tasks').peek()
         scheduler = TaskScheduler(
             wt, self.dir_dev / "tasks", plan, quality, context, develop,
             verify, guard, verification_budget, dispatch_budget=dispatch_budget,
@@ -3596,8 +3597,11 @@ class SSDLCOrchestrator:
             max_attempts=min(self._corrective_limits()["max_attempts"],
                 limits._load(repair=False)[0]["policy"]["development_attempts"] if limits else self._corrective_limits()["max_attempts"]),
             bootstrap=quality.get("bootstrap"),
-            isolate_candidates=(bool(TaskJournal(self.dir_dev / 'tasks').peek().get('candidate_isolation', 0))
-                                if corrective_run else True),
+            # A new run gets isolation. An admitted sealed run retains its
+            # recorded format, including pre-isolation journals with no marker.
+            # The scheduler still verifies bounded mode and runtime identity.
+            isolate_candidates=(bool(saved_scheduler.get('candidate_isolation', 0))
+                                if saved_scheduler is not None else True),
             recover_timeouts=getattr(_dispatch_local, 'limits', None) is not None,
             runtime_identity={'controller_sha256': digest(controller),
                               'environment': runtime_environment},
@@ -5462,21 +5466,16 @@ To **REJECT** and record feedback (free text authorizes no repair):
                 else:
                     print("    [RESUME] Skipping initial 05-qa execution")
 
-                run_appsec = (
-                    corrective_run or active_tier == "L"
-                    or "APPSEC_SUPPLY_CHAIN_REDTEAM" in self.state.get("specialists_triggered", [])
-                    or from_phase == "05b-appsec"
-                )
-                if run_appsec:
-                    appsec_ok, appsec_report = self.run_phase_appsec(attempt=attempt)
-                    self._stop_on_terminal_gate()
-                    self.check_budget_circuit_breaker()
-                    if not appsec_ok:
-                        if attempt >= max_retries:
-                            break
-                        recovered = self._corrective_round('05b-appsec', attempt)
-                        max_retries = min(max_retries, self._corrective_limits()['gate_round_ceiling'])
-                        continue
+                # Plan size and specialist selection never waive a global gate.
+                appsec_ok, appsec_report = self.run_phase_appsec(attempt=attempt)
+                self._stop_on_terminal_gate()
+                self.check_budget_circuit_breaker()
+                if not appsec_ok:
+                    if attempt >= max_retries:
+                        break
+                    recovered = self._corrective_round('05b-appsec', attempt)
+                    max_retries = min(max_retries, self._corrective_limits()['gate_round_ceiling'])
+                    continue
 
                 if corrective_run:
                     self._approve_corrective_candidate(attempt)

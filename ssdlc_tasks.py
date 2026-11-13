@@ -120,10 +120,31 @@ def file_hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def redact_sensitive(value):
+    """Share deterministic redaction across prompt and console boundaries."""
+    secrets = sorted({v for k, v in os.environ.items()
+                      if re.search(r'KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL', k, re.I)
+                      and len(v) >= 8}, key=lambda v: (-len(v), v))
+    def scrub(text):
+        text = re.sub(r'-----BEGIN [^-]+-----.*?-----END [^-]+-----',
+                      '[REDACTED]', text, flags=re.S)
+        for secret in secrets:
+            text = text.replace(secret, '[REDACTED]')
+        return re.sub(r'sk-[A-Za-z0-9_-]+|ghp_[A-Za-z0-9]+|AKIA[A-Z0-9]+|Bearer\s+[A-Za-z0-9._~+/-]+=*',
+                      '[REDACTED]', text, flags=re.I)
+    if isinstance(value, str):
+        return scrub(value)
+    if isinstance(value, list):
+        return [redact_sensitive(v) for v in value]
+    if isinstance(value, dict):
+        return {scrub(k): redact_sensitive(v) for k, v in value.items()}
+    return value
+
+
 def log_retry_reason(label: str, report: str, path: Path, max_chars: int = 3000) -> None:
-    """Expose the actual critique, with a bounded excerpt and full evidence path."""
-    text = report.strip() or '(Reviewer returned an empty report.)'
-    print(f'[{label}] Full report: {path}', flush=True)
+    """Expose bounded, redacted diagnostics without changing private evidence."""
+    text = redact_sensitive(report).strip() or '(Reviewer returned an empty report.)'
+    print(f'[{redact_sensitive(label)}] Full report: {redact_sensitive(str(path))}', flush=True)
     print(text[:max_chars], flush=True)
     if len(text) > max_chars:
         print(f'[{label}] Excerpt truncated; see the full report above.', flush=True)
@@ -131,6 +152,9 @@ def log_retry_reason(label: str, report: str, path: Path, max_chars: int = 3000)
 
 def diagnostic_excerpt(text: str, limit: int) -> str:
     """Keep the start and final traceback within an explicit prompt/log budget."""
+    # Redact before truncation: cutting a secret first can leave a prefix that
+    # no longer matches the complete environment value or credential pattern.
+    text = redact_sensitive(text)
     if len(text) <= limit:
         return text
     marker = '\n[... excerpt truncated; full log retained ...]\n'
@@ -1334,23 +1358,7 @@ class TaskScheduler:
     @staticmethod
     def _scrub_prompt(value):
         """Deterministic recursive redaction, including identifiers and mapping keys."""
-        secrets = sorted({v for k, v in os.environ.items()
-                          if re.search(r'KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL', k, re.I)
-                          and len(v) >= 8}, key=lambda v: (-len(v), v))
-        def scrub(text):
-            text = re.sub(r'-----BEGIN [^-]+-----.*?-----END [^-]+-----',
-                          '[REDACTED]', text, flags=re.S)
-            for secret in secrets:
-                text = text.replace(secret, '[REDACTED]')
-            return re.sub(r'sk-[A-Za-z0-9_-]+|ghp_[A-Za-z0-9]+|AKIA[A-Z0-9]+|Bearer\s+[A-Za-z0-9._~+/-]+=*',
-                          '[REDACTED]', text, flags=re.I)
-        if isinstance(value, str):
-            return scrub(value)
-        if isinstance(value, list):
-            return [TaskScheduler._scrub_prompt(v) for v in value]
-        if isinstance(value, dict):
-            return {scrub(k): TaskScheduler._scrub_prompt(v) for k, v in value.items()}
-        return value
+        return redact_sensitive(value)
 
     def _repair_context(self, record: dict, corrective=None, task=None) -> dict | None:
         failures = record.get('failed_attempts', [])[record.get('failed_floor', 0):]

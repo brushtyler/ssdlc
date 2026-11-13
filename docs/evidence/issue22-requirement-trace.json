@@ -181,7 +181,8 @@
       "id": "AC-3",
       "test_references": [
         "test_unified_integration.StartupJourneys.test_documented_default_cli_and_tier_s",
-        "test_unified_execution.UnifiedExecutionTests.test_tier_s_two_nodes_are_repaired_before_dispatch"
+        "test_unified_execution.UnifiedExecutionTests.test_tier_s_two_nodes_are_repaired_before_dispatch",
+        "test_review_closure.ReviewClosureTests.test_every_tier_requires_appsec_without_a_specialist_trigger"
       ],
       "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
     },
@@ -326,7 +327,8 @@
       "id": "AC-9",
       "test_references": [
         "test_unified_integration.StartupJourneys.test_existing_task_cli_resume_preserves_seals_attempts_and_budget",
-        "test_unified_execution.UnifiedExecutionTests.test_historical_scheduler_resume_preserves_contract_and_journal_prefix"
+        "test_unified_execution.UnifiedExecutionTests.test_historical_scheduler_resume_preserves_contract_and_journal_prefix",
+        "test_review_closure.ReviewClosureTests.test_pre_isolation_sealed_history_keeps_its_execution_mode"
       ],
       "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
     },
@@ -351,7 +353,9 @@
         "test_repair_prompt.RepairPromptTests.test_credentials_in_approved_context_are_scrubbed_from_full_prompt",
         "test_repair_prompt.RepairPromptTests.test_scrubber_covers_keys_identifiers_and_pem",
         "test_corrective_publication.PublicationTests.test_archive_symlink_escape",
-        "test_corrective_publication.PublicationTests.test_archive_traversal_in_intent"
+        "test_corrective_publication.PublicationTests.test_archive_traversal_in_intent",
+        "test_review_closure.ReviewClosureTests.test_corrective_failed_check_console_redacts_but_keeps_private_evidence",
+        "test_review_closure.ReviewClosureTests.test_corrective_developer_blocker_console_is_redacted"
       ],
       "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
     },
@@ -359,7 +363,8 @@
       "id": "SEC-12",
       "test_references": [
         "test_corrective_executor.ExecutorTests.test_tier_s_always_reruns_appsec_after_repair",
-        "test_unified_integration.CorrectiveJourneys.test_review_root_repair_dependent_revalidation_and_fresh_gates"
+        "test_unified_integration.CorrectiveJourneys.test_review_root_repair_dependent_revalidation_and_fresh_gates",
+        "test_review_closure.ReviewClosureTests.test_every_tier_requires_appsec_without_a_specialist_trigger"
       ],
       "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
     },
@@ -432,7 +437,8 @@
       "id": "NFR-1",
       "test_references": [
         "test_stage_observability.StageObservabilityTests",
-        "test_i2_corrective_integration.NativeI2CorrectiveIntegrationTests"
+        "test_i2_corrective_integration.NativeI2CorrectiveIntegrationTests",
+        "test_review_closure.ReviewClosureTests.test_console_redaction_precedes_excerpt_truncation"
       ],
       "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
     },
