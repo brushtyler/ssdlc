@@ -108,9 +108,14 @@ Private keys are read from `key_dir` (or `$DEVLOOP_APP_KEY_DIR`) as
 `<slug>.<date>.private-key.pem`, the newest one per app, and must have mode `600`. The JWT is
 signed with the `openssl` binary. Tokens stay in the dispatcher: they reach `gh` through
 `GH_TOKEN` and `git push` through an HTTP header in the environment of that single command, never
-through a file or the command line, and the push refuses a URL that git would rewrite. An actor
+through a file or the command line. No other credential can join the push: it refuses a URL that
+an `insteadOf` or `pushInsteadOf` rule would rewrite, allows only the HTTPS transport, and
+disables credential helpers, askpass programs and preconfigured authentication headers. An actor
 without an app uses the ambient `gh` login and its records must come from `trusted_users`, as
-before. `python3 -m devloop apps` checks each app, its installation and its permissions.
+before. An app that is configured but whose key is missing stops devloop at startup instead of
+silently falling back to the operator's login: remove it from `[apps]` (or use `--config`) to run
+that actor without it. `python3 -m devloop apps` checks each app, its installation and its
+permissions.
 
 The apps have no `Workflows` permission, and devloop never pushes changes under
 `protected_paths` (default `.github/`): a workflow or a local action pushed to a branch of this
@@ -118,8 +123,10 @@ repository would run in CI before any review. Such a change goes to `agent:needs
 applied by a person.
 
 Agent CLIs and the test command run without GitHub credentials in reach: `GH_TOKEN` and
-`GITHUB_TOKEN` are removed, `gh` gets an empty config directory, git credential helpers are
-disabled and git cannot use SSH. This prevents accidental use of the operator's credentials, not
+`GITHUB_TOKEN` are removed, `gh` gets an empty config directory, and git may only use local
+repositories (`GIT_ALLOW_PROTOCOL=file`), so neither SSH keys nor HTTPS credentials apply whatever
+the config files say; credential helpers, askpass programs, preconfigured authentication headers
+and SSH are disabled as further layers. This prevents accidental use of the operator's credentials, not
 deliberate access: code running as the same system user can still read files. Real isolation
 needs a dedicated system user or a container.
 

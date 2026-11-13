@@ -8,16 +8,22 @@ from pathlib import Path
 
 from .markdown import header, parse_version
 from .schema import load_schema, schema_path, validate, SchemaError
+from .workspace import git_config_env
 
 MODES = ('write', 'review')
 CREDENTIAL_VARS = ('GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN',
-                   'SSH_AUTH_SOCK')
+                   'SSH_AUTH_SOCK', 'GIT_CONFIG_PARAMETERS')
 
 
 def isolated_env(gh_config_dir, base=None):
     """Environment for agent CLIs and the test command: no GitHub credentials in reach of `gh`
-    or `git`. ``gh`` gets an empty config directory, git credential helpers are disabled and
-    git cannot use SSH (``GIT_SSH_COMMAND`` overrides any ``core.sshCommand``).
+    or `git`.
+
+    - ``gh`` gets an empty config directory and no token variables;
+    - git may only use local repositories (``GIT_ALLOW_PROTOCOL=file``), so neither SSH keys nor
+      HTTPS credentials can be used, whatever the config files say;
+    - as further layers, credential helpers, askpass programs (``GIT_ASKPASS`` overrides
+      ``core.askPass``), preconfigured authentication headers and SSH are disabled.
 
     This prevents accidental use of the operator's credentials, not deliberate access: code
     running as the same system user can still read files. Real isolation needs a dedicated
@@ -25,9 +31,10 @@ def isolated_env(gh_config_dir, base=None):
     """
     env = {k: v for k, v in (os.environ if base is None else base).items()
            if k not in CREDENTIAL_VARS and not k.startswith('GIT_CONFIG_')}
-    env.update({'GH_CONFIG_DIR': str(gh_config_dir), 'GIT_TERMINAL_PROMPT': '0',
-                'GIT_SSH_COMMAND': 'false', 'GIT_CONFIG_COUNT': '1',
-                'GIT_CONFIG_KEY_0': 'credential.helper', 'GIT_CONFIG_VALUE_0': ''})
+    env.update(git_config_env([('credential.helper', ''), ('http.extraHeader', '')]))
+    env.update({'GH_CONFIG_DIR': str(gh_config_dir), 'GIT_ALLOW_PROTOCOL': 'file',
+                'GIT_TERMINAL_PROMPT': '0', 'GIT_ASKPASS': 'false', 'SSH_ASKPASS': 'false',
+                'GIT_SSH_COMMAND': 'false'})
     return env
 
 

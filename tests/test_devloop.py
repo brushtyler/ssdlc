@@ -1103,13 +1103,39 @@ class AppAuthTests(unittest.TestCase):
 class CredentialIsolationTests(unittest.TestCase):
     def test_agents_and_tests_get_no_github_credentials(self):
         base = {'PATH': '/bin', 'HOME': '/root', 'GH_TOKEN': 'a', 'GITHUB_TOKEN': 'b',
-                'SSH_AUTH_SOCK': '/s', 'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'x'}
+                'SSH_AUTH_SOCK': '/s', 'GIT_ASKPASS': '/ide/askpass', 'SSH_ASKPASS': '/ide/ssh',
+                'GIT_CONFIG_PARAMETERS': "'http.extraheader'='x'",
+                'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'x'}
         env = agents.isolated_env('/state/gh', base)
-        for name in ('GH_TOKEN', 'GITHUB_TOKEN', 'SSH_AUTH_SOCK'):
+        for name in ('GH_TOKEN', 'GITHUB_TOKEN', 'SSH_AUTH_SOCK', 'GIT_CONFIG_PARAMETERS'):
             self.assertNotIn(name, env)
         self.assertEqual((env['PATH'], env['HOME'], env['GH_CONFIG_DIR']), ('/bin', '/root', '/state/gh'))
-        self.assertEqual(env['GIT_SSH_COMMAND'], 'false')
-        self.assertEqual((env['GIT_CONFIG_KEY_0'], env['GIT_CONFIG_VALUE_0']), ('credential.helper', ''))
+        self.assertEqual((env['GIT_ALLOW_PROTOCOL'], env['GIT_ASKPASS'], env['SSH_ASKPASS'],
+                          env['GIT_SSH_COMMAND']), ('file', 'false', 'false', 'false'))
+        self.assertEqual(env['GIT_CONFIG_COUNT'], '2')
+        self.assertEqual({(env[f'GIT_CONFIG_KEY_{i}'], env[f'GIT_CONFIG_VALUE_{i}']) for i in (0, 1)},
+                         {('credential.helper', ''), ('http.extraHeader', '')})
+
+    def test_isolated_git_cannot_reach_a_remote_or_ask_for_credentials(self):
+        # Codex review of #70: an askpass inherited from an IDE answered for git, and a
+        # pushInsteadOf rule can turn an HTTPS URL into SSH. Neither may work for agents.
+        with tempfile.TemporaryDirectory() as tmp:
+            self.git('init', '-q', cwd=tmp)
+            self.git('config', 'url.git@github.com:.pushInsteadOf', 'https://github.com/', cwd=tmp)
+            self.git('-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '--allow-empty',
+                     '-m', 'base', cwd=tmp)
+            env = agents.isolated_env(Path(tmp) / 'gh', dict(os.environ, GIT_ASKPASS='/bin/echo'))
+            fill = subprocess.run(['git', 'credential', 'fill'], cwd=tmp, env=env, text=True,
+                                  input='protocol=https\nhost=github.com\n\n', capture_output=True)
+            self.assertNotEqual(fill.returncode, 0)
+            self.assertNotIn('password=', fill.stdout)
+            for argv in (['git', 'ls-remote', 'https://github.com/o/r.git'],
+                         ['git', 'push', '--dry-run', 'https://github.com/o/r.git', 'HEAD:refs/heads/x']):
+                with self.subTest(argv=argv[1]):
+                    done = subprocess.run(argv, cwd=tmp, env=env, text=True, capture_output=True,
+                                          timeout=30)
+                    self.assertNotEqual(done.returncode, 0)
+                    self.assertIn('not allowed', done.stderr)
 
     def test_runner_and_test_command_use_the_isolated_environment(self):
         seen = []
@@ -1128,17 +1154,21 @@ class CredentialIsolationTests(unittest.TestCase):
 
         def fake_run(argv, **kw):
             calls.append((argv, kw.get('env')))
-            out = 'https://github.com/o/r.git\n' if 'ls-remote' in argv else ''
-            return SimpleNamespace(returncode=0, stdout=out, stderr='')
+            return SimpleNamespace(returncode=1 if 'config' in argv else 0, stdout='', stderr='')
         ws = Workspace('/repo', '.state', 'main', run=fake_run)
         ws.push('/wt', 'agent/issue-7', auth={'url': 'https://github.com/o/r.git', 'token': 'T'})
         argv, env = calls[-1]
         self.assertEqual(argv, ['git', 'push', 'https://github.com/o/r.git',
                                 'HEAD:refs/heads/agent/issue-7'])
         self.assertNotIn('T', ' '.join(argv))
-        self.assertEqual((env['GIT_CONFIG_KEY_0'], env['GIT_CONFIG_VALUE_0']), ('credential.helper', ''))
-        self.assertEqual(env['GIT_CONFIG_VALUE_1'],
-                         'AUTHORIZATION: basic ' + apps.base64.b64encode(b'x-access-token:T').decode())
+        pairs = [(env[f'GIT_CONFIG_KEY_{i}'], env[f'GIT_CONFIG_VALUE_{i}'])
+                 for i in range(int(env['GIT_CONFIG_COUNT']))]
+        basic = apps.base64.b64encode(b'x-access-token:T').decode()
+        self.assertEqual(pairs, [('credential.helper', ''), ('http.extraHeader', ''),
+                                 ('http.https://github.com/.extraHeader', ''),
+                                 ('http.https://github.com/.extraHeader', f'AUTHORIZATION: basic {basic}')])
+        self.assertEqual((env['GIT_ALLOW_PROTOCOL'], env['GIT_ASKPASS'], env['GIT_SSH_COMMAND']),
+                         ('https', 'false', 'false'))
         ws.commit_all('/wt', 'msg', author={'name': 'x-agent[bot]', 'email': 'e@x'})
         commit_env = [env for argv, env in calls if 'commit' in argv][0]
         self.assertEqual((commit_env['GIT_AUTHOR_NAME'], commit_env['GIT_COMMITTER_EMAIL']),
@@ -1147,25 +1177,47 @@ class CredentialIsolationTests(unittest.TestCase):
         self.assertEqual(calls[-1], (['git', 'push', 'origin', 'HEAD:refs/heads/agent/issue-7'], None))
 
     def test_push_refuses_a_url_that_git_rewrites(self):
-        # A url.insteadOf rule would send the push over SSH with a personal key.
+        # insteadOf and pushInsteadOf could send the push over SSH with a personal key;
+        # `git ls-remote --get-url` does not show the second.
+        for key in ('insteadOf', 'pushInsteadOf'):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as tmp:
+                self.git('init', '-q', cwd=tmp)
+                self.git('config', f'url.git@github.com:.{key}', 'https://github.com/', cwd=tmp)
+                ws = Workspace(tmp, '.state', 'main')
+                with self.assertRaisesRegex(WorkspaceError, 'rewrites'):
+                    ws.push(tmp, 'b', auth={'url': 'https://github.com/o/r.git', 'token': 'T'})
+
+    def test_changed_files_are_real_names(self):
+        # Codex review of #70: without -z git quotes unusual names and they slip past the
+        # prefix check of protected_paths.
+        names = ['.github/workflows/é.yml', '.github/workflows/a\tb.yml',
+                 '.github/workflows/n\nl.yml', 'plain.py']
         with tempfile.TemporaryDirectory() as tmp:
             self.git('init', '-q', cwd=tmp)
-            self.git('config', 'url.git@github.com:.insteadOf', 'https://github.com/', cwd=tmp)
+            self.git('-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '--allow-empty',
+                     '-m', 'base', cwd=tmp)
+            base = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=tmp, capture_output=True,
+                                  text=True, check=True).stdout.strip()
+            for name in names:
+                (Path(tmp) / name).parent.mkdir(parents=True, exist_ok=True)
+                (Path(tmp) / name).write_text('x')
+            self.git('add', '-A', cwd=tmp)
+            self.git('-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q', '-m', 'c', cwd=tmp)
             ws = Workspace(tmp, '.state', 'main')
-            with self.assertRaisesRegex(WorkspaceError, 'rewrites'):
-                ws.push(tmp, 'b', auth={'url': 'https://github.com/o/r.git', 'token': 'T'})
+            self.assertEqual(sorted(ws.changed_files(tmp, since=base)), sorted(names))
+            d = Dispatcher(CFG, FakeGH(), ws, FakeRunner(), log=lambda m: None)
+            self.assertEqual(sorted(d._protected_changes(tmp, since=base)), sorted(names[:3]))
 
-    def test_changed_files_since_a_commit_or_against_the_base(self):
+    def test_changed_files_against_the_base(self):
         calls = []
 
         def fake_run(argv, **kw):
             calls.append(argv)
-            return SimpleNamespace(returncode=0, stdout='a.py\n.github/workflows/x.yml\n', stderr='')
+            return SimpleNamespace(returncode=0, stdout='a.py\0.github/workflows/x.yml\0', stderr='')
         ws = Workspace('/repo', '.state', 'main', run=fake_run)
         self.assertEqual(ws.changed_files('/wt'), ['a.py', '.github/workflows/x.yml'])
         self.assertIn('origin/main...HEAD', calls[-1])
-        ws.changed_files('/wt', since=SHA1)
-        self.assertIn(f'{SHA1}..HEAD', calls[-1])
+        self.assertIn('-z', calls[-1])
 
 
 class ActingAs:

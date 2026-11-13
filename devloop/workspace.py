@@ -11,6 +11,16 @@ class WorkspaceError(RuntimeError):
     pass
 
 
+def git_config_env(pairs):
+    """``GIT_CONFIG_*`` variables that apply ``pairs`` on top of every config file, in order
+    (an empty value resets multi-valued keys such as ``credential.helper``)."""
+    env = {'GIT_CONFIG_COUNT': str(len(pairs))}
+    for i, (key, value) in enumerate(pairs):
+        env[f'GIT_CONFIG_KEY_{i}'] = key
+        env[f'GIT_CONFIG_VALUE_{i}'] = value
+    return env
+
+
 class Workspace:
     def __init__(self, repo_root, state_dir, base_branch, run=subprocess.run, test_env=None):
         self.repo_root = Path(repo_root)
@@ -83,8 +93,10 @@ class Workspace:
         """Paths added, changed or deleted since commit ``since``, or on the branch with respect
         to the base branch."""
         span = f'{since}..HEAD' if since else f'origin/{self.base_branch}...HEAD'
-        out = self._git('diff', '--name-only', '--no-renames', span, cwd=path)
-        return [line for line in out.splitlines() if line]
+        # -z: without it git quotes unusual names ("\303\251", tabs, newlines), which would hide
+        # them from a prefix check.
+        out = self._git('diff', '--name-only', '-z', '--no-renames', span, cwd=path)
+        return [name for name in out.split('\0') if name]
 
     def commit_all(self, path, message, author=None):
         """Commit everything; ``author`` (``{name, email}``) is both author and committer."""
@@ -99,24 +111,35 @@ class Workspace:
     def push(self, path, branch, *, replace=False, auth=None):
         """Push HEAD; ``replace`` overwrites a stale devloop branch left by an earlier attempt.
 
-        With ``auth`` (``{url, token}``) the push goes over HTTPS with that token only: stored
-        credential helpers are disabled and the token travels in the environment of this one
-        command, never in a config file or on the command line."""
+        With ``auth`` (``{url, token}``) the push goes over HTTPS with that token only, and the
+        token travels in the environment of this one command, never in a config file or on the
+        command line. No other credential can take part: URL rewrites are refused, only the
+        HTTPS transport is allowed, and credential helpers, askpass programs and preconfigured
+        authentication headers are disabled."""
         env, remote = None, 'origin'
         if auth:
             remote = auth['url']
-            # A url.<base>.insteadOf rule could send the push over SSH with a personal key.
-            effective = self._git('ls-remote', '--get-url', remote, cwd=path).strip()
-            if effective != remote:
-                raise WorkspaceError(f'git rewrites {remote} to {effective}: refusing to push '
-                                     'with credentials other than the app token')
+            self._refuse_rewrites(path, remote)
             basic = base64.b64encode(f'x-access-token:{auth["token"]}'.encode()).decode()
-            env = {'GIT_TERMINAL_PROMPT': '0', 'GIT_CONFIG_COUNT': '2',
-                   'GIT_CONFIG_KEY_0': 'credential.helper', 'GIT_CONFIG_VALUE_0': '',
-                   'GIT_CONFIG_KEY_1': 'http.https://github.com/.extraheader',
-                   'GIT_CONFIG_VALUE_1': f'AUTHORIZATION: basic {basic}'}
+            env = git_config_env([
+                ('credential.helper', ''), ('http.extraHeader', ''),
+                ('http.https://github.com/.extraHeader', ''),
+                ('http.https://github.com/.extraHeader', f'AUTHORIZATION: basic {basic}')])
+            env.update({'GIT_TERMINAL_PROMPT': '0', 'GIT_ASKPASS': 'false', 'SSH_ASKPASS': 'false',
+                        'GIT_ALLOW_PROTOCOL': 'https', 'GIT_SSH_COMMAND': 'false'})
         self._git('push', *(['--force'] if replace else []), remote,
                   f'HEAD:refs/heads/{branch}', cwd=path, env=env)
+
+    def _refuse_rewrites(self, path, url):
+        """A ``url.<base>.insteadOf`` or ``pushInsteadOf`` rule matching ``url`` could send the
+        push elsewhere, for example over SSH with a personal key."""
+        out = self._git('config', '--null', '--get-regexp', r'^url\..*\.(push)?insteadof$',
+                        cwd=path, check=False)
+        for entry in out.split('\0'):
+            key, _, prefix = entry.partition('\n')
+            if prefix and url.startswith(prefix):
+                raise WorkspaceError(f'git config {key} rewrites {url}: refusing to push with '
+                                     'credentials other than the app token')
 
     def run_tests(self, path, command, timeout):
         """``(passed, output_tail)`` for the project test command in ``path``."""
