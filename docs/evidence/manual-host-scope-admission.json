@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "capability": "manual scope-amendment-v1 for captured CHECK_FAILURE with ALL_OUTSIDE host classification",
+  "validation": {
+    "specific_tests": {
+      "command": "python3 -m unittest discover -s tests -p test_manual_host_scope.py",
+      "tests": 3,
+      "elapsed_seconds": 5.951,
+      "result": "PASS"
+    },
+    "full_suite": {
+      "command": "python3 -m unittest discover -s tests",
+      "environment": "Python 3.12 in Docker; source mounted read-only; isolated caches; AI keys not passed",
+      "tests": 1192,
+      "elapsed_seconds": 690.07,
+      "result": "PASS"
+    },
+    "A5_benchmark": {
+      "corpus": "i2-recovery-v2",
+      "cases": 12,
+      "failed_cases": 0,
+      "result": "PASS"
+    },
+    "coverage": [
+      "A real scheduler capture stops at CHECK_FAILURE with all failed checks localized outside the manifest before another developer call",
+      "Explicit manual review can prepare and exactly authorized activation can resume without consulting expired feedback authority",
+      "Policy, counters, attempts, deadline and original source bytes remain unchanged by admission",
+      "Native retry restores the captured implementation, charges attempt two and a new invocation, and freshly revalidates the completed owner",
+      "Incorrect review subject or scope authorization is refused",
+      "Mixed, protected, unresolved and inside-only host classifications cannot create a preparation"
+    ],
+    "real_source_preview": {
+      "result": "PASS",
+      "matches_reviewed_subject": true,
+      "execution_authorized": false,
+      "model_dispatches": 0
+    }
+  },
+  "limitations": [
+    "The host classification is a scope hint, not proof that a failed test is incorrect; reviewed coverage changes and exact fenced authorization remain mandatory",
+    "This does not renew expired automatic feedback authority or alter any budget, deadline, attempt or invocation allowance",
+    "The offline fixture and read-only preview do not activate the historical run or establish final delivery readiness"
+  ],
+  "provider_calls": 0,
+  "historical_run_activated": false
+}

@@ -197,7 +197,8 @@ def prepare(ticket, repo, plan, review, reason, *, runtime_identity, controller_
     with transition_lock(ticket / 'ticket.lock', held_locks):
         if unfinished(ticket, namespace='execution'):
             raise TransitionError('Earlier preparation requires native discard')
-        source = inspect(ticket, allow_host_hints=delegation is not None or profile_update is not None or repair_return is not None,
+        source = inspect(ticket, allow_host_hints=(review is not None or delegation is not None
+                         or profile_update is not None or repair_return is not None),
                          verification_repair=verification_repair is not None)
         with transition_lock(source['root'] / '03-dev/tasks/scheduler.lock', held_locks):
             guard()
@@ -504,7 +505,8 @@ def activate(ticket, preparation, authorization, *, guard=lambda: None, clock=ti
             update(ticket, proposal['transition_id'], namespace='execution', status='ACTIVE')
             clear_pending(ticket, proposal['transition_id'], namespace='execution')
             return selected
-        source = inspect(ticket, allow_host_hints=delegated or profile_admission or repair_return,
+        source = inspect(ticket, allow_host_hints=(proposal.get('authorization_contract') == 'scope-amendment-v1'
+                         or delegated or profile_admission or repair_return),
                          verification_repair=verification_repair)
         with transition_lock(source['root'] / '03-dev/tasks/scheduler.lock', held_locks):
             if verification_repair:
@@ -653,7 +655,7 @@ def main(argv=None):
                 raise TransitionError('Deadline extension requires the explicit verification repair quality and profile')
         if args.command in {'continuation-scope-inspect', 'continuation-scope-preview'}:
             with ticket_lock(ticket / 'ticket.lock'):
-                source = inspect(ticket, verification_repair=verification is not None)
+                source = inspect(ticket, allow_host_hints=True, verification_repair=verification is not None)
                 with ticket_lock(source['root'] / '03-dev/tasks/scheduler.lock'):
                     if args.command.endswith('preview'):
                         subject_builder = subject

@@ -18,6 +18,17 @@ of `PLAN_AUTONOMY_WORKSTREAMS.md`. I1's `pre-checkpoint-import-v1` remains
 unchanged. An admitted I2 generation can prepare a separate, reviewed generation
 when exactly one uncompleted task stopped with `SCOPE_REQUIRED`.
 
+A captured `CHECK_FAILURE` can also use this manual path when the host classifies
+all failed checks as outside the task manifest. This is a scope hint, not proof
+that a test is wrong: the operator's exact review decides which targets and
+coverage changes are appropriate. Mixed, protected and unresolved failures are
+refused. Preview remains read-only; preparation still requires the bound review,
+and activation still requires exact fenced scope authorization.
+
+This manual admission does not consult funded feedback roles or renew expired
+feedback authority. It preserves the policy, counters, attempts, deadline,
+quality checks and completed-owner verification obligations.
+
 The operator must stop and fence the source controller, supervisor and other
 writers. Cooperative locks, Docker mount inspection and repeated hashes detect
 cooperating writers; `source_fenced: true` remains an operator attestation.
