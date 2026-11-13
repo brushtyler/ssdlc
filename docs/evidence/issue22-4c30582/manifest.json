@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "source_commit": "4c30582bb0c0c0e66dd36f1927fabc43e5b08b61",
+  "state": "OFFLINE_VERIFICATION_PASSED_FINAL_GATES_PENDING",
+  "final_delivery_proven": false,
+  "files": {
+    "original-requirements.md": "cee2aa5c7accb8c54421c936f3dc163c9c4718ac886957379b36ef7681c5c20c",
+    "dependency-audit.json": "4aae512f258f9ebf1516d576962fe77dfa7f1f1f30043dee4c2386ce2f6d0dc1",
+    "commit-history-scan.json": "c7077798df6336ca9ddb7ba25cdffe41d62241018f31ec825b6007b2257295e2",
+    "full-suite.json": "a484505b8b279d9cb6dae398e83132abe49677d8bb602f648746cbf987834e35",
+    "recovery-benchmark.json": "35bfaf6f2771d2d30f2b3723ec84025be1c8954fd46edf0700d88167ff051180",
+    "README.md": "d3feb6986a3e3d20fd1a13a3b04b4aa0d433edfd6b3c3f0bbafb2aa044dd60f0",
+    "requirements.json": "cbcf14b9c7c7f0702a5dbfd50cf902999f5df2f9d9c58bf672e5ac1e16fd78d7",
+    "scanner-triage.json": "0660f387046ca88a166942073e067744f95bb2dc9c090ad8c107ff9d20f0d4dd"
+  }
+}

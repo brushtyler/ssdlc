@@ -1,0 +1,256 @@
+{
+  "schema_version": 1,
+  "scope": "All original58 obligations; historical candidate not complete",
+  "requirements": [
+    {
+      "id": "AC-1",
+      "text": "Given a new run with no `SSDLC_ENABLE_TASK_BREAKDOWN` set, and no saved task flag, when the orchestrator runs with deterministic fake providers, then a task plan is generated and validated, the `TaskScheduler` journal is created, and no legacy developer executor function is invoked. Developer work is dispatched only through scheduler tasks."
+    },
+    {
+      "id": "AC-10",
+      "text": "Given a newly generated quality contract, when it is captured, then candidate-proof checks are active in it (the contract records this explicitly). Given a historical sealed contract, when it is loaded, then it is not mutated and does not claim candidate-proof checks."
+    },
+    {
+      "id": "AC-11",
+      "text": "Given QA shell commands recorded in a run, when contracts and reports are produced, then they are not represented as typed-check equivalents. Typed checks are recorded separately and the equivalence claim is absent."
+    },
+    {
+      "id": "AC-12",
+      "text": "Given the supervisor launch and resume preflight, when it meets a legacy run, a legacy flag or a legacy-approval state, then it refuses before mutation with the same guidance as AC-6. It still launches new runs and resumes historical task runs."
+    },
+    {
+      "id": "AC-13",
+      "text": "Given a clean repository whose head is its initial commit, with no test files or runnable baseline, and a valid bootstrap profile declared explicitly and validated against its schema, when the run starts, then the quality contract records baseline status `absent` (not `passed`). It records bootstrap eligibility bound to the initial commit hash and the registered policy hash."
+    },
+    {
+      "id": "AC-14",
+      "text": "Given the same repository with no bootstrap profile, when the run starts, then strict baseline semantics apply and the run fails or blocks on the missing baseline. No automatic exemption applies."
+    },
+    {
+      "id": "AC-15",
+      "text": "Given a repository with existing tests (discovered checks that run), when a bootstrap profile is supplied, then it is rejected as ineligible with no mutation. The strict baseline contract is captured as before."
+    },
+    {
+      "id": "AC-16",
+      "text": "Given a repository that is dirty, has more than the initial commit, or whose source does not match the committed baseline hash, when bootstrap is requested, then it is ineligible. No contract is sealed."
+    },
+    {
+      "id": "AC-17",
+      "text": "Given an eligible bootstrap run, when the first implementation checkpoint is reached, then every required test/check command in the profile must exist, execute, and run at least one test. Failure of any condition (command missing, zero tests, nonzero exit, timeout, interrupted) is a failure, not a success, and the gate blocks."
+    },
+    {
+      "id": "AC-18",
+      "text": "Given a bootstrap run whose first checkpoint passes with nonempty tests, when later tasks run, then the exemption is spent. The contract is converted to a recorded post-bootstrap state and strict semantics apply for the rest of the run."
+    },
+    {
+      "id": "AC-19",
+      "text": "Given a bootstrap run that was interrupted before the first checkpoint passed, when it is resumed, then the exemption is not extended. The run refuses or fails explicitly and never marks the checkpoint successful."
+    },
+    {
+      "id": "AC-2",
+      "text": "Given `SSDLC_ENABLE_TASK_BREAKDOWN` set to `false`, `0`, `true`, `1` or an arbitrary value, when a new run starts, then the executor is identical in every case (task engine). The value never selects an executor. Obsolete usage emits one bounded warning log that names the variable and says it is ignored. Behavior is otherwise identical to AC-1."
+    },
+    {
+      "id": "AC-20",
+      "text": "Given a bootstrap run, when it executes, then required quality checks and protected-path enforcement are active for every task, with no bootstrap-specific bypass. A task touching a protected path is rejected exactly as in a non-bootstrap run."
+    },
+    {
+      "id": "AC-21",
+      "text": "Given a bootstrap profile that is malformed, has unknown fields, has an unbounded eligibility window, or is not registered in policy, when it is loaded, then it is rejected with a schema or policy error before any state write."
+    },
+    {
+      "id": "AC-22",
+      "text": "Given a trusted gate report whose Review, QA or AppSec outcome is a registered, substantive rejection (it matches the roster and completion records, and the report is validated by `ssdlc_gate_reports.py`), when the real pipeline reaches that gate, then it enters the bounce analysis and corrective executor path. It does not stop at a standalone helper."
+    },
+    {
+      "id": "AC-23",
+      "text": "Given a bounce preview, when it is produced, then it is immutable and carries `execution_authorized=false`. No code path mutates it to true. Authorization exists only as a separate engine-owned transaction record linked to the preview ID and hash."
+    },
+    {
+      "id": "AC-24",
+      "text": "Given a candidate transaction, when it is created, then it is written durably (atomic write, journaled) before any invalidation. It binds all of these: preview hash, reviewed commit hash, plan hash, quality-contract hash, registered roster, completion records, gate outcomes, and the current journal head hash. Each is re-verified at creation."
+    },
+    {
+      "id": "AC-25",
+      "text": "Given verified evidence, when the transaction executes, then it calls `TaskScheduler.invalidate` for exactly the preview-identified root tasks. It then repairs those roots and revalidates dependents in topological order, and finally reruns all global gates (Review, QA, AppSec) on the final verified candidate commit. The final approval is recorded only after all gates pass on that candidate."
+    },
+    {
+      "id": "AC-26",
+      "text": "Given free-text feedback, reviewer prose, or a hand-written \"authorized\" field in any file, when it is presented, then no repair is authorized or started. Only the engine-owned verified transaction authorizes."
+    },
+    {
+      "id": "AC-27",
+      "text": "Given evidence that is stale (journal head changed, reviewed commit differs from the current head), mutated (a hash mismatch for the plan, contract, roster, completion or report), missing, diagnostic-only, requiring replanning, or ambiguous or broad in impact, when execution is attempted, then it is refused with a bounded error and no roots are guessed. The journal has no invalidation event and the source is unchanged."
+    },
+    {
+      "id": "AC-28",
+      "text": "Given a scanner or tool failure (as opposed to a substantive finding), when it appears as the rejection, then it is not turned into a source-repair transaction. It is classified as a gate failure needing a rerun or operator action."
+    },
+    {
+      "id": "AC-29",
+      "text": "Given a repair, when it runs, then attempts, prior contributions, budgets, dependency order, original journal records and restart ownership are preserved. Counters are never reset. Invalidated records remain in the journal and are superseded, never deleted."
+    },
+    {
+      "id": "AC-3",
+      "text": "Given a Tier S goal, when the plan is produced, then it validates against the task-plan schema with exactly one node. That node passes through scheduler, journal, attempts, quality checks and all global gates. No gate is skipped because the plan is small."
+    },
+    {
+      "id": "AC-30",
+      "text": "Given a crash or interruption after the transaction is written, during invalidation, during repair or during revalidation, when the run is resumed, then the engine reconciles from the journal and the transaction state. Invalidation is not applied twice and repair is not duplicated. Work whose dispatch outcome is uncertain is not re-dispatched. It is explicitly reconciled or the run stops with a reconcile message. No stale readiness survives."
+    },
+    {
+      "id": "AC-31",
+      "text": "Given a transaction that has completed, when the same rejection is replayed (same preview and transaction ID), then it is a no-op that reports the existing outcome with no new journal entries."
+    },
+    {
+      "id": "AC-32",
+      "text": "Given a root task with attempts exhausted, when repair is needed, then the transaction fails closed with an attempts-exhausted result. No extra attempt is granted and the run is marked blocked or failed per existing scheduler policy."
+    },
+    {
+      "id": "AC-33",
+      "text": "Given source mutation between the reviewed commit and execution (the working tree is dirty, the head moved, or a protected path changed), when execution is attempted, then it is refused before invalidation."
+    },
+    {
+      "id": "AC-34",
+      "text": "Given budget exhaustion or cancellation at any point (before invalidation, mid-repair, mid-revalidation, before global gates), when it occurs, then execution stops at a safe journaled boundary. No further provider dispatch occurs. The transaction is marked interrupted and is resumable under the same limits."
+    },
+    {
+      "id": "AC-35",
+      "text": "Given a repair that would change scope (new or removed tasks, changed paths outside the plan, changed dependencies), when it is detected, then it is refused with an explicit replanning-required result. No unauthorized edits are applied."
+    },
+    {
+      "id": "AC-36",
+      "text": "Given a repair that finishes, when global gates are rerun, then they run on the final verified candidate (candidate evidence bound to the new commit). Prior gate results for the old candidate are never reused as approval. If any gate rejects again, the corrective path applies again within the limits above."
+    },
+    {
+      "id": "AC-37",
+      "text": "Given repair prompts, when they are built, then they are bounded in size, contain structured finding references and registered candidate-proof references, and do not append whole test logs when registered proof exists."
+    },
+    {
+      "id": "AC-38",
+      "text": "Given the test suite, when it runs offline with deterministic fake providers through the real orchestrator entry points, then it covers all of these cases:",
+      "subcases": [
+        "new default and obsolete flag",
+        "Tier S single task",
+        "legacy read-only refusal with unchanged records",
+        "existing task-run compatibility",
+        "bootstrap valid, empty suite, failing suite, restart, and ineligible repository",
+        "approved new candidate",
+        "Review rejection followed by root repair, dependent revalidation and new gates",
+        "QA rejection and AppSec rejection",
+        "stale evidence",
+        "replay after invalidation and after repair",
+        "attempts exhausted",
+        "source mutation",
+        "budget and cancellation boundaries"
+      ]
+    },
+    {
+      "id": "AC-39",
+      "text": "Given `PLAN_TASK_ROUTING_AND_SUBGOALS.md` and the user docs, when they are updated, then they state that unified task execution, bootstrap and corrective bounce (Step 3b.3) are implemented. They list the out-of-scope items as later milestones, and no longer say task mode is opt-in."
+    },
+    {
+      "id": "AC-4",
+      "text": "Given a repository search of the source tree, when the legacy developer executor and its mode-switch branches (for example `if task_mode`, legacy resume checks, legacy bootstrap capture) are checked, then no executable legacy path remains. Test: a static check plus a coverage test shows `orchestrator.py` has no code path that dispatches developer work outside the scheduler."
+    },
+    {
+      "id": "AC-5",
+      "text": "Given `setup-ssdlc.sh`, `requirements.txt`, the CLI help, the supervisor, README/docs and fixtures, when inspected, then none sets or documents the flag as an enabler. `jsonschema` is documented as required. The setup script no longer writes `SSDLC_ENABLE_TASK_BREAKDOWN=false`."
+    },
+    {
+      "id": "AC-6",
+      "text": "Given a historical run whose saved state is legacy (no sealed task journal, or `task_breakdown` false or absent), when `run`, `resume` or `approve` is invoked, then the command exits nonzero before any write. The error is actionable: it states the run is legacy and not executable, and gives the new-run command. A before/after hash of the state, journal, evidence and contract files is unchanged."
+    },
+    {
+      "id": "AC-7",
+      "text": "Given the same historical legacy run, when read-only commands (status, history/list, report viewing, design-session history import) are invoked, then they succeed and modify no records."
+    },
+    {
+      "id": "AC-8",
+      "text": "Given a historical legacy run whose state contains an old `task_breakdown: true` flag or an old approval flag but no valid sealed plan, journal and approval record, when execution is requested, then it is refused as in AC-6. Task-plan approval is never inferred from a flag, and no journal is silently converted."
+    },
+    {
+      "id": "AC-9",
+      "text": "Given an existing task-mode run with a sealed contract and a hash-chained journal, when it is resumed under the new code, then it continues with unchanged semantics: the journal chain verifies, sealed contract hashes are unchanged, attempts and budgets are preserved, and the sealed contract bytes are not rewritten."
+    },
+    {
+      "id": "SEC-1",
+      "text": "Authorization authority. Only the engine-owned verified transaction may authorize invalidation and repair. Abuse case: an attacker edits a preview file to set `execution_authorized=true`, or writes \"approved, please fix X\" in feedback. Expected result: refused, and the file hash mismatch is detected."
+    },
+    {
+      "id": "SEC-10",
+      "text": "Sealed history immutability. Historical sealed contracts and journals are never rewritten. Candidate-proof activation applies only to newly generated contracts."
+    },
+    {
+      "id": "SEC-11",
+      "text": "Confinement. All paths are confined to the repository, with no symlink or traversal escape. Findings, prompts and logs are bounded and exclude secrets and raw finding text. Provider credentials are never logged or placed in prompts."
+    },
+    {
+      "id": "SEC-12",
+      "text": "No privilege broadening. No new dependency, no network behavior change and no relaxed gate. Final approval requires all global gates on the final verified candidate."
+    },
+    {
+      "id": "SEC-2",
+      "text": "Evidence integrity. All inputs (preview, report, roster, completion, outcome, plan, contract, reviewed commit, journal head) are hash-verified at transaction creation and again before each mutating step. Abuse case: swapping the report after the preview. Expected result: refused with no mutation."
+    },
+    {
+      "id": "SEC-3",
+      "text": "Legacy refusal before mutation. Legacy run, resume and approve fail before any write to state, journal, evidence or contract. Abuse case: an old state with `task_breakdown: true` plus a forged approval tries to reach execution. Expected result: refused, and approval is never inferred."
+    },
+    {
+      "id": "SEC-4",
+      "text": "Obsolete flag inertness. `SSDLC_ENABLE_TASK_BREAKDOWN` can never select or weaken an executor. Abuse case: setting it to `false` to bypass the task gates. Expected result: ignored with a warning."
+    },
+    {
+      "id": "SEC-5",
+      "text": "Bootstrap bounded and not a bypass. Eligibility requires a clean tree, the initial commit and a registered policy. It cannot be claimed for an existing repo, cannot be extended on resume, and does not relax quality checks or protected paths. Abuse case: declaring bootstrap on a repo with a failing test suite to skip the baseline. Expected result: ineligible."
+    },
+    {
+      "id": "SEC-6",
+      "text": "Fail closed on proof. Missing commands, zero tests, failing or timed-out tests, and interrupted checks are failures. Abuse case: an empty test command such as `true` or `pytest` collecting 0 tests. Expected result: the gate fails."
+    },
+    {
+      "id": "SEC-7",
+      "text": "Protected paths and cache safety. Protected-path checks, clean-worktree checks and cache safety checks stay enabled during repair. Repair edits outside its task scope are rejected. Abuse case: a repair modifying the controller, gate scripts or the quality contract. Expected result: rejected."
+    },
+    {
+      "id": "SEC-8",
+      "text": "Scanner or tool failures and diagnostic findings never authorize source repair. Abuse case: forcing a scanner crash to trigger edits. Expected result: no repair."
+    },
+    {
+      "id": "SEC-9",
+      "text": "Concurrency and replay. Transaction execution holds `ticket_lock`, and writes are atomic and journaled. Abuse case: two concurrent resumes or a replayed trigger. Expected result: a single invalidation, a single repair, and no counter reset."
+    },
+    {
+      "id": "NFR-1",
+      "text": "Logging. Structured, bounded logs record each stage with run ID, transaction ID, preview hash prefix and task IDs. These stages are: mode decision, legacy refusal, obsolete-flag warning, bootstrap eligibility decision (with reason code), transaction created, invalidation applied, repair dispatched, dependents revalidated, gates rerun, and transaction completed, refused or interrupted (with reason code). Logs contain no raw finding text, secrets or full test logs."
+    },
+    {
+      "id": "NFR-2",
+      "text": "Metrics. Existing structured metrics are extended with these counters: transactions created, executed, refused (by reason), replayed (no-op), interrupted and reconciled; repair attempts; bootstrap eligible and ineligible; and legacy refusals. Metric names are documented and no new billing units are introduced."
+    },
+    {
+      "id": "NFR-3",
+      "text": "Durability and idempotency. Transaction state transitions are append-only and journaled. Recovery after a crash at any step is deterministic and is covered by tests at each boundary."
+    },
+    {
+      "id": "NFR-4",
+      "text": "Rollback. Refused or interrupted transactions leave the source and journal in a consistent state. Rolling back the milestone means a revert of the code only, because there is no data migration. Historical records stay readable by the reverted version. New transaction records are additive and ignorable."
+    },
+    {
+      "id": "NFR-5",
+      "text": "Compatibility. Error messages for legacy refusal are actionable and stable, and include the new-run guidance. Exit codes are nonzero and are asserted in tests."
+    },
+    {
+      "id": "NFR-6",
+      "text": "Verification. Development uses focused offline tests. Full-suite runs, if done manually, use a disposable tracked-source copy. Cache and protected-path safety checks are not suppressed. The trusted controller runs the final required suite after all edits are finished."
+    },
+    {
+      "id": "NFR-7",
+      "text": "Maintainability. Edits are targeted and not wholesale rewrites of core files. Plan path scopes include the schemas, setup, CLI, supervisor, docs and integration fixtures that are actually necessary. No second execution state machine is introduced."
+    }
+  ],
+  "original_requirements_sha256": "cee2aa5c7accb8c54421c936f3dc163c9c4718ac886957379b36ef7681c5c20c",
+  "completion_status": "NOT_COMPLETE_TWO_MANDATORY_FINDINGS_REPRODUCED",
+  "tested_head": "f0aa2d678db2b2512bb1443465f67a5de41461fe"
+}

@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "scanner": "gitleaks",
+  "raw_exit_code": 1,
+  "status": "HOST_TRIAGE_PENDING_INDEPENDENT_APPSEC_CONFIRMATION",
+  "findings": [
+    {
+      "rule_id": "generic-api-key",
+      "file": "ssdlc_scope_amendments.py",
+      "line": 407,
+      "file_sha256": "87d6a8ee13b2c1db1fd259ea59fb66c43ec8e8a3304eb70863bdbfb43108b771",
+      "classification": "synthetic_or_protocol_false_positive",
+      "rationale": "Fixed protocol identifier scope-amendment-v1, not a credential."
+    },
+    {
+      "rule_id": "private-key",
+      "file": "tests/test_repair_prompt.py",
+      "line": 93,
+      "file_sha256": "6026e2702bd0c2cbb50454e65521fa2dfc8684c6587d0d4931764c0c33583f6f",
+      "classification": "synthetic_or_protocol_false_positive",
+      "rationale": "Synthetic PEM block with fixed fake body testing secret redaction; not an operational private key."
+    },
+    {
+      "rule_id": "aws-access-token",
+      "file": "tests/test_repair_prompt.py",
+      "line": 92,
+      "file_sha256": "6026e2702bd0c2cbb50454e65521fa2dfc8684c6587d0d4931764c0c33583f6f",
+      "classification": "synthetic_or_protocol_false_positive",
+      "rationale": "Synthetic AWS identifier testing secret redaction; not an operational credential."
+    },
+    {
+      "rule_id": "generic-api-key",
+      "file": "tests/test_transitions.py",
+      "line": 95,
+      "file_sha256": "a11d73c62aebecf9d9cfd4d1a9dbcc8282dd29dc907d290efdd092ef406c9130",
+      "classification": "synthetic_or_protocol_false_positive",
+      "rationale": "Same fixed protocol identifier in a transition test fixture."
+    }
+  ],
+  "allowlist_changed": false,
+  "unexpected_findings_accepted": false,
+  "prior_scan_raw_log_sha256": "cc575160c15a5a75f4f3456025f604de9d0db96879e060c21b633797cc89b466",
+  "tested_head": "4c30582bb0c0c0e66dd36f1927fabc43e5b08b61",
+  "raw_report_sha256": "b1c9f23c08bd7b495c4b4018dcb9f150bf65c0a308ce28d84e0101a1e37dcc22",
+  "new_findings_since_prior_scan": 0
+}

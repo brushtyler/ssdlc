@@ -1,0 +1,28 @@
+{
+  "tested_head": "4c30582bb0c0c0e66dd36f1927fabc43e5b08b61",
+  "base": "609bf27cc0f627248930cd8a1af621111d668318",
+  "exit_code": 1,
+  "seconds": 0.6772508281283081,
+  "provider_calls": 0,
+  "findings": [
+    {
+      "RuleID": "aws-access-token",
+      "File": "tests/test_repair_prompt.py",
+      "StartLine": 92,
+      "Commit": "d27ec109bdb2fb7fbd39b51e12a9aaa5589516ee",
+      "Fingerprint": "d27ec109bdb2fb7fbd39b51e12a9aaa5589516ee:tests/test_repair_prompt.py:aws-access-token:92",
+      "fixture_line_sha256": "bc3d24206fa8cb7d9416c4c7173a8ad661e323383aee88e8e357fa16661eb081"
+    },
+    {
+      "RuleID": "private-key",
+      "File": "tests/test_repair_prompt.py",
+      "StartLine": 93,
+      "Commit": "d27ec109bdb2fb7fbd39b51e12a9aaa5589516ee",
+      "Fingerprint": "d27ec109bdb2fb7fbd39b51e12a9aaa5589516ee:tests/test_repair_prompt.py:private-key:93",
+      "fixture_line_sha256": "17aba50132dc48e7205121d0df0da7186ad5180fbbb192e29e58b34c1c6f0cc9"
+    }
+  ],
+  "commit_count": 21,
+  "classification": "Only two unchanged synthetic secret-redaction fixture matches; independent AppSec disposition pending",
+  "raw_private_report_sha256": "6a44dab01e75a5f56a678e0f6ca4afaec157511110522eba5b8751be552f91c3"
+}

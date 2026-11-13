@@ -1,0 +1,15 @@
+{
+  "reviewed_commit": "f0aa2d678db2b2512bb1443465f67a5de41461fe",
+  "outcome": "protocol_error",
+  "diagnostics": [
+    "frame_missing",
+    "frame_missing"
+  ],
+  "human_verdict": "APPROVED_NOT_ACCEPTED_AS_GATE",
+  "provider_calls": 2,
+  "observed_cli_estimates_usd": 3.1897479,
+  "qa_dispatched": false,
+  "appsec_dispatched": false,
+  "code_candidate_changed": false,
+  "recovery_authorization": "V3_EXACT_CONSENT_RECEIVED_AND_EXECUTED_LATER_PANEL_NOT_APPROVED"
+}

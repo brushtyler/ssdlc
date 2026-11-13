@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "status": "PASS",
+  "scanner": "pip-audit",
+  "scanner_version": "2.10.1",
+  "source": "requirements.txt",
+  "scope": "All resolved runtime project dependencies; no claim about unrelated tools in the base image",
+  "resolved_dependencies": {
+    "jsonschema": "4.26.0",
+    "attrs": "26.1.0",
+    "jsonschema-specifications": "2025.9.1",
+    "referencing": "0.37.0",
+    "rpds-py": "2026.9.1",
+    "typing-extensions": "4.16.0"
+  },
+  "known_vulnerabilities": 0,
+  "raw_report_sha256": "b8b2cff1150ace135f56e98e7ad658c2515b9030c47e2c7e35ba52533d3bfe3d",
+  "runtime_versions_verified": true,
+  "initial_default_executable_missing": true,
+  "validation_only_uvx_install": true,
+  "source_changed": false,
+  "tested_head": "f0aa2d678db2b2512bb1443465f67a5de41461fe",
+  "requirements_sha256": "d3a11978e6af31683ec4fbad53be057ce3149f74280dc595b97293b51e681af9"
+}

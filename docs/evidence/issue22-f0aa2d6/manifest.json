@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "source_commit": "f0aa2d678db2b2512bb1443465f67a5de41461fe",
+  "state": "NOT_APPROVED_TWO_REPRODUCED_MANDATORY_FINDINGS",
+  "final_delivery_proven": false,
+  "files": {
+    "protocol-failed-review-2.md": "dda46853f5bc679bda64dd410f6bfb5a0d316ca9aeae1e31314b3c6587a57cbe",
+    "followup-review-codex.md": "5c69b4acfa346024accb5640b367576e63ca4168e27025fcdd4f190b6a2facfb",
+    "original-requirements.md": "cee2aa5c7accb8c54421c936f3dc163c9c4718ac886957379b36ef7681c5c20c",
+    "protocol-failure.json": "a4d671f51d30310653de63e903267b2b21f186622992ea3747dc60824c9fd079",
+    "dependency-audit.json": "6289e90b7a24066304a0a6b67c5065c1379877d57adfc7a428bd33e01afc7735",
+    "commit-history-scan.json": "736d12c870d3f8dd60bf0913e2a838b95f15bae916758bb04fbf778cce2ec10f",
+    "full-suite.json": "705168c00d02be9094bf41d51fc35b026e63132cb4d7bd410d5239d06ed35080",
+    "followup-review-outcomes.json": "9220d642425eb09a87a69b4f85ecb39158a8ada314ff9d18a9232089cb331c5f",
+    "recovery-benchmark.json": "76a0e0089eacd3888ae497d1c1c8aedb065311a709f50101f133fbdfcecd29bb",
+    "followup-review-claude.md": "7e05e294ec23add957f57b43003d93522c2629caaa5f3db941aca128c9590120",
+    "README.md": "f96e3a86152163c0cd278ca1183d52aaca830068bc8fd8daf48188e85484489b",
+    "requirements.json": "92eef07f4e7d4dd781c174e30ddc596bb8032386f7f6c066d0f9548f30018e38",
+    "scanner-triage.json": "b1dc821694819f97ddb8db1ba5838ebc15cc5cd09314e737aef9c11f707c421f",
+    "protocol-failed-review-1.md": "71f9c77b3e3bb73915d6b8b91c8e54aa6536eb37aa2f42564e623ac38e87c748"
+  }
+}

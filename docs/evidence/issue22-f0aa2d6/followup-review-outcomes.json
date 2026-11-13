@@ -1,0 +1,17 @@
+{
+  "reviewed_commit": "f0aa2d678db2b2512bb1443465f67a5de41461fe",
+  "panel_approved": false,
+  "claude": "APPROVED_LIMITED_INSPECTION_DISCLOSED",
+  "codex": "CHANGES_REQUESTED_REPORT_PATH_FORMAT_INVALID",
+  "substantive_findings_independently_reproduced": 2,
+  "findings": [
+    "ISSUE22-INDEPENDENT-001",
+    "ISSUE22-INDEPENDENT-002"
+  ],
+  "fixed_commit": "4fc35ec97881fea6ade372bbcd0e0a6de796cf30",
+  "focused_tests_passed": 18,
+  "qa": "NOT_RUN",
+  "appsec": "NOT_RUN",
+  "source_validation_of_fix": "FULL_SUITE_IN_PROGRESS",
+  "old_approvals_not_reused": true
+}
