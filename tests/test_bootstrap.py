@@ -241,6 +241,27 @@ class CheckpointTests(RepositoryTests):
         self.assertEqual(events.count('PREFLIGHT_BOOTSTRAP_EXEMPT'), 1)
         self.assertEqual(events.count('BOOTSTRAP_PROVEN'), 1)
 
+    def test_unproven_initialized_bootstrap_refuses_resume_before_dispatch(self):
+        scheduler = self.make_scheduler()
+        save = scheduler._save
+        class Crash(BaseException):
+            pass
+        def fault(event):
+            save(event)
+            if event == 'INITIALIZED':
+                raise Crash()
+        with patch.object(scheduler, '_save', side_effect=fault), self.assertRaises(Crash):
+            scheduler.run(self.plan['tasks'])
+        before = scheduler.journal.path.read_bytes()
+        self.assertEqual(scheduler.journal.peek()['bootstrap']['status'], 'PENDING')
+        for resumed in (scheduler, self.make_scheduler()):
+            with patch.object(resumed, 'developer', side_effect=AssertionError('developer dispatched')), \
+                 patch.object(resumed, '_save', side_effect=AssertionError('journal changed')), \
+                 self.assertRaises(bootstrap.BootstrapError) as raised:
+                resumed.run(self.plan['tasks'])
+            self.assertEqual(raised.exception.code, 'interrupted')
+            self.assertEqual(scheduler.journal.path.read_bytes(), before)
+
     def test_crash_before_proof_refuses_resume(self):
         scheduler = self.make_scheduler()
         save = scheduler._save

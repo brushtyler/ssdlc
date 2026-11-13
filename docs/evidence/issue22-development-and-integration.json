@@ -2,9 +2,9 @@
   "schema_version": 1,
   "scope": "Issue22 task-only execution, explicit bootstrap and corrective gate recovery; includes current-main integration",
   "source_manifest": {
-    "sha256": "beebf6efa95d032163e9c2542befcc159c74bfeb8e60821727a1c9df4de68d66",
+    "sha256": "8759d24666f0f6da6f0ee6b1a145ac9022a4f576fe0fe839047b2662d9cc1e19",
     "definition": "SHA256 of canonical JSON mapping every tracked or nonignored source path to SHA256(file bytes), sorted by path; docs/evidence/ is excluded to avoid self-reference",
-    "files": 213
+    "files": 214
   },
   "native_development": {
     "candidate_commit": "dc4a1c4312bdd08b8c20a9825185388e0eaadcdd",
@@ -149,5 +149,12 @@
     "result": "PASS",
     "scope": "All global gates remain in sequence; QA/AppSec reuse candidate proof; fault restart preserves snapshot; AppSec is skipped only after an earlier rejection",
     "fresh_full_suite_and_independent_gates_required": true
+  },
+  "independent_review_followup": {
+    "reproduced_findings": 2,
+    "frozen_prior_commit": "f0aa2d678db2b2512bb1443465f67a5de41461fe",
+    "baseline_regressions_failed_as_expected": 2,
+    "fixed_focused_test_executions": 18,
+    "final_suite_and_gates": "PENDING_NEW_EXACT_SOURCE_VERIFICATION"
   }
 }

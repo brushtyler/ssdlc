@@ -86,7 +86,8 @@
       "id": "AC-19",
       "test_references": [
         "test_bootstrap.CheckpointTests.test_crash_before_proof_refuses_resume",
-        "test_bootstrap.BootstrapTests.test_pre_execution_resume_refuses_before_writes"
+        "test_bootstrap.BootstrapTests.test_pre_execution_resume_refuses_before_writes",
+        "test_bootstrap.CheckpointTests.test_unproven_initialized_bootstrap_refuses_resume_before_dispatch"
       ],
       "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
     },
@@ -319,7 +320,10 @@
       "id": "AC-8",
       "test_references": [
         "test_legacy_compat.CompatibilityTests.test_schema_invalid_registered_inputs_are_refused_before_mutation",
-        "test_legacy_compat.CompatibilityTests.test_journal_matrix_and_approval"
+        "test_legacy_compat.CompatibilityTests.test_journal_matrix_and_approval",
+        "test_signoff_provenance.SignoffProvenanceTests.test_ready_status_without_gate_receipts_is_refused_before_constructor",
+        "test_signoff_provenance.SignoffProvenanceTests.test_full_native_provenance_admits_approval",
+        "test_signoff_provenance.SignoffProvenanceTests.test_tampered_or_incomplete_phase_never_falls_back_to_old_approval"
       ],
       "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
     },
@@ -364,7 +368,10 @@
       "test_references": [
         "test_corrective_executor.ExecutorTests.test_tier_s_always_reruns_appsec_after_repair",
         "test_unified_integration.CorrectiveJourneys.test_review_root_repair_dependent_revalidation_and_fresh_gates",
-        "test_review_closure.ReviewClosureTests.test_every_tier_requires_appsec_without_a_specialist_trigger"
+        "test_review_closure.ReviewClosureTests.test_every_tier_requires_appsec_without_a_specialist_trigger",
+        "test_signoff_provenance.SignoffProvenanceTests.test_ready_status_without_gate_receipts_is_refused_before_constructor",
+        "test_signoff_provenance.SignoffProvenanceTests.test_full_native_provenance_admits_approval",
+        "test_signoff_provenance.SignoffProvenanceTests.test_tampered_or_incomplete_phase_never_falls_back_to_old_approval"
       ],
       "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
     },
@@ -381,7 +388,10 @@
       "id": "SEC-3",
       "test_references": [
         "test_legacy_compat.CompatibilityTests.test_refusals_before_every_constructor",
-        "test_legacy_compat.CompatibilityTests.test_journal_matrix_and_approval"
+        "test_legacy_compat.CompatibilityTests.test_journal_matrix_and_approval",
+        "test_signoff_provenance.SignoffProvenanceTests.test_ready_status_without_gate_receipts_is_refused_before_constructor",
+        "test_signoff_provenance.SignoffProvenanceTests.test_full_native_provenance_admits_approval",
+        "test_signoff_provenance.SignoffProvenanceTests.test_tampered_or_incomplete_phase_never_falls_back_to_old_approval"
       ],
       "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
     },
@@ -398,7 +408,8 @@
         "test_bootstrap.BootstrapTests.test_existing_tests",
         "test_bootstrap.BootstrapTests.test_dirty",
         "test_bootstrap.BootstrapTests.test_execution_boundary_rechecks_eligibility",
-        "test_bootstrap.CheckpointTests.test_crash_before_proof_refuses_resume"
+        "test_bootstrap.CheckpointTests.test_crash_before_proof_refuses_resume",
+        "test_bootstrap.CheckpointTests.test_unproven_initialized_bootstrap_refuses_resume_before_dispatch"
       ],
       "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
     },

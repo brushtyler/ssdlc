@@ -124,8 +124,9 @@ class CompatibilityTests(RepositoryTests):
     def test_context_and_sealed_history_are_read_only(self):
         self.seal()
         before = self.snapshot()
-        for command in ('run', 'approve', 'reject'):
+        for command in ('run', 'reject'):
             self.assertEqual(o.execution_compatibility(self.repo, 'OLD', command)['cls'], 'sealed_task')
+        self.assertFalse(o.execution_compatibility(self.repo, 'OLD', 'approve')['ok'])
         self.assertEqual(before, self.snapshot())
         original = o.build_task_context(self.root)
         with patch.object(o, 'build_task_context', return_value={name: '' for name in original}):

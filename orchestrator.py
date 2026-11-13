@@ -370,6 +370,26 @@ def legacy_message(ticket):
             'ssdlc run --ticket <NEW_TICKET> --goal "<goal>" --repo <repo>')
 
 
+def verify_signoff_evidence(repo, root, state, worktree=None):
+    """Read native final-candidate approvals; mutable status is not authority."""
+    root = Path(root)
+    worktree = Path(worktree) if worktree is not None else root / 'worktree'
+    for phase in ('04-review', '05-qa', '05b-appsec'):
+        attempts = []
+        for path in (root / phase / 'provenance').glob('attempt-*/roster.json'):
+            match = re.fullmatch(r'attempt-([1-9][0-9]*)', path.parent.name)
+            if match is None:
+                raise TaskError('Global gate approval provenance is malformed: ' + phase)
+            attempts.append(int(match.group(1)))
+        if not attempts:
+            raise TaskError('Verified global gate approval evidence is missing: ' + phase)
+        evidence = bounce.read_evidence(root=root, state=state, repo=Path(repo),
+            worktree=worktree, phase=phase, attempt=max(attempts))
+        if (evidence['status'] != 'verified' or not evidence['evaluations']
+                or any(row['outcome_class'] != 'approved' for row in evidence['evaluations'])):
+            raise TaskError('Global gate approval evidence is missing, rejected or stale: ' + phase)
+
+
 def execution_compatibility(repo_root, ticket, command):
     """Classify persisted execution evidence without locks or writable objects."""
     result = dict(ok=False, cls='legacy', code='legacy_not_executable', reason='incompatible_state')
@@ -415,6 +435,8 @@ def execution_compatibility(repo_root, ticket, command):
                         not journal.get('tasks') or any(t.get('status') != 'COMPLETED' for t in journal['tasks'].values()) or
                         not state.get('task_verified_head') or state['task_verified_head'] != journal.get('expected_head')):
                     raise PlanError('Incomplete task approval')
+                if command == 'approve':
+                    verify_signoff_evidence(repo, root, state)
                 return dict(ok=True, cls='sealed_task', code='compatible', reason='compatible')
             except (OSError, ValueError, KeyError, TypeError, AttributeError, TaskError):
                 pass
@@ -5530,6 +5552,7 @@ To **REJECT** and record feedback (free text authorizes no repair):
             raise TaskError("Bootstrap approval requires a clean unchanged target; advanced-target integration belongs to Step 3")
         if self.state.get("status") not in ("AWAITING_SUPERVISOR_SIGNOFF", "ESCALATED_TO_SUPERVISOR"):
             raise RuntimeError(f"Ticket {self.ticket_id} is in status {self.state.get('status')}, cannot approve.")
+        verify_signoff_evidence(self.repo_root, self.ssdlc_root, self.state, self.worktree_dir)
         disclosures = self._completion_disclosures()
         if disclosures:
             print(disclosures, flush=True)

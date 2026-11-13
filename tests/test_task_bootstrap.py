@@ -965,25 +965,26 @@ class OrchestratorBootstrapTests(RepositoryTests):
         self.assertFalse((wt / 'later.py').exists())
 
     def test_approve_keeps_evidence_and_does_not_commit_residual_changes(self):
-        with patch.dict(os.environ, {'SSDLC_ENABLE_TASK_BREAKDOWN': 'true'}):
-            orch = self.make_orchestrator()
-            wt = orch._ensure_worktree()
-            (wt / 'app.py').write_text('value = 1\n')
-            git(wt, 'add', 'app.py')
-            git(wt, 'commit', '-m', 'verified checkpoint')
-            head = git(wt, 'rev-parse', 'HEAD')
-            orch.state.update(task_verified_head=head, status='AWAITING_SUPERVISOR_SIGNOFF')
-            orch._save_state()
-            evidence = orch.dir_dev / 'implementation.diff'
-            evidence.write_text('Evidence must survive')
-            (wt / 'unexpected.py').write_text('must not be committed')
-            with self.assertRaisesRegex(TaskError, 'verified checkpoint'):
-                orch.approve_and_merge()
-            (wt / 'unexpected.py').unlink()
+        # Approval requires real, source-bound native evaluator receipts for
+        # every global gate, rather than a fabricated ready status.
+        import test_unified_integration as journeys
+        case = journeys.StartupJourneys()
+        self.addCleanup(case.doCleanups)
+        case.setUp()
+        case.new_run()
+        orch = case.active_orch
+        wt = orch.worktree_dir
+        head = git(wt, 'rev-parse', 'HEAD')
+        evidence = orch.dir_dev / 'implementation.diff'
+        original = evidence.read_bytes()
+        (wt / 'unexpected.py').write_text('must not be committed')
+        with self.assertRaisesRegex(TaskError, 'verified checkpoint'):
             orch.approve_and_merge()
-            self.assertEqual(evidence.read_text(), 'Evidence must survive')
-            self.assertEqual(git(self.repo, 'rev-parse', 'HEAD'), head)
-            self.assertTrue(orch.state_file.exists())
+        (wt / 'unexpected.py').unlink()
+        orch.approve_and_merge()
+        self.assertEqual(evidence.read_bytes(), original)
+        self.assertEqual(git(orch.repo_root, 'rev-parse', 'HEAD'), head)
+        self.assertTrue(orch.state_file.exists())
 
     def test_baseline_and_plan_generation_include_the_complete_schema_and_context(self):
         tests_dir = self.repo / 'tests'

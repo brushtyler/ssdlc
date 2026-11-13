@@ -2027,6 +2027,9 @@ class TaskScheduler:
         inputs = digest({'plan': self.plan, 'quality': self.quality, 'context': self.context})
         peeked = self.journal.peek()
         if peeked is not None:
+            if peeked.get('bootstrap', {}).get('status') in ('PENDING', 'CHECKPOINT_STARTED'):
+                from ssdlc_bootstrap import BootstrapError
+                raise BootstrapError('interrupted')
             if peeked.get('owner_revalidation_blocked'):
                 raise DevelopmentBlocked('OWNER_REVALIDATION_FAILED',
                     'Owner coverage or checks failed; preserve evidence and use explicit completed-task recovery')

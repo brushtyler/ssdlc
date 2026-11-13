@@ -174,13 +174,13 @@ With an explicit quality contract that opts in with `candidate_proof`, determini
 
 ### Approval
 
-The bootstrap stops on review feedback instead of skipping rejected tasks. Approval requires passing global gates, a clean checkpoint and an unchanged, clean target. It then fast-forwards to the verified SHA and preserves the evidence.
+Approval requires passing global gates, a clean checkpoint and an unchanged, clean target. Both CLI admission and the merge entry point reverify the latest registered Review, QA and AppSec rosters, complete evaluator records and source-bound approvals. A ready status or summary alone grants no merge authority; incomplete, rejected, changed or stale evidence blocks. Approval then fast-forwards to the verified SHA and preserves the evidence.
 
 ## Current limits
 
 - Strict file manifests and automated task checks are required. Scope changes only through explicit, reviewed amendments ([Scope amendments](scope-amendments.md), [Developer feedback](developer-feedback.md)); there is no automatic replanning.
 - Subgoals and automatic plan migrations are rejected. Per-task routing and subgoals are planned in `PLAN_TASK_ROUTING_AND_SUBGOALS.md`.
-- Targeted review bounce is preview-only ([Bounce preview](bounce-preview.md)).
+- Verified substantive gate rejection supports targeted root repair and dependent revalidation ([Bounce preview and corrective execution](bounce-preview.md)); advisory previews alone never authorize execution.
 - Advisory schemas and provenance validation exist; proposal collection, export and `--from-proposal` are not implemented yet.
 - Global review, QA and AppSec still run through the existing pipeline. The complete independent review matrix is a later increment.
 
@@ -217,7 +217,8 @@ commit/tree and registered policy. The first implementation must add real tests:
 `python3 -m unittest discover -s tests` must execute at least one passing test.
 Empty, failing, missing, timed-out or interrupted checks block. The one-task
 exemption becomes journaled `PROVEN`/post-bootstrap without rewriting the sealed
-contract. Restart before proof fails explicitly; a profile cannot renew eligibility.
+contract. Restart before proof fails explicitly, including a journal stopped at
+`INITIALIZED` with bootstrap status `PENDING`; a profile cannot renew eligibility.
 Existing tests, dirty trees or later commits are ineligible (exit 24). Without an
 explicit profile, strict baseline rules apply. Protected paths and task checks
 remain enforced throughout.
