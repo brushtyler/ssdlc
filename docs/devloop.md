@@ -29,9 +29,22 @@ Readiness belongs to the approved commit. Every tick re-checks ready PRs:
 
 Any step can stop at `agent:needs-human` with a comment explaining why: the agent declared itself
 blocked, tests still fail after the retry, the reviewer asked for a decision, the round limit
-(`max_review_rounds`, CI failures included) was reached, or an agent or `gh` call failed.
-To resume, fix the cause and set the label that should run next (`agent:ready`, `agent:review`
-or `agent:changes`).
+was reached, an agent, `gh` or `git` call failed or timed out, the issue text was changed by an
+untrusted user after `agent:ready`, or the PR body lost its marker. While `agent:needs-human` is
+set devloop ignores the PR or issue, so to resume: fix the cause, **remove `agent:needs-human`**
+and set the label that should run next (`agent:ready` on the issue, `agent:review` or
+`agent:changes` on the PR). Every escalation comment repeats this.
+
+The round limit (`max_review_rounds`) is checked before every new round, whether a review or a
+CI failure, so a PR whose head keeps moving cannot be reviewed indefinitely. Replaying a verdict
+that is already recorded is not a new round.
+
+A devloop PR is recognised by its branch, `agent/issue-<n>`, opened by a trusted user. Its body
+ends with a hidden marker that records the issue, implementer and reviewer: text may be edited
+above it, but the marker must stay the last line. A PR whose marker is missing stays in the flow
+(it still counts against `max_open_prs` and its issue does not restart) and goes to
+`agent:needs-human`. A PR left without a state label, for example after a crash right after it
+was opened, is put back into `agent:review`, and its issue loses `agent:working`.
 
 Open devloop PRs are capped by `max_open_prs`, including PRs waiting for merge or for a human,
 so unattended work cannot outrun review capacity. New issues start in order: `priority_labels`
@@ -124,9 +137,12 @@ dispatcher does every commit, push and GitHub write.
   are comments, not GitHub approvals, and branch protection cannot tell agents apart.
 - **Trust comes from labels.** Only issues whose `agent:ready` label was added by a user in
   `trusted_users` start, only comments by those users reach the prompts, and only their markers
-  are read. Issue text is still model input: do not label untrusted content.
-- **Failures escalate immediately.** A timeout or a transient CLI error goes to
-  `agent:needs-human` rather than being retried.
+  are read. Labelling approves the issue's title and body as they are: if someone outside
+  `trusted_users` changes them later, implementation, review and fixes stop at
+  `agent:needs-human` until a trusted user adds `agent:ready` again. Issue text is still model
+  input: do not label untrusted content.
+- **Failures escalate immediately.** A timeout or a transient error of an agent, `gh` or `git`
+  goes to `agent:needs-human` rather than being retried.
 - **Single host, sequential.** One tick runs actions one at a time.
 - **`gh` compatibility.** Checks, labels, comments and PR creation go through the REST API
   (`gh api`), so devloop does not depend on newer porcelain flags such as `gh pr checks --json`.

@@ -20,8 +20,8 @@ from pathlib import Path
 
 from .agents import AgentError
 from .github import GitHubError
-from .markdown import (dispatcher_header, publishable, read_marker, render_escalation, render_fix,
-                       render_review)
+from .markdown import (RESUME, dispatcher_header, publishable, read_marker, render_escalation,
+                       render_fix, render_review)
 from .review import ci_failure_review, normalize_review, open_findings
 from .workspace import WorkspaceError
 
@@ -80,17 +80,28 @@ def plan(snapshot, cfg):
     for number in snapshot.working_issues:
         if number not in pr_issues:
             actions.append(Action('stale', number, 'agent:working without an open devloop PR'))
+        else:
+            actions.append(Action('settle', number, 'agent:working but its PR is open'))
     for pr in snapshot.prs:
         if lb.needs_human in pr.labels:
             continue
+        if not pr.meta:
+            actions.append(Action('lost_meta', pr.number, 'PR body no longer ends with its marker'))
+            continue
+        if not pr.labels & {lb.review, lb.changes, lb.ready_to_merge}:
+            # e.g. a crash between creating the PR and labelling it
+            actions.append(Action('reconcile', pr.number, 'devloop PR without a state label'))
+            continue
         latest = pr.reviews[-1] if pr.reviews else None
+        rounds_left = len(pr.reviews) < cfg.max_review_rounds
         if lb.ready_to_merge in pr.labels:
             # Readiness belongs to the approved commit: re-check it on every tick.
             approved = latest is not None and latest['verdict'] == 'approve'
             if not approved or latest['head_sha'] != pr.head_sha:
                 actions.append(Action('revoke', pr.number, 'head is not the approved commit'))
             elif pr.checks == 'fail':
-                actions.append(Action('ci_failed', pr.number, 'CI failed after approval'))
+                actions.append(Action('ci_failed', pr.number, 'CI failed after approval')
+                               if rounds_left else Action('round_limit', pr.number))
             elif pr.checks == 'pending':
                 # CI re-running on the approved commit: not ready until it passes again. The
                 # recorded approval is replayed from agent:review, without a new review.
@@ -105,10 +116,13 @@ def plan(snapshot, cfg):
                 actions.append(Action('apply_review', pr.number, 'verdict already recorded'))
             elif pr.checks == 'pending':
                 continue
+            elif replay and pr.checks != 'fail':
+                actions.append(Action('apply_review', pr.number, 'approval already recorded'))
+            elif not rounds_left:
+                # Every new round, a CI failure or a review, counts against the limit.
+                actions.append(Action('round_limit', pr.number))
             elif pr.checks == 'fail':
                 actions.append(Action('ci_failed', pr.number))
-            elif replay:
-                actions.append(Action('apply_review', pr.number, 'approval already recorded'))
             else:
                 actions.append(Action('review', pr.number))
     free = cfg.max_open_prs - len(snapshot.prs)
@@ -127,6 +141,30 @@ def plan(snapshot, cfg):
             spent += 1
         capped.append(action)
     return capped
+
+
+class UntrustedChange(RuntimeError):
+    """The issue text changed after a trusted user approved it with the ready label."""
+
+
+def untrusted_change(history, ready_label, trusted_users):
+    """Why the issue's title or body can no longer be trusted, or None.
+
+    Trust comes from a trusted user adding ``ready_label``; a later change to the title or the
+    body by anyone else voids it until a trusted user adds the label again.
+    """
+    approved = [at for name, who, at in history['labeled']
+                if name == ready_label and who in trusted_users]
+    if not approved:
+        return f'nessuna label `{ready_label}` messa da un utente fidato'
+    since = approved[-1]
+    edited = history['last_edited_at']
+    if edited and edited > since and history['editor'] not in trusted_users:
+        return f'il testo è stato modificato da `{history["editor"]}` dopo la label `{ready_label}`'
+    for who, at in history['renamed']:
+        if at > since and who not in trusted_users:
+            return f'il titolo è stato modificato da `{who}` dopo la label `{ready_label}`'
+    return None
 
 
 def _template(name, **values):
@@ -178,17 +216,23 @@ class Dispatcher:
         return found
 
     def _devloop_pr(self, raw):
+        """A devloop PR is recognised by its branch, ``<branch_prefix><issue>``, so that it stays
+        in the flow (and its branch is never overwritten) even if its marker is lost. ``meta`` is
+        empty when the body no longer ends with a marker for that issue."""
         if raw.get('isCrossRepository') or (raw.get('author') or {}).get('login') not in self.cfg.trusted_users:
             return None
-        if not raw['headRefName'].startswith(self.cfg.branch_prefix):
+        ref, prefix = raw['headRefName'], self.cfg.branch_prefix
+        suffix = ref[len(prefix):] if ref.startswith(prefix) else ''
+        if not (suffix.isascii() and suffix.isdigit()):
             return None
+        issue = int(suffix)
         meta = read_marker(raw.get('body', ''), 'pr')
-        if meta is None:
-            return None
-        return PullRequest(number=raw['number'], issue=meta['issue'],
-                           head_ref=raw['headRefName'], head_sha=raw['headRefOid'],
+        if meta is not None and meta['issue'] != issue:
+            meta = None
+        return PullRequest(number=raw['number'], issue=issue,
+                           head_ref=ref, head_sha=raw['headRefOid'],
                            title=raw['title'], body=raw.get('body', ''),
-                           labels=label_names(raw['labels']), meta=meta)
+                           labels=label_names(raw['labels']), meta=meta or {})
 
     def snapshot(self):
         lb = self.cfg.labels
@@ -225,7 +269,7 @@ class Dispatcher:
             handler = getattr(self, f'_do_{action.kind}')
             try:
                 handler(prs.get(action.number) or action.number)
-            except (AgentError, GitHubError, WorkspaceError) as exc:
+            except (AgentError, GitHubError, WorkspaceError, UntrustedChange) as exc:
                 self.log(f'  failed: {exc}')
                 self._escalate_failure(action, prs.get(action.number), exc)
         return actions
@@ -250,7 +294,14 @@ class Dispatcher:
             self.log(f'  could not escalate: {gh_exc}')
 
     def _issue_context(self, number):
-        issue = self.gh.issue(number)
+        """The issue as model input. Title and body come from the same read as their edit
+        history, and are refused if someone outside ``trusted_users`` changed them after the
+        ready label."""
+        history = self.gh.issue_history(number)
+        reason = untrusted_change(history, self.cfg.labels.ready, self.cfg.trusted_users)
+        if reason:
+            raise UntrustedChange(f'issue #{number}: {reason}')
+        issue = dict(self.gh.issue(number), title=history['title'], body=history['body'])
         comments = [c for c in issue.get('comments') or []
                     if (c.get('author') or {}).get('login') in self.cfg.trusted_users]
         rendered = '\n\n'.join(f'### Comment by {c["author"]["login"]}\n\n{c["body"]}' for c in comments)
@@ -280,7 +331,7 @@ class Dispatcher:
 
     def _blocked(self, number, agent, reason, remove):
         self.gh.comment(number, publishable(self.runner.header(agent) + '\n## Lavoro bloccato\n\n'
-                                            + reason.strip()))
+                                            + reason.strip() + '\n\n' + RESUME))
         self.gh.edit_labels(number, add=[self.cfg.labels.needs_human], remove=remove)
 
     def _approval_current(self, pr, review):
@@ -338,8 +389,28 @@ class Dispatcher:
     def _do_stale(self, number):
         lb = self.cfg.labels
         self._escalate(number, 'Implementazione interrotta: la issue era in lavorazione ma non '
-                               'esiste una PR devloop aperta. Rimettere `agent:ready` per ripartire.',
-                       remove=[lb.working])
+                               'esiste una PR devloop aperta.', remove=[lb.working])
+
+    def _do_settle(self, number):
+        self.gh.edit_labels(number, remove=[self.cfg.labels.working])
+
+    def _do_reconcile(self, pr):
+        self.gh.edit_labels(pr.number, add=[self.cfg.labels.review])
+
+    def _do_lost_meta(self, pr):
+        lb = self.cfg.labels
+        self._escalate(pr.number, 'La descrizione della PR non termina più con il marker devloop '
+                                  f'della issue #{pr.issue}, quindi implementer e reviewer non sono '
+                                  'noti. Ripristinare la riga del marker (si trova nella cronologia '
+                                  'delle modifiche della descrizione) come ultima riga.',
+                       remove=[lb.review, lb.changes, lb.ready_to_merge])
+
+    def _do_round_limit(self, pr):
+        lb = self.cfg.labels
+        self._escalate(pr.number, f'Raggiunto il limite di {self.cfg.max_review_rounds} round di '
+                                  'review: un nuovo round (review o CI fallita) non parte senza una '
+                                  'decisione umana.',
+                       remove=[lb.review, lb.changes, lb.ready_to_merge])
 
     def _do_implement(self, number):
         cfg, lb = self.cfg, self.cfg.labels
@@ -398,12 +469,12 @@ class Dispatcher:
                            f'(`{pr.meta["implementer"]}`): la review non può essere indipendente.',
                 remove=[cfg.labels.review])
         agent = cfg.agent(reviewer_key)
+        issue, _ = self._issue_context(pr.issue)
         name = f'pr-{pr.number}'
         path = self.ws.existing_branch(name, pr.head_ref)
         if self.ws.head(path) != pr.head_sha:
             self.log('  head moved since the snapshot; retrying next tick')
             return
-        issue, _ = self._issue_context(pr.issue)
         round_no = len(pr.reviews) + 1
         previous_open = open_findings(pr.reviews)
         prompt = _template('review', repo=cfg.repo, base_branch=cfg.base_branch,
@@ -434,12 +505,6 @@ class Dispatcher:
         if not findings:
             return self._escalate(pr.number, 'Modifiche richieste ma nessun finding aperto.',
                                   remove=[lb.changes])
-        name = f'pr-{pr.number}'
-        path = self.ws.existing_branch(name, pr.head_ref)
-        if self.ws.head(path) != latest['head_sha']:
-            self.log('  branch changed after the review; sending it back to review')
-            self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.changes])
-            return
         if pr.meta['implementer'] not in cfg.agents:
             return self._escalate(
                 pr.number, f'L\'implementer della PR (`{pr.meta["implementer"]}`) non è più '
@@ -447,6 +512,12 @@ class Dispatcher:
                 remove=[lb.changes])
         agent = cfg.agent(pr.meta['implementer'])
         issue, _ = self._issue_context(pr.issue)
+        name = f'pr-{pr.number}'
+        path = self.ws.existing_branch(name, pr.head_ref)
+        if self.ws.head(path) != latest['head_sha']:
+            self.log('  branch changed after the review; sending it back to review')
+            self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.changes])
+            return
         prompt = _template('fix', repo=cfg.repo, pr_number=pr.number, issue_number=pr.issue,
                            issue_title=issue['title'], issue_body=issue.get('body') or '',
                            findings=_format_findings(findings), test_cmd=cfg.test_cmd,
