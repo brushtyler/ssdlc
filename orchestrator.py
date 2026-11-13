@@ -5424,8 +5424,10 @@ To **REJECT** and record feedback (free text authorizes no repair):
                 corrective_run = bool(recovered) or attempt > 1
                 if corrective_run:
                     self.check_budget_circuit_breaker()
-                    transaction = next(record for record in self._open_or_any_txns()
-                                       if record['txn_id'] == recovered['txn_id'])
+                    transaction = next((record for record in self._open_or_any_txns()
+                                        if record['txn_id'] == recovered.get('txn_id')), None)
+                    if transaction is None:
+                        raise corrective.CorrectiveError('txn_record_conflict')
                     self._corrective_stage('gates_rerun', preview={'revision': transaction['preview']['revision']},
                         txn_id=transaction['txn_id'], tasks=transaction['closure'])
                 if not corrective_run and start_idx <= self.PHASE_ORDER.index("03-dev"):

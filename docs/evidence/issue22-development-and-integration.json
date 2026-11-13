@@ -2,7 +2,7 @@
   "schema_version": 1,
   "scope": "Issue22 task-only execution, explicit bootstrap and corrective gate recovery; includes current-main integration",
   "source_manifest": {
-    "sha256": "0a7d683bea912f13914b931aa286a4161ec3017ddf99e2ec3015b1ae8fe0b6a5",
+    "sha256": "669112a0f64376e039b9c5446de4dc5c0ee22d75aef78a27f4a4d48b033e18ca",
     "definition": "SHA256 of canonical JSON mapping every tracked or nonignored source path to SHA256(file bytes), sorted by path; docs/evidence/ is excluded to avoid self-reference",
     "files": 212
   },
@@ -110,5 +110,12 @@
   "readiness_boundary": "This committed artifact records native development and focused offline evidence only. Fresh full integrated-source suite, independent Review/QA/AppSec outcomes and sanitized final attestations are linked from the PR description after execution. It grants no approval or execution authority.",
   "provider_calls_for_offline_validation": 0,
   "unknown_cost_observations": "remain unknown; reservations are allocations, not observed charges",
-  "no_auto_merge": true
+  "no_auto_merge": true,
+  "final_corrective_guard_regression": {
+    "tests": 111,
+    "seconds": 441.279,
+    "result": "PASS",
+    "scope": "Frozen I2 policy, stage observability and crash recovery; includes missing-transaction refusal before fresh gates",
+    "full_integrated_suite_still_required": true
+  }
 }

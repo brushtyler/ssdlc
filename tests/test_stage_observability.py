@@ -3,6 +3,8 @@ import io
 import json
 import logging
 import os
+from pathlib import Path
+import tempfile
 from contextlib import redirect_stderr, redirect_stdout
 from types import SimpleNamespace
 import unittest
@@ -13,6 +15,23 @@ import ssdlc_bootstrap as bootstrap
 
 
 class StageObservabilityTests(unittest.TestCase):
+    def test_missing_recovered_transaction_stops_before_fresh_gates(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            instance=o.SSDLCOrchestrator.__new__(o.SSDLCOrchestrator)
+            instance.ssdlc_root=Path(temporary)
+            instance.state={'risk_tier':'S'}
+            with patch.object(instance,'_reconcile_open_txn',return_value={'txn_id':'missing','next_gate_attempt':2}), \
+                 patch.object(instance,'_ensure_task_plan'), \
+                 patch.object(instance,'_corrective_limits',return_value={'gate_round_ceiling':3}), \
+                 patch.object(instance,'check_budget_circuit_breaker'), \
+                 patch.object(instance,'run_phase_review') as review, \
+                 patch.dict(os.environ,{'SSDLC_SUPERVISED_RUN_ID':'','SSDLC_MAX_DEV_RETRIES':'3'}), \
+                 patch.object(o._dispatch_local,'limits',None,create=True):
+                with self.assertRaises(o.corrective.CorrectiveError) as raised:
+                    instance._run_pipeline('offline',from_phase='03-dev')
+            self.assertEqual(raised.exception.code,'txn_record_conflict')
+            review.assert_not_called()
+
     def test_default_cli_handler_has_utc_timestamps_and_leaves_stdout_untouched(self):
         loggers=[logging.getLogger(name) for name in (o.__name__,'ssdlc_corrective',bootstrap.__name__)]
         snapshots=[(logger,list(logger.handlers),logger.level,logger.propagate) for logger in loggers]

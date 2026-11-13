@@ -381,7 +381,9 @@ class DeliveryDisclosureTests(unittest.TestCase):
                      patch.object(owner, 'run_phase_dev') as developer, \
                      patch.object(owner, 'run_phase_review', return_value=(False, 'rejected')), \
                      patch.object(owner, '_stop_on_terminal_gate'), patch.object(owner, 'check_budget_circuit_breaker'), \
-                     patch.object(owner, '_corrective_round', return_value={'next_gate_attempt': 2}) as repair, \
+                     patch.object(owner, '_corrective_round', return_value={'next_gate_attempt': 2, 'txn_id': 'offline-txn'}) as repair, \
+                     patch.object(owner, '_open_or_any_txns', return_value=[{'txn_id': 'offline-txn',
+                         'preview': {'revision': 'a' * 64}, 'closure': ['T1']}]), \
                      patch.object(owner, '_corrective_limits', return_value={'gate_round_ceiling': 9}), \
                      patch.object(owner, 'compile_evidence_pack', return_value=root / 'evidence.md') as pack:
                     owner._run_pipeline('offline', from_phase='03-dev')
