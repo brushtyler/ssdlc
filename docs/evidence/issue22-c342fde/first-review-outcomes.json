@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "reviewed_commit": "c342fdebf3a02085f3fdd130d6d97a2939b0c4d4",
+  "panel_approved": false,
+  "claude": "APPROVED",
+  "codex": "CHANGES_REQUESTED",
+  "finding_ids": [
+    "ISSUE22-REVIEW-001",
+    "ISSUE22-REVIEW-002",
+    "ISSUE22-REVIEW-003"
+  ],
+  "qa": "NOT_RUN",
+  "appsec": "NOT_RUN",
+  "code_fix_commit": "687c04106bbb7840a5267d1caea396f46f3222c7",
+  "pipeline_fixture_fix_commit": "37d173f",
+  "new_source_validation_status": "FULL_SUITE_PASSED_ON_f0aa2d6_FINAL_GATES_PENDING",
+  "old_gate_results_not_reused_for_new_source": true,
+  "console_metadata_fix_commit": "f0aa2d678db2b2512bb1443465f67a5de41461fe"
+}

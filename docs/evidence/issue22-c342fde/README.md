@@ -1,22 +1,16 @@
-# Issue22 evidence for c342fde
+> [!NOTE]
+> **Agent:** Codex (CLI v0.163.0)
+> **Model:** gpt-6.1-sol
+> **Reasoning Level:** Medium
 
-These attestations describe source commit `c342fdebf3a02085f3fdd130d6d97a2939b0c4d4`.
-The evidence branch carries reports; its own later commits are not the code
-candidate reviewed by the gates. The original native development history is
-preserved separately and is not promoted to proof of the integrated source.
+# Historical issue22 evidence for c342fde
 
-The full isolated suite passed 1,480 test executions. The isolated recovery
-benchmark passed all 12 cases. The dependency audit found no known vulnerabilities
-and matched all six resolved runtime dependency versions. Gitleaks returned
-findings: the exact four current-file and two historical synthetic/protocol
-classifications remain subject to independent AppSec confirmation. Raw exit 1 is
-retained; no scanner allowlist was changed.
+These records describe source commit `c342fdebf3a02085f3fdd130d6d97a2939b0c4d4`; the evidence branch's own later commits are reports, not the reviewed source.
 
-Independent Review, QA and AppSec have not run: exact operator consent is pending.
-This is evidence of offline validation, not final delivery approval. The original
-58 requirements, including all 13 AC-38 integration subcases, remain in scope.
-Final approved gate attestations and the complete host audit must be added before
-the final PR is presented as ready.
+The isolated suite passed 1,480 tests and the recovery benchmark passed all12 cases. The dependency audit found no known vulnerabilities in the six resolved project dependencies.
 
-Raw private logs and authorization/account data are excluded. Public summaries
-retain their hashes, exact source identity, commands and outcomes.
+The first independent panel did not approve this candidate: Claude approved; Codex requested changes for mandatory AppSec routing, console-secret redaction and historical scheduler resumption. See `first-review-outcomes.json` and both original assessments. QA and AppSec were not dispatched after the rejection. The old Claude approval does not attest to later corrected commits.
+
+Gitleaks raw exit1 is retained, with four current-file and two historical synthetic/protocol matches awaiting independent AppSec disposition. No allowlist was weakened. Original native development receipts remain separate and do not attest to host-integrated source. All58 original requirements remain mandatory. No final readiness is claimed for this historical candidate.
+
+Raw private logs, account details and authorization data are excluded. Source identities and raw-log hashes remain available.

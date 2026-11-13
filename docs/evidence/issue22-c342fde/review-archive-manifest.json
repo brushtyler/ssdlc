@@ -1,0 +1,10 @@
+{
+  "source_commit": "c342fdebf3a02085f3fdd130d6d97a2939b0c4d4",
+  "panel_approved": false,
+  "files": {
+    "first-review-outcomes.json": "12dc42f83fe90f078909f6bab04b588344e22f9c4314b8f55f2bd1fef30cc8f8",
+    "first-review-codex.md": "0ad8d05f70aa7d28f6d69feca3c2e7abb4bd5398fd4dac243930654f04a9be2b",
+    "first-review-claude.md": "1223a2fdfe490bf67c57e8f62f1f9e76d38c3f619328f9528d67e3e48b003e5a",
+    "README.md": "0d7eb779f794f6a2dfc3791665400b2ced16167bf07269211d2c1818dbdd6dca"
+  }
+}
