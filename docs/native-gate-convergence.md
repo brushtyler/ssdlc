@@ -91,7 +91,7 @@ is recorded, while an exhausted resource retry returning 125 is a failed check.
 
 Records are additive, but a code revert does not make every ticket executable.
 Historical ordinary task records retain their sealed semantics. Bootstrap contracts
-with an absent baseline may fail older schemas/validators and must not be resumed
+with an absent baseline, and new contracts requiring positive test-count proof, may fail older schemas/validators and must not be resumed
 under reverted code. Invalidated/open/failed corrective tickets require restoring
 the matching pre-invalidation journal/snapshot, implementation diff and registry
 checkpoint before old code can execute them. Without that restoration they remain
@@ -137,3 +137,38 @@ No network or provider credentials are required. These offline checks do not cla
 real Docker/provider acceptance. Advanced-target merge, automatic scope migration,
 GitHub #4, accounting #14, quota polling/new billing units, parallel scheduling,
 advisory acceptance and subgoals remain later milestones.
+
+## Stage observability
+
+The CLI emits UTC timestamps and bounded stage events to stderr, preserving JSON
+stdout. Mode decisions, obsolete-flag warnings and bootstrap eligibility identify
+the run. Corrective creation, invalidation, repair, revalidation, reconciliation,
+replay, interruption, gate reruns and completion identify the run, transaction,
+bound preview prefix and task IDs. These events contain reason codes and IDs,
+not finding prose or test-log bodies. Ordinary diagnostic evidence is retained
+separately under the existing access and sanitization rules.
+
+`corrective_gates_rerun` counts the fresh gate traversal after a repair. The other
+corrective, bootstrap and legacy counters are listed in the task-mode guide; all
+are per-process observations, with no new billing units. CLI logging setup does
+not configure the root logger or unrelated libraries. Library callers can attach
+their own logging handlers.
+
+## Positive test-count evidence
+
+Newly captured quality contracts require a positive reported test count for typed
+`test` checks, both at baseline and for candidate/scheduler verification. A silent
+exit-zero command such as `true` is not test evidence and cannot seal a passing
+baseline. Silent lint/type checks remain valid when their exit code passes.
+
+Recognized summaries include Python unittest/pytest, Jest/Vitest, Node TAP and
+Mocha. An unrecognized test summary blocks until the runner emits a supported
+count; it is not guessed to be a passing nonempty suite. The final recognized
+summary takes precedence over earlier or nested examples.
+
+The `positive_test_count_required` capability is sealed in new contracts. Loading
+a historical contract preserves its bytes and earlier semantics. It is never
+added by resume. Its digest is part of candidate evidence, so an older weaker
+record cannot certify a new contract. After a code revert, records remain
+readable, but a contract with an unsupported capability must not execute under
+the older validator. No historical contract or journal is migrated.

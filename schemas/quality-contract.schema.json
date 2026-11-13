@@ -255,6 +255,10 @@
         "baseline_status"
       ],
       "additionalProperties": false
+    },
+    "positive_test_count_required": {
+      "const": true,
+      "description": "New captured test checks require positive runner test-count evidence. Absence preserves historical sealed contract semantics."
     }
   },
   "required": [

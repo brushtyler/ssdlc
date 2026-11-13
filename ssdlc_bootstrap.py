@@ -25,13 +25,18 @@ PROFILES = {
 }
 
 
-def _ineligible(code):
+def _log_run_id(value):
+    text = str(value)
+    return text if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', text) else '-'
+
+
+def _ineligible(code, run_id='-'):
     COUNTERS['bootstrap_ineligible'] += 1
-    logging.getLogger(__name__).warning('bootstrap stage=eligibility decision=ineligible reason=%s', code)
+    logging.getLogger(__name__).warning('bootstrap stage=eligibility decision=ineligible reason=%s run=%s txn=- preview=- tasks=-', code, _log_run_id(run_id))
     return BootstrapError(code)
 
 
-def load_profile(repo):
+def load_profile(repo, *, run_id='-'):
     path = Path(repo) / '.ssdlc/bootstrap-profile.json'
     if not path.exists() and not path.is_symlink():
         return None
@@ -44,9 +49,9 @@ def load_profile(repo):
         validate_document('bootstrap-profile', profile)
         return profile
     except BootstrapError as exc:
-        raise _ineligible(exc.code) from None
+        raise _ineligible(exc.code, run_id) from None
     except (OSError, ValueError, PlanError):
-        raise _ineligible('profile_invalid') from None
+        raise _ineligible('profile_invalid', run_id) from None
 
 
 def policy_sha256(profile_id):
@@ -61,7 +66,7 @@ def profile_checks(profile_id):
                  cwd='.', timeout_sec=300, kind='test', required=True, candidate_proof=True)]
 
 
-def decide(repo, base_commit, profile):
+def decide(repo, base_commit, profile, *, run_id='-'):
     repo = Path(repo)
     try:
         validate_document('bootstrap-profile', profile)
@@ -85,18 +90,26 @@ def decide(repo, base_commit, profile):
                       window_tasks=1, baseline_status='absent')
     except PlanError as exc:
         code = exc.code if isinstance(exc, BootstrapError) else 'profile_invalid'
-        raise _ineligible(code) from None
+        raise _ineligible(code, run_id) from None
     COUNTERS['bootstrap_eligible'] += 1
-    logging.getLogger(__name__).info('bootstrap stage=eligibility decision=eligible reason=eligible')
+    logging.getLogger(__name__).info('bootstrap stage=eligibility decision=eligible reason=eligible run=%s txn=- preview=- tasks=-', _log_run_id(run_id))
     return result
 
 
 def positive_test_count(stdout, stderr):
+    """Use the final recognized runner summary; never turn silence into a count."""
     text = stdout + '\n' + stderr
-    counts = [int(n) for n in re.findall(r'(?m)^Ran (\d+) tests?\b', text)]
-    counts += [int(n) for n in re.findall(r'\b(\d+) passed\b', text)]
-    if counts:
-        return max(counts)
-    if re.search(r'\bno tests ran\b|\bcollected 0 items\b', text):
+    patterns = (
+        r'(?m)^Ran (\d{1,12}) tests?\b',
+        r'(?m)^\s*=*\s*(\d{1,12}) passed\b',
+        r'(?m)^\s*Tests:?\s+(\d{1,12})\b',
+        r'(?m)^# tests (\d{1,12})\b',
+        r'(?m)^\s*(\d{1,12}) passing\b',
+        r'(?m)^collected (0) items?\b',
+    )
+    counts = [(match.start(), int(match.group(1))) for pattern in patterns
+              for match in re.finditer(pattern, text)]
+    empty = [match.start() for match in re.finditer(r'(?m)^=*\s*no tests ran\b', text)]
+    if empty and (not counts or max(empty) > max(pos for pos, count in counts)):
         return 0
-    return None
+    return max(counts, key=lambda item: item[0])[1] if counts else None

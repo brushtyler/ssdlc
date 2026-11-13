@@ -122,7 +122,7 @@ class UnifiedExecutionTests(fixtures.RepositoryTests):
         self.assertIn('shell_command', qa)
         self.assertNotIn('equivalent', qa)
         self.assertIn('shell_command', (orch.ssdlc_root / 'EVIDENCE_PACK.md').read_text())
-        return journal, logs.getvalue(), calls
+        return journal, '\n'.join(line for line in logs.getvalue().splitlines() if 'obsolete-flag ' in line), calls
 
     def test_default_new_run_uses_scheduler_and_all_gates(self):
         _, warning, _ = self.new_run()
@@ -156,7 +156,7 @@ class UnifiedExecutionTests(fixtures.RepositoryTests):
                     self.log.write_text('Ran 1 test\nOK')
                     journal, warning, _ = self.new_run(flag)
                     journals.append(journal)
-                    self.assertEqual(warning.strip(), 'obsolete-flag name=SSDLC_ENABLE_TASK_BREAKDOWN action=ignored')
+                    self.assertEqual(warning.strip(), 'obsolete-flag name=SSDLC_ENABLE_TASK_BREAKDOWN action=ignored run=TKT-1 txn=- preview=- tasks=-')
         self.assertTrue(all(j == journals[0] for j in journals))
 
     def test_registered_historical_contract_bytes_are_unchanged(self):

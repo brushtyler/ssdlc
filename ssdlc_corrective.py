@@ -5,6 +5,7 @@ who can replace the registry and both complete journals.
 """
 import copy
 import math
+import re
 import os
 import tempfile
 from pathlib import Path
@@ -209,8 +210,19 @@ def walk_lineage(anchor, events, closure, roots, limits):
             if pred[tid]['status'] == 'COMPLETED' and kind not in ('TASKS_INVALIDATED', 'OWNER_TASKS_INVALIDATED') and not blocked:
                 _require(tasks[tid]['status'] == 'COMPLETED')
         _require(set(tasks) == set(pred))
-        for key in ('inputs_sha256', 'ignored_paths'):
+        for key in ('inputs_sha256', 'ignored_paths', 'candidate_runtime',
+                    'candidate_isolation', 'bounded_recovery', 'attempt_limit',
+                    'historical_capture_bindings', 'bootstrap'):
             _require(current.get(key) == previous.get(key))
+        for task_id, record in tasks.items():
+            prior = pred[task_id]
+            for key in ('scope_reconciliation', 'scope_reconciliation_history'):
+                _require(record.get(key) == prior.get(key))
+            history = prior.get('failed_attempts', [])
+            _require(record.get('failed_attempts', [])[:len(history)] == history)
+            if kind not in ('TASK_STARTED', 'DISPATCH_RESERVED'):
+                _require(record.get('invocation_id') == prior.get('invocation_id'))
+
         if kind != 'TASK_COMPLETED':
             _require(current['expected_head'] == previous['expected_head'])
         growth = len(current.get('preflights', [])) - len(previous.get('preflights', []))
@@ -233,6 +245,14 @@ def walk_lineage(anchor, events, closure, roots, limits):
             run = current['revalidation_runs'][-1]
             _require(run['txn_id'] == anchor['txn_id'] and run['status'] == 'RUNNING')
         elif effect == 'E5':
+            if kind == 'DISPATCH_RESERVED':
+                identity = rec.get('invocation_id')
+                _require(current.get('candidate_isolation') == 1)
+                _require(isinstance(identity, str) and re.fullmatch('[a-f0-9]{32}', identity))
+                used = {row.get('invocation_id') for row in pred.values()}
+                used.update(failure.get('invocation_id') for row in pred.values()
+                            for failure in row.get('failed_attempts', []))
+                _require(identity not in used)
             _require(rec['attempts'] == old['attempts'] + 1 <= limits['max_attempts'])
             _require(rec['status'] == ('DISPATCH_RESERVED' if kind == 'DISPATCH_RESERVED' else 'RUNNING') and rec['checks'] == [])
             if mode == 'R_FAILED':
@@ -245,6 +265,8 @@ def walk_lineage(anchor, events, closure, roots, limits):
             rolled = effect == 'E8r'
         elif effect == 'native_start':
             _require(rec['attempts'] == old['attempts'] and rec['status'] == 'RUNNING' and rec['checks'] == [])
+            for key in ('invocation_id', 'start_commit', 'protected_snapshot'):
+                _require(rec.get(key) == old.get(key))
         elif effect in ('capture', 'capture_verify'):
             _require(rec['attempts'] == old['attempts'])
             _require(all(tasks[t] == pred[t] for t in tasks if t != tid))

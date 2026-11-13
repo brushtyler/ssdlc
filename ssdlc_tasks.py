@@ -170,6 +170,16 @@ def test_suite_is_empty(stdout: str, stderr: str = '') -> bool:
     return final['empty'] is not None or (final['unittest'] or final['collected'] or final['pytest']) == '0'
 
 
+def test_check_is_empty(check, quality, stdout, stderr='', *, bootstrap_checkpoint=False):
+    """New contracts require a positive runner count; old sealed semantics stay intact."""
+    if test_suite_is_empty(stdout, stderr):
+        return True
+    if check.get('kind') == 'test' and (bootstrap_checkpoint or quality.get('positive_test_count_required')):
+        from ssdlc_bootstrap import positive_test_count
+        return (positive_test_count(stdout, stderr) or 0) < 1
+    return False
+
+
 def atomic_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix='.' + path.name, dir=path.parent)
@@ -1102,11 +1112,8 @@ class TaskScheduler:
                     raise
             else:
                 log.write_text(out + '\n' + err)
-            empty = test_suite_is_empty(out, err)
-            if (self.state.get('bootstrap', {}).get('status') == 'CHECKPOINT_STARTED'
-                    and check.get('kind') == 'test'):
-                from ssdlc_bootstrap import positive_test_count
-                empty = empty or (positive_test_count(out, err) or 0) < 1
+            empty = test_check_is_empty(check, self.quality, out, err,
+                bootstrap_checkpoint=self.state.get('bootstrap', {}).get('status') == 'CHECKPOINT_STARTED')
             results.append({'check_id': check['check_id'], 'exit_code': rc, 'empty_suite': empty,
                             'log_ref': str(log.relative_to(self.directory)), 'sha256': file_hash(log)})
             record['checks'] = results

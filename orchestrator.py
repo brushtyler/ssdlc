@@ -56,7 +56,7 @@ from ssdlc_transitions import runtime_root
 
 from ssdlc_tasks import (
     PlanError, TaskError, DevelopmentBlocked, ResourceLimitError, TaskPlanValidator, TaskScheduler, TaskJournal, atomic_json,
-    confined, digest, file_hash, git, ticket_lock, validate_document, log_retry_reason, diagnostic_excerpt, test_suite_is_empty, parse_plan_output,
+    confined, digest, file_hash, git, ticket_lock, validate_document, log_retry_reason, diagnostic_excerpt, test_suite_is_empty, test_check_is_empty, parse_plan_output,
 )
 
 
@@ -454,6 +454,7 @@ def _discover_checks(repo):
 
 def startup_preflight(repo_root, ticket, command, args=None):
     result = execution_compatibility(repo_root, ticket, command)
+    _log_mode_decision(ticket, command, result)
     phase = args.get('from_phase') if isinstance(args, dict) else getattr(args, 'from_phase', None)
     if result['cls'] == 'pre_execution' and command in {'run', 'start'} and phase not in {None, '00-recon'}:
         result = dict(ok=False, cls='legacy', code='legacy_not_executable', reason='execution_not_started')
@@ -461,13 +462,13 @@ def startup_preflight(repo_root, ticket, command, args=None):
         sealed = Path(repo_root) / '.ssdlc' / str(ticket) / '00-recon/quality-contract.json'
         if not sealed.exists():
             try:
-                profile = bootstrap.load_profile(Path(repo_root))
+                profile = bootstrap.load_profile(Path(repo_root), run_id=ticket)
                 if profile is not None:
                     base = git(Path(repo_root), 'rev-parse', 'HEAD')
                     state_path = Path(repo_root) / '.ssdlc' / str(ticket) / 'state.json'
                     if state_path.exists():
                         base = json.loads(state_path.read_text())['base_commit']
-                    result['bootstrap'] = bootstrap.decide(Path(repo_root), base, profile)
+                    result['bootstrap'] = bootstrap.decide(Path(repo_root), base, profile, run_id=ticket)
             except bootstrap.BootstrapError as exc:
                 return dict(ok=False, cls=result['cls'], code='bootstrap_ineligible', reason=exc.code)
     return result
@@ -513,12 +514,43 @@ def build_task_context(ssdlc_root: Path) -> Dict[str, str]:
             if (ssdlc_root / name).exists() else OPTIONAL_FALLBACK for name in CONTEXT_NAMES}
 
 
-def _warn_obsolete_task_flag() -> None:
+def _stage_log_field(value, limit=128):
+    value = TaskScheduler._scrub_prompt(str(value))
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', value):
+        return '-'
+    return value if len(value) <= limit else value[:limit-13] + '-' + digest(value)[:12]
+
+
+def _log_mode_decision(ticket, command, result):
+    logging.getLogger(__name__).info(
+        'mode-decision run=%s txn=- preview=- tasks=- command=%s class=%s decision=%s reason=%s',
+        _stage_log_field(ticket), _stage_log_field(command), _stage_log_field(result.get('cls', '-')),
+        'task' if result.get('ok') else 'refused', _stage_log_field(result.get('reason', result.get('code', '-'))))
+
+
+def _configure_stage_logging():
+    # CLI stage events go to stderr; stdout remains usable for JSON responses.
+    # Limit configuration to host stage loggers rather than changing root logging.
+    for name in (__name__, 'ssdlc_corrective', bootstrap.__name__):
+        logger = logging.getLogger(name)
+        if not any(getattr(handler, '_ssdlc_stage_handler', False) for handler in logger.handlers):
+            handler = logging.StreamHandler(sys.stderr)
+            handler._ssdlc_stage_handler = True
+            formatter = logging.Formatter('%(asctime)sZ %(message)s', datefmt='%Y-%m-%dT%H:%M:%S')
+            formatter.converter = time.gmtime
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+
+
+def _warn_obsolete_task_flag(ticket='-') -> None:
     global _OBSOLETE_FLAG_WARNED
     if 'SSDLC_ENABLE_TASK_BREAKDOWN' in os.environ and not _OBSOLETE_FLAG_WARNED:
         _OBSOLETE_FLAG_WARNED = True
         logging.getLogger(__name__).warning(
-            'obsolete-flag name=SSDLC_ENABLE_TASK_BREAKDOWN action=ignored')
+            'obsolete-flag name=SSDLC_ENABLE_TASK_BREAKDOWN action=ignored run=%s txn=- preview=- tasks=-',
+            _stage_log_field(ticket))
 
 
 def utc_now() -> str:
@@ -2128,6 +2160,7 @@ class SSDLCOrchestrator:
         return result
 
     def _corrective_stage(self, stage, preview=None, txn_id='-', tasks=(), reason='-'):
+        reason = _stage_log_field(reason, 64)
         counters = getattr(self, 'corrective_counters', None)
         if counters is None:
             counters = self.corrective_counters = {}
@@ -2143,10 +2176,13 @@ class SSDLCOrchestrator:
             counts[reason] = counts.get(reason, 0) + 1
         else:
             counters[metric] = counters.get(metric, 0) + 1
+        task_ids = list(tasks)
         logging.getLogger('ssdlc_corrective').info(
-            'corrective stage=%s run=%s txn=%s preview=%s tasks=%s reason=%s',
-            stage, getattr(self, 'ticket_id', '-'), txn_id[:12], (preview or {}).get('revision', '-')[:12],
-            ','.join(tasks), reason)
+            'corrective stage=%s run=%s txn=%s preview=%s tasks=%s omitted_tasks=%d reason=%s',
+            _stage_log_field(stage, 64), _stage_log_field(getattr(self, 'ticket_id', '-')),
+            _stage_log_field(txn_id, 64)[:12], _stage_log_field((preview or {}).get('revision', '-'), 64)[:12],
+            ','.join(_stage_log_field(tid, 64) for tid in task_ids[:32]) or '-', max(0, len(task_ids)-32), reason)
+
 
     @staticmethod
     def _corrective_preview_code(preview):
@@ -2435,7 +2471,7 @@ class SSDLCOrchestrator:
         if state and state['status'] in ('COMPLETED', 'APPROVED'):
             if self.state['artifacts'].get(ref, {}).get('sha256') != file_hash(path):
                 raise corrective.CorrectiveError('txn_record_conflict')
-            self._corrective_stage('replayed', txn_id=txn_id)
+            self._corrective_stage('replayed', preview={'revision': record['preview']['revision']}, txn_id=txn_id, tasks=record['closure'])
             return dict(state, replayed=True)
         if state and state['status'] == 'FAILED':
             raise corrective.CorrectiveError(state['code'])
@@ -2446,7 +2482,7 @@ class SSDLCOrchestrator:
                 status='ready-for-later-executor'))
             state = journal.peek()
         journal.load()
-        self._corrective_stage('reconciled', txn_id=txn_id, tasks=record['closure'])
+        self._corrective_stage('reconciled', preview={'revision': record['preview']['revision']}, txn_id=txn_id, tasks=record['closure'])
         if self.state['artifacts'].get(ref, {}).get('sha256') != file_hash(path):
             raise corrective.CorrectiveError('txn_record_conflict')
         scheduler, ordered = self._make_task_scheduler(corrective_run=True)
@@ -2561,7 +2597,7 @@ class SSDLCOrchestrator:
             if not reserved:
                 append(kind, **info)
             self._corrective_stage('repair_dispatched' if kind == 'REPAIR_RESERVED' else 'revalidated',
-                                   txn_id=txn_id, tasks=record['closure'])
+                                   preview={'revision': record['preview']['revision']}, txn_id=txn_id, tasks=record['closure'])
             if kind == 'REPAIR_RESERVED':
                 _corrective_fault('repair.after_reserved_before_dispatch')
         def boundary(event):
@@ -2699,7 +2735,7 @@ class SSDLCOrchestrator:
                 scheduler.repair(ordered, record['repair_roots'], context, txn_id=txn_id, on_step=step)
             verify()
             outcome = self._publish_corrective(record, journal, scheduler.state, verify)
-            self._corrective_stage('completed', txn_id=txn_id, tasks=record['closure'])
+            self._corrective_stage('completed', preview={'revision': record['preview']['revision']}, txn_id=txn_id, tasks=record['closure'])
             _corrective_fault('gates.after_completed_before_rerun')
             return outcome
         except corrective.CorrectiveError as exc:
@@ -2791,7 +2827,7 @@ class SSDLCOrchestrator:
                         state['status'] != 'COMPLETED' or state.get('new_head') == self.state.get('task_verified_head')):
                     journal.append('INTERRUPTED', dict(state, status='INTERRUPTED',
                         code=code, resume_status=state['status']))
-                    self._corrective_stage('interrupted', txn_id=record['txn_id'], reason=code)
+                    self._corrective_stage('interrupted', preview={'revision': record.get('preview', {}).get('revision', '-')}, txn_id=record['txn_id'], tasks=record.get('closure', ()), reason=code)
                     _corrective_fault('txn.after_interrupted')
             except (TaskError, OSError, ValueError):
                 logging.getLogger('ssdlc_corrective').warning('corrective interruption record unavailable')
@@ -2907,8 +2943,8 @@ class SSDLCOrchestrator:
             return json.loads(target.read_text())
         if "00-recon/quality-contract.json" in self.state.get("artifacts", {}):
             raise PlanError("Registered quality contract disappeared; refusing regeneration")
-        profile = bootstrap.load_profile(self.repo_root)
-        binding = bootstrap.decide(self.repo_root, self.state['base_commit'], profile) if profile is not None else None
+        profile = bootstrap.load_profile(self.repo_root, run_id=getattr(self, 'ticket_id', '-'))
+        binding = bootstrap.decide(self.repo_root, self.state['base_commit'], profile, run_id=getattr(self, 'ticket_id', '-')) if profile is not None else None
         if (git(self.repo_root, "rev-parse", "HEAD") != self.state["base_commit"]
                 or git(self.repo_root, "status", "--porcelain")):
             raise PlanError("Create a clean, committed baseline before capturing the quality contract")
@@ -2939,6 +2975,7 @@ class SSDLCOrchestrator:
                         "limitations": ["Automatic discovery covers Python tests, configured Ruff/Mypy and npm test/lint/typecheck; provide an explicit contract for other tools."], "exceptions": []}
         if binding:
             contract['bootstrap'] = binding
+        contract['positive_test_count_required'] = True
         for check in contract["checks"]:
             if check.get("required"):
                 check["candidate_proof"] = True
@@ -2965,7 +3002,7 @@ class SSDLCOrchestrator:
             log.write_text(out + "\n" + err)
             contract["baseline"].append({"check_id": check["check_id"], "exit_code": rc,
                                          "log_ref": str(log.relative_to(self.ssdlc_root)), "sha256": sha256_file(log)})
-            empty_suite = test_suite_is_empty(out, err)
+            empty_suite = test_check_is_empty(check, contract, out, err)
             status = 'FAILED' if rc or empty_suite else 'PASSED'
             print(f"[baseline] {check['check_id']}: {status} in {time.monotonic() - started:.1f}s "
                   f"(exit {rc}{', empty test suite' if empty_suite else ''}); log: {log}", flush=True)
@@ -3387,7 +3424,7 @@ class SSDLCOrchestrator:
                 log_ref = f'candidate-evidence/logs/{nonce}.log'
                 raw = (out + '\n' + err).encode()
                 log = raw[-cr.LOG_STORE_MAX_BYTES:]
-                empty = test_suite_is_empty(out, err)
+                empty = test_check_is_empty(check, quality, out, err)
                 body = dict(expected, schema_version='1.0', kind='candidate_check_record', run_nonce=nonce,
                             result=dict(exit_code=rc, timed_out=rc == 124, empty_suite=empty,
                                         status='passed' if rc == 0 and not empty else 'failed'),
@@ -3570,6 +3607,7 @@ class SSDLCOrchestrator:
     def _run_task_development(self, recover_protocol_task=None) -> Tuple[Path, List[str]]:
         scheduler, ordered = self._make_task_scheduler()
         wt = self.worktree_dir
+        limits = getattr(_dispatch_local, "limits", None)
         self.state["current_phase"] = "03-dev"
         self.state["current_step"] = "task-development"
         self.state["status"] = "IN_PROGRESS"
@@ -3589,7 +3627,7 @@ class SSDLCOrchestrator:
                 raise DevelopmentBlocked('INTEGRITY', 'Automatic feedback requires canonical execution ownership')
             try:
                 response = run_feedback(self.ticket_lock_path.parent, self.repo_root, Path(__file__).resolve().parent,
-                    controller['snapshot'], scheduler.runtime_identity, held_locks=(owner,))
+                    self._ensure_controller_contract()['snapshot'], scheduler.runtime_identity, held_locks=(owner,))
             except TaskError as failure:
                 if (self.ticket_lock_path.parent / 'execution/pending.json').exists():
                     failure.feedback_source_preserved = True
@@ -5294,7 +5332,7 @@ To **REJECT** and record feedback (free text authorizes no repair):
         tier: str = "auto",
         from_phase: str = "00-recon",
     ) -> Path:
-        _warn_obsolete_task_flag()
+        _warn_obsolete_task_flag(self.ticket_id)
         if self.ssdlc_root != self.repo_root / '.ssdlc' / self.ticket_id and from_phase != '03-dev':
             raise DevelopmentBlocked('SCOPE_REQUIRED', 'Reconciled execution must resume from 03-dev')
         with ticket_lock(getattr(self, "ticket_lock_path", self.ssdlc_root / "ticket.lock")):
@@ -5386,6 +5424,10 @@ To **REJECT** and record feedback (free text authorizes no repair):
                 corrective_run = bool(recovered) or attempt > 1
                 if corrective_run:
                     self.check_budget_circuit_breaker()
+                    transaction = next(record for record in self._open_or_any_txns()
+                                       if record['txn_id'] == recovered['txn_id'])
+                    self._corrective_stage('gates_rerun', preview={'revision': transaction['preview']['revision']},
+                        txn_id=transaction['txn_id'], tasks=transaction['closure'])
                 if not corrective_run and start_idx <= self.PHASE_ORDER.index("03-dev"):
                     self.run_phase_dev()
                     self.check_budget_circuit_breaker()
@@ -5605,7 +5647,6 @@ def cmd_doctor(repo: Path) -> int:
 
 
 def _foreground_main(argv=None) -> int:
-    _warn_obsolete_task_flag()
     parser = argparse.ArgumentParser(description="Project-Isolated Multi-CLI SSDLC Orchestrator",
         epilog="Stopped-run migration: continuation-inspect / continuation-preview / continuation-prepare / continuation-activate / continuation-verify (each has --help).")
     sub = parser.add_subparsers(dest="subcommand", required=True)
@@ -5736,6 +5777,7 @@ def _foreground_main(argv=None) -> int:
         p_limits.add_argument('--limits-profile', help='Explicit operator limits JSON for a fresh ticket; frozen on first launch')
 
     args = parser.parse_args(argv)
+    _warn_obsolete_task_flag(getattr(args, 'ticket', '-'))
     if args.subcommand in {'run', 'start', 'resume', 'approve', 'reject', 'plan', 'design'}:
         command = getattr(args, 'entrypoint', 'run') if args.subcommand == 'resume' else args.subcommand
         importing = args.subcommand == 'design' and getattr(args, 'import_from_ticket', None)
@@ -5747,7 +5789,7 @@ def _foreground_main(argv=None) -> int:
                 parser.error('invalid ticket ID')
             if check['code'] == 'legacy_not_executable':
                 LEGACY_COUNTERS['legacy_refusals'] += 1
-                logging.getLogger(__name__).warning('legacy-refusal ticket=%s command=%s', args.ticket, command)
+                logging.getLogger(__name__).warning('legacy-refusal run=%s txn=- preview=- tasks=- command=%s', _stage_log_field(args.ticket), _stage_log_field(command))
                 print(legacy_message(args.ticket), file=sys.stderr)
             else:
                 print(check['code'], file=sys.stderr)
@@ -5861,6 +5903,7 @@ def _supervised_exit_code(value) -> int:
 
 
 def main(argv=None) -> int:
+    _configure_stage_logging()
     words = sys.argv[1:] if argv is None else argv
     if words and words[0].startswith('feedback-repair-'):
         from ssdlc_feedback_return import main as repair_main
@@ -5895,7 +5938,7 @@ def main(argv=None) -> int:
     if word_value('--ticket') is not None and not check['ok']:
         if check['code'] == 'legacy_not_executable':
             LEGACY_COUNTERS['legacy_refusals'] += 1
-            logging.getLogger(__name__).warning('legacy-refusal ticket=%s command=%s', word_value('--ticket'), words[0])
+            logging.getLogger(__name__).warning('legacy-refusal run=%s txn=- preview=- tasks=- command=%s', _stage_log_field(word_value('--ticket')), _stage_log_field(words[0]))
             print(legacy_message(word_value('--ticket')), file=sys.stderr)
         return 24 if check['code'] == 'bootstrap_ineligible' else 23
     code, exc_type = 1, None

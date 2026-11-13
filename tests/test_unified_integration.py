@@ -156,7 +156,7 @@ class StartupJourneys(unified.UnifiedExecutionTests):
         self.assertIn('shell_command', qa)
         self.assertNotIn('equivalent', qa)
         self.assertIn('shell_command', (orch.ssdlc_root / 'EVIDENCE_PACK.md').read_text())
-        return journal, logs.getvalue(), calls
+        return journal, '\n'.join(line for line in logs.getvalue().splitlines() if 'obsolete-flag ' in line), calls
 
 
     def test_documented_default_cli_and_tier_s(self):
