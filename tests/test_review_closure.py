@@ -3,6 +3,8 @@ import contextlib
 import copy
 import io
 import os
+import tempfile
+from types import SimpleNamespace
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -50,6 +52,18 @@ class ReviewClosureTests(unittest.TestCase):
                         orch._run_pipeline('offline',from_phase='03-dev')
                     self.assertEqual(calls,['dev','review','qa','appsec'])
                     pack.assert_called_once_with(ready_for_signoff=secure)
+
+    def test_failed_check_identifier_is_redacted_without_secret_log_content(self):
+        sentinel='CHECK-'+('AB12CD34'*3)
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);(root/'check.log').write_text('Ran 1 test\nfailed without secret text\n')
+            output=io.StringIO()
+            with patch.dict(os.environ,{'REVIEW_SECRET_TOKEN':sentinel}),contextlib.redirect_stdout(output):
+                TaskScheduler._log_failed_checks(SimpleNamespace(directory=root),[
+                    dict(check_id=sentinel,exit_code=1,empty_suite=False,log_ref='check.log')])
+            self.assertNotIn(sentinel,output.getvalue())
+            self.assertIn('[REDACTED]',output.getvalue())
+            self.assertTrue(output.getvalue().startswith('[task-dev] Failed'))
 
     def test_console_redaction_precedes_excerpt_truncation(self):
         sentinel='controller-credential-' * 200

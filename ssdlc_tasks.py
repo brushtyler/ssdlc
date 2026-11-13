@@ -130,7 +130,7 @@ def redact_sensitive(value):
                       '[REDACTED]', text, flags=re.S)
         for secret in secrets:
             text = text.replace(secret, '[REDACTED]')
-        return re.sub(r'sk-[A-Za-z0-9_-]+|ghp_[A-Za-z0-9]+|AKIA[A-Z0-9]+|Bearer\s+[A-Za-z0-9._~+/-]+=*',
+        return re.sub(r'(?<![A-Za-z0-9])(?:sk-[A-Za-z0-9_-]+|ghp_[A-Za-z0-9]+|AKIA[A-Z0-9]+|Bearer\s+[A-Za-z0-9._~+/-]+=*)',
                       '[REDACTED]', text, flags=re.I)
     if isinstance(value, str):
         return scrub(value)
@@ -141,13 +141,18 @@ def redact_sensitive(value):
     return value
 
 
+def _print_redacted(message: str) -> None:
+    """Protect console metadata as well as diagnostic bodies."""
+    print(redact_sensitive(message), flush=True)
+
+
 def log_retry_reason(label: str, report: str, path: Path, max_chars: int = 3000) -> None:
     """Expose bounded, redacted diagnostics without changing private evidence."""
     text = redact_sensitive(report).strip() or '(Reviewer returned an empty report.)'
-    print(f'[{redact_sensitive(label)}] Full report: {redact_sensitive(str(path))}', flush=True)
-    print(text[:max_chars], flush=True)
+    _print_redacted(f'[{redact_sensitive(label)}] Full report: {redact_sensitive(str(path))}')
+    _print_redacted(text[:max_chars])
     if len(text) > max_chars:
-        print(f'[{label}] Excerpt truncated; see the full report above.', flush=True)
+        _print_redacted(f'[{label}] Excerpt truncated; see the full report above.')
 
 
 def diagnostic_excerpt(text: str, limit: int) -> str:
@@ -1331,7 +1336,7 @@ class TaskScheduler:
         self._save('PREFLIGHT_STARTED')
         directory.mkdir(parents=True, exist_ok=False)
         protected = self._protected()
-        print(f'[task-dev] Checkpoint preflight in {self.wt}; no developer attempts consumed.', flush=True)
+        _print_redacted(f'[task-dev] Checkpoint preflight in {self.wt}; no developer attempts consumed.')
         watch = (lambda: self._protected() != protected or self._changed()
                  or self._ignored() != self.state['ignored_paths']) if getattr(self, 'corrective_boundary', None) else None
         results = self._verify({'verification': {'checks': []}}, record, directory, mutation_watch=watch)
@@ -1352,7 +1357,7 @@ class TaskScheduler:
         for check in results:
             if check['exit_code'] or check['empty_suite']:
                 path = confined(self.directory, check['log_ref'], protect=False)
-                print(f"[task-dev] Failed {check['check_id']}: exit={check['exit_code']}, empty_suite={check['empty_suite']}", flush=True)
+                _print_redacted(f"[task-dev] Failed {check['check_id']}: exit={check['exit_code']}, empty_suite={check['empty_suite']}")
                 log_retry_reason('task-dev', diagnostic_excerpt(path.read_text(), 3000), path)
 
     @staticmethod
@@ -1560,7 +1565,7 @@ class TaskScheduler:
         signature = self._source_signature(changed)
         record.update(status='VERIFYING', checks=[])
         self._save('PROTOCOL_RECOVERY_VERIFYING')
-        print(f"[task-dev] Verifying archived {task['task_id']} attempt {candidate['attempt']}; no developer invocation.", flush=True)
+        _print_redacted(f"[task-dev] Verifying archived {task['task_id']} attempt {candidate['attempt']}; no developer invocation.")
         results = self._verify(task, record, directory)
         self._assert_tree()
         if (self._protected() != protected or self._changed() != changed or self._source_signature(changed) != signature
@@ -1830,7 +1835,7 @@ class TaskScheduler:
                         and not record.get('capture_sha256') and not (attempt_dir / 'capture').exists()
                         else 'INTEGRITY')
             raise DevelopmentBlocked(category, str(exc)) from exc
-        print(f"[task-dev] Resuming captured {task['task_id']} attempt {record['attempts']}; no developer dispatch.", flush=True)
+        _print_redacted(f"[task-dev] Resuming captured {task['task_id']} attempt {record['attempts']}; no developer dispatch.")
         self._finish_attempt(task, record, result, attempt_dir)
 
     def _reconcile_failed_capture(self, task, record):
@@ -2266,8 +2271,8 @@ class TaskScheduler:
                 self._save('TASK_STARTED')
             attempt_dir = self._attempt_directory(task, record)
             prompt = self._developer_prompt(task, record, corrective)
-            print(f"[task-dev] {task['task_id']} attempt {attempt}/{self.max_attempts}: "
-                  + (f"repairing archived attempt {repair['attempt']}" if repair else 'implementing from verified checkpoint'), flush=True)
+            _print_redacted(f"[task-dev] {task['task_id']} attempt {attempt}/{self.max_attempts}: "
+                  + (f"repairing archived attempt {repair['attempt']}" if repair else 'implementing from verified checkpoint'))
             if self.isolate_candidates:
                 result = self._capture_developer(task, record, prompt, attempt_dir)
             else:

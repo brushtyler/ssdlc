@@ -2,7 +2,7 @@
   "schema_version": 1,
   "scope": "Issue22 task-only execution, explicit bootstrap and corrective gate recovery; includes current-main integration",
   "source_manifest": {
-    "sha256": "da9c9ea523aa8f605129452a492917dfd97ae1443ff16c91410dc5ae95fbe9c4",
+    "sha256": "beebf6efa95d032163e9c2542befcc159c74bfeb8e60821727a1c9df4de68d66",
     "definition": "SHA256 of canonical JSON mapping every tracked or nonignored source path to SHA256(file bytes), sorted by path; docs/evidence/ is excluded to avoid self-reference",
     "files": 213
   },
