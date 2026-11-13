@@ -1,0 +1,30 @@
+{
+  "tested_head": "c342fdebf3a02085f3fdd130d6d97a2939b0c4d4",
+  "base": "609bf27cc0f627248930cd8a1af621111d668318",
+  "exit_code": 1,
+  "seconds": 0.802124354057014,
+  "provider_calls": 0,
+  "findings": [
+    {
+      "RuleID": "aws-access-token",
+      "File": "tests/test_repair_prompt.py",
+      "StartLine": 92,
+      "Commit": "d27ec109bdb2fb7fbd39b51e12a9aaa5589516ee",
+      "Fingerprint": "d27ec109bdb2fb7fbd39b51e12a9aaa5589516ee:tests/test_repair_prompt.py:aws-access-token:92",
+      "classification": "same_synthetic_fixture_as_current_exact_file_triage",
+      "fixture_line_sha256": "bc3d24206fa8cb7d9416c4c7173a8ad661e323383aee88e8e357fa16661eb081"
+    },
+    {
+      "RuleID": "private-key",
+      "File": "tests/test_repair_prompt.py",
+      "StartLine": 93,
+      "Commit": "d27ec109bdb2fb7fbd39b51e12a9aaa5589516ee",
+      "Fingerprint": "d27ec109bdb2fb7fbd39b51e12a9aaa5589516ee:tests/test_repair_prompt.py:private-key:93",
+      "classification": "same_synthetic_fixture_as_current_exact_file_triage",
+      "fixture_line_sha256": "17aba50132dc48e7205121d0df0da7186ad5180fbbb192e29e58b34c1c6f0cc9"
+    }
+  ],
+  "status": "NO_UNTRIAGED_HISTORY_FINDINGS_HOST_CLASSIFICATION",
+  "raw_scanner_exit_code": 1,
+  "independent_appsec_confirmation_still_required": true
+}
