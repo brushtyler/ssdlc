@@ -138,7 +138,8 @@ dispatcher does every commit, push and GitHub write.
 - **Trust comes from labels.** Only issues whose `agent:ready` label was added by a user in
   `trusted_users` start, only comments by those users reach the prompts, and only their markers
   are read. Labelling approves the issue's title and body as they are: if someone outside
-  `trusted_users` changes them later, implementation, review and fixes stop at
+  `trusted_users` changes them later (or in the same second, since GitHub timestamps cannot
+  order the two), implementation, review and fixes stop at
   `agent:needs-human` until a trusted user adds `agent:ready` again. Issue text is still model
   input: do not label untrusted content.
 - **Failures escalate immediately.** A timeout or a transient error of an agent, `gh` or `git`

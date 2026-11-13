@@ -509,6 +509,18 @@ class IssueTrustTests(unittest.TestCase):
         self.assertIn('titolo', self.check(renamed=[('stranger', '2026-11-13T11:00:00Z')]))
         self.assertIsNone(self.check(renamed=[('stranger', '2026-11-13T09:00:00Z')]))
 
+    def test_untrusted_change_in_the_same_second_as_the_label_is_rejected(self):
+        # One-second timestamps cannot prove the change came before the approval.
+        same = '2026-11-13T10:00:00Z'
+        self.assertIn('modificato da `stranger`', self.check(last_edited_at=same, editor='stranger'))
+        self.assertIn('titolo', self.check(renamed=[('stranger', same)]))
+        self.assertIsNone(self.check(last_edited_at=same, editor='brushtyler'))
+        self.assertIsNone(self.check(renamed=[('brushtyler', same)]))
+        relabelled = [('agent:ready', 'brushtyler', same),
+                      ('agent:ready', 'brushtyler', '2026-11-13T10:00:01Z')]
+        self.assertIsNone(self.check(labeled=relabelled, last_edited_at=same, editor='stranger',
+                                     renamed=[('stranger', same)]))
+
     def test_trust_needs_the_ready_label_from_a_trusted_user(self):
         self.assertIn('nessuna label', self.check(labeled=[('agent:ready', 'stranger', '2026-11-13T10:00:00Z')]))
         self.assertIn('nessuna label', self.check(labeled=[('bug', 'brushtyler', '2026-11-13T10:00:00Z')]))

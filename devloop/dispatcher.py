@@ -151,7 +151,9 @@ def untrusted_change(history, ready_label, trusted_users):
     """Why the issue's title or body can no longer be trusted, or None.
 
     Trust comes from a trusted user adding ``ready_label``; a later change to the title or the
-    body by anyone else voids it until a trusted user adds the label again.
+    body by anyone else voids it until a trusted user adds the label again. GitHub timestamps
+    have one-second granularity, so an untrusted change in the same second as the label cannot
+    be proven to precede it and voids trust too.
     """
     approved = [at for name, who, at in history['labeled']
                 if name == ready_label and who in trusted_users]
@@ -159,10 +161,10 @@ def untrusted_change(history, ready_label, trusted_users):
         return f'nessuna label `{ready_label}` messa da un utente fidato'
     since = approved[-1]
     edited = history['last_edited_at']
-    if edited and edited > since and history['editor'] not in trusted_users:
+    if edited and edited >= since and history['editor'] not in trusted_users:
         return f'il testo è stato modificato da `{history["editor"]}` dopo la label `{ready_label}`'
     for who, at in history['renamed']:
-        if at > since and who not in trusted_users:
+        if at >= since and who not in trusted_users:
             return f'il titolo è stato modificato da `{who}` dopo la label `{ready_label}`'
     return None
 
