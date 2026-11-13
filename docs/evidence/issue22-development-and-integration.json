@@ -2,7 +2,7 @@
   "schema_version": 1,
   "scope": "Issue22 task-only execution, explicit bootstrap and corrective gate recovery; includes current-main integration",
   "source_manifest": {
-    "sha256": "8759d24666f0f6da6f0ee6b1a145ac9022a4f576fe0fe839047b2662d9cc1e19",
+    "sha256": "0bf48f56b6a85dcd5d22c192532932cd2e08c0b9f4e928daf3afeb1c6ae2aa86",
     "definition": "SHA256 of canonical JSON mapping every tracked or nonignored source path to SHA256(file bytes), sorted by path; docs/evidence/ is excluded to avoid self-reference",
     "files": 214
   },
@@ -155,6 +155,12 @@
     "frozen_prior_commit": "f0aa2d678db2b2512bb1443465f67a5de41461fe",
     "baseline_regressions_failed_as_expected": 2,
     "fixed_focused_test_executions": 18,
-    "final_suite_and_gates": "PENDING_NEW_EXACT_SOURCE_VERIFICATION"
+    "final_suite_and_gates": "PENDING_NEW_EXACT_SOURCE_VERIFICATION",
+    "approval_caller_fixtures": {
+      "test_executions": 6,
+      "result": "PASS",
+      "native_gate_receipts_required": true,
+      "overlaps_prior_focused_tests": true
+    }
   }
 }

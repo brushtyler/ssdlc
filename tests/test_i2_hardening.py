@@ -342,29 +342,27 @@ class GraderProtectionTests(unittest.TestCase):
 
 class DeliveryDisclosureTests(unittest.TestCase):
     def test_evidence_pack_and_signoff_show_unconfirmed_producer_completion(self):
-        from orchestrator import SSDLCOrchestrator
-        from test_task_bootstrap import OrchestratorBootstrapTests
-        # Reuse the repository/controller fixture, not its test methods.
-        case = OrchestratorBootstrapTests('test_approve_keeps_evidence_and_does_not_commit_residual_changes')
+        import test_unified_integration as journeys
+        case = journeys.StartupJourneys()
+        self.addCleanup(case.doCleanups)
         case.setUp()
-        try:
-            with patch.dict('os.environ', {'SSDLC_ENABLE_TASK_BREAKDOWN': 'true'}):
-                owner = case.make_orchestrator()
-                wt = owner._ensure_worktree()
-                (wt / 'app.py').write_text('value = 1\n'); git(wt, 'add', 'app.py'); git(wt, 'commit', '-m', 'checked source')
-                head = git(wt, 'rev-parse', 'HEAD')
-                owner.state.update(task_verified_head=head, goal='offline',
-                    tasks_status={'T1': {'attempts': 1, 'status': 'COMPLETED', 'completion_confirmation': 'unconfirmed_completion'}})
-                TaskJournal(owner.dir_dev / 'tasks').append('OFFLINE_COMPLETION', {'tasks': owner.state['tasks_status']})
-                owner.state['tasks_status'] = {}  # stale state must not hide the journal disclosure
-                owner._save_state()
-                path = owner.compile_evidence_pack(True)
-                self.assertIn('unconfirmed_completion', path.read_text())
-                self.assertIn('independent checks, not producer confirmation', path.read_text())
-                with patch('sys.stdout', new_callable=io.StringIO) as output:
-                    owner.approve_and_merge()
-                self.assertIn('unconfirmed_completion', output.getvalue())
-        finally: case.doCleanups()
+        # Use real native approvals, then add a conservative disclosure-only
+        # annotation. Actual fenced-timeout production is covered above; this
+        # test verifies that a stale projection cannot hide its journal flag.
+        case.new_run()
+        owner = case.active_orch
+        journal = TaskJournal(owner.dir_dev / 'tasks')
+        state = journal.load()
+        state['tasks']['T1']['completion_confirmation'] = 'unconfirmed_completion'
+        journal.append('DISCLOSURE_FIXTURE', state)
+        owner.state['tasks_status'] = {}  # stale projection must not hide the journal disclosure
+        owner._save_state()
+        path = owner.compile_evidence_pack(True)
+        self.assertIn('unconfirmed_completion', path.read_text())
+        self.assertIn('independent checks, not producer confirmation', path.read_text())
+        with patch('sys.stdout', new_callable=io.StringIO) as output:
+            owner.approve_and_merge()
+        self.assertIn('unconfirmed_completion', output.getvalue())
 
     def test_outer_cycle_uses_frozen_policy_not_environment(self):
         from orchestrator import SSDLCOrchestrator, _dispatch_local
