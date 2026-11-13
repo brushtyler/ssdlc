@@ -407,6 +407,10 @@ def execution_compatibility(repo_root, ticket, command):
                 raise PlanError('Symlinked execution evidence')
             return path.read_bytes()
         if not (root / 'state.json').exists():
+            if any((root / name).exists() or (root / name).is_symlink() for name in (
+                    'worktree', '03-dev/tasks/task-journal.jsonl', '03-dev/implementation.diff',
+                    '00-recon/quality-contract.json', '01-po/requirements.md', '02-design/plan.json')):
+                return dict(result, reason='missing_state_with_execution_evidence')
             return dict(ok=command in {'run', 'start'}, cls='new_run',
                         code='compatible' if command in {'run', 'start'} else 'no_such_run', reason='no_such_run')
         state = json.loads(read('state.json'))
@@ -474,9 +478,32 @@ def _discover_checks(repo):
     return checks
 
 
+def _bootstrap_run_invocation(method):
+    """Limit a freshly sealed exemption to this foreground invocation."""
+    @functools.wraps(method)
+    def wrapped(self, *args, **kwargs):
+        bootstrap.require_unproven_run_is_current(self.ssdlc_root)
+        self._bootstrap_invocation_active = True
+        self._bootstrap_contract_captured = False
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self._bootstrap_invocation_active = False
+            self._bootstrap_contract_captured = False
+    return wrapped
+
+
 def startup_preflight(repo_root, ticket, command, args=None):
     result = execution_compatibility(repo_root, ticket, command)
     _log_mode_decision(ticket, command, result)
+    if result['ok']:
+        try:
+            root = runtime_root(Path(repo_root) / '.ssdlc' / str(ticket))
+            bootstrap.require_unproven_run_is_current(root)
+        except bootstrap.BootstrapError as exc:
+            return dict(ok=False, cls=result['cls'], code='bootstrap_ineligible', reason=exc.code)
+        except PlanError:
+            return dict(ok=False, cls='legacy', code='legacy_not_executable', reason='invalid_persisted_contract')
     phase = args.get('from_phase') if isinstance(args, dict) else getattr(args, 'from_phase', None)
     if result['cls'] == 'pre_execution' and command in {'run', 'start'} and phase not in {None, '00-recon'}:
         result = dict(ok=False, cls='legacy', code='legacy_not_executable', reason='execution_not_started')
@@ -3009,6 +3036,7 @@ class SSDLCOrchestrator:
         if binding:
             atomic_json(target, contract)
             self.record_artifact("00-recon/quality-contract.json", target)
+            self._bootstrap_contract_captured = True
             return contract
         baseline_dir = self.dir_recon / "baseline"
         baseline_dir.mkdir(exist_ok=True)
@@ -3535,9 +3563,13 @@ class SSDLCOrchestrator:
         return self._run_task_development(recover_protocol_task)
 
     def _make_task_scheduler(self, *, corrective_run=False):
+        first = bool(getattr(self, '_bootstrap_invocation_active', False)
+                     and getattr(self, '_bootstrap_contract_captured', False))
+        bootstrap.require_unproven_run_is_current(self.ssdlc_root, first_invocation=first)
         plan = self._ensure_task_plan()
         controller = self._ensure_controller_contract()
         quality = json.loads((self.dir_recon / "quality-contract.json").read_text())
+        bootstrap.require_unproven_run_is_current(self.ssdlc_root, quality, first_invocation=first)
         wt = self._ensure_worktree()
         context = build_task_context(self.ssdlc_root)
         validator = TaskPlanValidator(self.repo_root, context["01-po/requirements.md"], quality, self.ssdlc_root)
@@ -5351,6 +5383,7 @@ To **REJECT** and record feedback (free text authorizes no repair):
             raise TaskError(msg)
 
     @_bounded_entrypoint
+    @_bootstrap_run_invocation
     def run_pipeline(
         self,
         goal: str,
@@ -5362,6 +5395,9 @@ To **REJECT** and record feedback (free text authorizes no repair):
         if self.ssdlc_root != self.repo_root / '.ssdlc' / self.ticket_id and from_phase != '03-dev':
             raise DevelopmentBlocked('SCOPE_REQUIRED', 'Reconciled execution must resume from 03-dev')
         with ticket_lock(getattr(self, "ticket_lock_path", self.ssdlc_root / "ticket.lock")):
+            # Another invocation may have sealed an unproven contract while
+            # this caller waited. Recheck before writing any run state.
+            bootstrap.require_unproven_run_is_current(self.ssdlc_root)
             # Reload state after acquiring the lock, not from a potentially stale constructor.
             self.state = self._load_or_init_state()
             self.state["task_breakdown"] = True

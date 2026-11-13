@@ -6,7 +6,7 @@ import logging
 import re
 from pathlib import Path
 
-from ssdlc_tasks import PlanError, digest, git, validate_document
+from ssdlc_tasks import PlanError, TaskError, TaskJournal, confined, digest, git, validate_document
 
 CODES = ('profile_invalid', 'not_registered', 'existing_tests', 'dirty_tree',
          'not_initial_commit', 'tree_mismatch', 'policy_conflict', 'interrupted', 'window_spent')
@@ -64,6 +64,33 @@ def profile_checks(profile_id):
     policy_sha256(profile_id)
     return [dict(check_id='CHECK-TESTS', argv=copy.deepcopy(PROFILES[profile_id]['argv']),
                  cwd='.', timeout_sec=300, kind='test', required=True, candidate_proof=True)]
+
+
+def require_unproven_run_is_current(root, contract=None, *, first_invocation=False):
+    """A sealed absent-baseline contract cannot renew its first-run exemption."""
+    root = Path(root)
+    if contract is None:
+        try:
+            path = confined(root, '00-recon/quality-contract.json', protect=False)
+            if not path.exists():
+                return
+            contract = json.loads(path.read_text())
+        except (OSError, ValueError, TaskError):
+            raise PlanError('Persisted quality contract is unreadable') from None
+    if not isinstance(contract, dict) or not contract.get('bootstrap'):
+        return
+    if first_invocation:
+        return
+    try:
+        path = confined(root, '03-dev/tasks/task-journal.jsonl', protect=False)
+        raw = path.read_bytes() if path.exists() else b''
+        complete = raw[:raw.rfind(b'\n') + 1]
+        state, _, _ = TaskJournal._replay(complete)
+        if state and state.get('bootstrap', {}).get('status') == 'PROVEN':
+            return
+    except (OSError, ValueError, TaskError):
+        pass
+    raise _ineligible('interrupted', root.name)
 
 
 def decide(repo, base_commit, profile, *, run_id='-'):

@@ -164,6 +164,11 @@ class StartupJourneys(unified.UnifiedExecutionTests):
 
     def test_documented_bootstrap_profile(self):
         self.new_run(bootstrap=True)
+        orch=self.active_orch
+        self.assertFalse(orch._bootstrap_invocation_active)
+        self.assertFalse(orch._bootstrap_contract_captured)
+        # A spent exemption remains resumable under strict journaled semantics.
+        self.assertTrue(o.startup_preflight(self.repo,'TKT-1','run',{'from_phase':'03-dev'})['ok'])
 
     def test_bootstrap_empty_checkpoint_and_restart(self):
         with patch.dict(os.environ, {'SSDLC_MAX_DEV_RETRIES': '1'}):
@@ -209,14 +214,17 @@ class StartupJourneys(unified.UnifiedExecutionTests):
         state = TaskJournal(orch.dir_dev / 'tasks').peek()
         self.assertEqual(state['bootstrap']['status'], 'CHECKPOINT_STARTED')
         contract = (orch.dir_recon / 'quality-contract.json').read_bytes()
+        journal = (orch.dir_dev / 'tasks/task-journal.jsonl').read_bytes()
+        persisted_state = orch.state_file.read_bytes()
         with existing_host(orch), \
              patch.object(o.EngineRunner, 'run_claude', side_effect=AssertionError('provider')), \
              patch.object(o.EngineRunner, 'run_codex', side_effect=AssertionError('developer')), \
-             patch.object(o.EngineRunner, 'run_sandboxed_cmd', return_value=('Ran 1 test\nOK', '', 0)), \
-             self.assertRaisesRegex(TaskError, 'interrupted'):
-            o._foreground_main(['run', '--repo', str(self.repo), '--ticket', 'TKT-1',
-                '--goal', 'Scoped change', '--from-phase', '03-dev', '--no-sync-remote'])
+             patch.object(o.EngineRunner, 'run_sandboxed_cmd', return_value=('Ran 1 test\nOK', '', 0)):
+            self.assertEqual(o._foreground_main(['run', '--repo', str(self.repo), '--ticket', 'TKT-1',
+                '--goal', 'Scoped change', '--from-phase', '03-dev', '--no-sync-remote']), 24)
         self.assertEqual(contract, (orch.dir_recon / 'quality-contract.json').read_bytes())
+        self.assertEqual(journal, (orch.dir_dev / 'tasks/task-journal.jsonl').read_bytes())
+        self.assertEqual(persisted_state, orch.state_file.read_bytes())
 
 
 class CorrectiveJourneys(executor.ExecutorFixture):

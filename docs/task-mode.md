@@ -219,6 +219,13 @@ Empty, failing, missing, timed-out or interrupted checks block. The one-task
 exemption becomes journaled `PROVEN`/post-bootstrap without rewriting the sealed
 contract. Restart before proof fails explicitly, including a journal stopped at
 `INITIALIZED` with bootstrap status `PENDING`; a profile cannot renew eligibility.
+Eligibility preflight is read-only and grants no exemption. Sealing the absent-baseline
+contract claims the window for the foreground invocation that creates it. A later
+invocation refuses an unproven contract even before a worktree or journal exists.
+Use one full run through the first checkpoint; phase-only preparation does not
+leave a renewable exemption for a later command. After `PROVEN`, normal strict
+resume remains supported. Missing run state with existing execution evidence is
+refused as historical corruption instead of being treated as a fresh ticket.
 Existing tests, dirty trees or later commits are ineligible (exit 24). Without an
 explicit profile, strict baseline rules apply. Protected paths and task checks
 remain enforced throughout.

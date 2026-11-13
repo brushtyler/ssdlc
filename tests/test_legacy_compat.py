@@ -156,6 +156,17 @@ class CompatibilityTests(RepositoryTests):
         self.save()
         self.assertFalse(o.execution_compatibility(self.repo, 'OLD', 'approve')['ok'])
 
+    def test_missing_state_with_old_execution_evidence_is_not_a_new_run(self):
+        self.seal()
+        (self.root/'state.json').unlink()
+        before=self.snapshot()
+        for command in ('run','start','approve','reject','plan','design'):
+            result=o.execution_compatibility(self.repo,'OLD',command)
+            self.assertFalse(result['ok'])
+            self.assertEqual(result['reason'],'missing_state_with_execution_evidence')
+        self.assertEqual(before,self.snapshot())
+        self.assertFalse((self.root/'state.json').exists())
+
     def test_new_and_pre_execution(self):
         self.assertEqual(o.execution_compatibility(self.repo, 'NEW', 'resume')['code'], 'no_such_run')
         self.assertTrue(o.execution_compatibility(self.repo, 'NEW', 'run')['ok'])

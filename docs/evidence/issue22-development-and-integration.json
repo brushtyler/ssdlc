@@ -2,7 +2,7 @@
   "schema_version": 1,
   "scope": "Issue22 task-only execution, explicit bootstrap and corrective gate recovery; includes current-main integration",
   "source_manifest": {
-    "sha256": "0bf48f56b6a85dcd5d22c192532932cd2e08c0b9f4e928daf3afeb1c6ae2aa86",
+    "sha256": "e7f0a845e5d5ff0671557870181067526cbb66f9d978f845b07e8e6e14e52106",
     "definition": "SHA256 of canonical JSON mapping every tracked or nonignored source path to SHA256(file bytes), sorted by path; docs/evidence/ is excluded to avoid self-reference",
     "files": 214
   },
@@ -162,5 +162,32 @@
       "native_gate_receipts_required": true,
       "overlaps_prior_focused_tests": true
     }
+  },
+  "bootstrap_lifecycle_followup": {
+    "prior_source": "4c30582bb0c0c0e66dd36f1927fabc43e5b08b61",
+    "reproduced_baseline_regressions": 2,
+    "focused_groups": [
+      {
+        "tests": 34,
+        "result": "PASS"
+      },
+      {
+        "tests": 31,
+        "result": "PASS"
+      },
+      {
+        "tests": 20,
+        "result": "PASS"
+      }
+    ],
+    "counts_overlap": true,
+    "guards": [
+      "sealed unproven contract before journal creation",
+      "current foreground invocation only",
+      "same-instance failure cleanup",
+      "contract changed while waiting for ticket lock",
+      "retained evidence with missing state is never a fresh run"
+    ],
+    "final_suite_and_gates": "PENDING_NEW_EXACT_SOURCE_VERIFICATION"
   }
 }
