@@ -1,6 +1,7 @@
 """Headless invocation of the agent CLIs with schema-validated final output."""
 
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -9,6 +10,25 @@ from .markdown import header, parse_version
 from .schema import load_schema, schema_path, validate, SchemaError
 
 MODES = ('write', 'review')
+CREDENTIAL_VARS = ('GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN',
+                   'SSH_AUTH_SOCK')
+
+
+def isolated_env(gh_config_dir, base=None):
+    """Environment for agent CLIs and the test command: no GitHub credentials in reach of `gh`
+    or `git`. ``gh`` gets an empty config directory, git credential helpers are disabled and
+    git cannot use SSH (``GIT_SSH_COMMAND`` overrides any ``core.sshCommand``).
+
+    This prevents accidental use of the operator's credentials, not deliberate access: code
+    running as the same system user can still read files. Real isolation needs a dedicated
+    system user or a container.
+    """
+    env = {k: v for k, v in (os.environ if base is None else base).items()
+           if k not in CREDENTIAL_VARS and not k.startswith('GIT_CONFIG_')}
+    env.update({'GH_CONFIG_DIR': str(gh_config_dir), 'GIT_TERMINAL_PROMPT': '0',
+                'GIT_SSH_COMMAND': 'false', 'GIT_CONFIG_COUNT': '1',
+                'GIT_CONFIG_KEY_0': 'credential.helper', 'GIT_CONFIG_VALUE_0': ''})
+    return env
 
 
 class AgentError(RuntimeError):
@@ -65,10 +85,11 @@ def extract_output(kind, stdout, out_file):
 
 
 class AgentRunner:
-    def __init__(self, log_dir, timeout, run=subprocess.run):
+    def __init__(self, log_dir, timeout, run=subprocess.run, env=None):
         self.log_dir = Path(log_dir)
         self.timeout = timeout
         self._run = run
+        self._env = env
         self._versions = {}
 
     def version(self, agent):
@@ -92,9 +113,10 @@ class AgentRunner:
                                     out_file=out_file)
         stem.with_suffix('.prompt.md').write_text(prompt, encoding='utf-8')
         log = stem.with_suffix('.log')
+        kwargs = {'env': self._env} if self._env is not None else {}
         try:
             done = self._run(argv, input=stdin, cwd=workdir, capture_output=True, text=True,
-                             timeout=self.timeout)
+                             timeout=self.timeout, **kwargs)
         except subprocess.TimeoutExpired as exc:
             raise AgentError(f'{agent.key} timed out after {self.timeout}s', log) from exc
         except OSError as exc:

@@ -1,5 +1,7 @@
 """Git worktrees for agent work. The main checkout's working tree is never touched."""
 
+import base64
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -10,16 +12,18 @@ class WorkspaceError(RuntimeError):
 
 
 class Workspace:
-    def __init__(self, repo_root, state_dir, base_branch, run=subprocess.run):
+    def __init__(self, repo_root, state_dir, base_branch, run=subprocess.run, test_env=None):
         self.repo_root = Path(repo_root)
         self.root = self.repo_root / state_dir / 'worktrees'
         self.base_branch = base_branch
         self._run = run
+        self._test_env = test_env
 
-    def _git(self, *args, cwd=None, check=True, stdin=None):
+    def _git(self, *args, cwd=None, check=True, stdin=None, env=None):
+        kwargs = {'env': dict(os.environ, **env)} if env else {}
         try:
             done = self._run(['git', *args], cwd=cwd or self.repo_root, input=stdin,
-                             capture_output=True, text=True, timeout=600)
+                             capture_output=True, text=True, timeout=600, **kwargs)
         except subprocess.TimeoutExpired as exc:
             raise WorkspaceError(f'git {" ".join(args[:2])}: timed out after {exc.timeout}s') from exc
         except OSError as exc:
@@ -75,21 +79,51 @@ class Workspace:
     def diff_stat(self, path):
         return self._git('diff', '--stat', f'origin/{self.base_branch}...HEAD', cwd=path)
 
-    def commit_all(self, path, message):
+    def changed_files(self, path, since=None):
+        """Paths added, changed or deleted since commit ``since``, or on the branch with respect
+        to the base branch."""
+        span = f'{since}..HEAD' if since else f'origin/{self.base_branch}...HEAD'
+        out = self._git('diff', '--name-only', '--no-renames', span, cwd=path)
+        return [line for line in out.splitlines() if line]
+
+    def commit_all(self, path, message, author=None):
+        """Commit everything; ``author`` (``{name, email}``) is both author and committer."""
+        env = None
+        if author:
+            env = {'GIT_AUTHOR_NAME': author['name'], 'GIT_AUTHOR_EMAIL': author['email'],
+                   'GIT_COMMITTER_NAME': author['name'], 'GIT_COMMITTER_EMAIL': author['email']}
         self._git('add', '-A', cwd=path)
-        self._git('commit', '-F', '-', cwd=path, stdin=message)
+        self._git('commit', '-F', '-', cwd=path, stdin=message, env=env)
         return self.head(path)
 
-    def push(self, path, branch, *, replace=False):
-        """Push HEAD; ``replace`` overwrites a stale devloop branch left by an earlier attempt."""
-        self._git('push', *(['--force'] if replace else []), 'origin',
-                  f'HEAD:refs/heads/{branch}', cwd=path)
+    def push(self, path, branch, *, replace=False, auth=None):
+        """Push HEAD; ``replace`` overwrites a stale devloop branch left by an earlier attempt.
+
+        With ``auth`` (``{url, token}``) the push goes over HTTPS with that token only: stored
+        credential helpers are disabled and the token travels in the environment of this one
+        command, never in a config file or on the command line."""
+        env, remote = None, 'origin'
+        if auth:
+            remote = auth['url']
+            # A url.<base>.insteadOf rule could send the push over SSH with a personal key.
+            effective = self._git('ls-remote', '--get-url', remote, cwd=path).strip()
+            if effective != remote:
+                raise WorkspaceError(f'git rewrites {remote} to {effective}: refusing to push '
+                                     'with credentials other than the app token')
+            basic = base64.b64encode(f'x-access-token:{auth["token"]}'.encode()).decode()
+            env = {'GIT_TERMINAL_PROMPT': '0', 'GIT_CONFIG_COUNT': '2',
+                   'GIT_CONFIG_KEY_0': 'credential.helper', 'GIT_CONFIG_VALUE_0': '',
+                   'GIT_CONFIG_KEY_1': 'http.https://github.com/.extraheader',
+                   'GIT_CONFIG_VALUE_1': f'AUTHORIZATION: basic {basic}'}
+        self._git('push', *(['--force'] if replace else []), remote,
+                  f'HEAD:refs/heads/{branch}', cwd=path, env=env)
 
     def run_tests(self, path, command, timeout):
         """``(passed, output_tail)`` for the project test command in ``path``."""
+        kwargs = {'env': self._test_env} if self._test_env is not None else {}
         try:
             done = self._run(['bash', '-c', command], cwd=path, capture_output=True, text=True,
-                             timeout=timeout)
+                             timeout=timeout, **kwargs)
         except subprocess.TimeoutExpired:
             return False, f'Test command timed out after {timeout}s'
         tail = '\n'.join((done.stdout + '\n' + done.stderr).strip().splitlines()[-60:])

@@ -169,6 +169,19 @@ def render_review(review, head):
     return publishable(head + '\n' + '\n'.join(parts), 'review', review)
 
 
+_REVIEW_EVENT = {'approve': 'APPROVE', 'request_changes': 'REQUEST_CHANGES',
+                 'needs_human': 'COMMENT'}
+
+
+def render_native_review(review, head):
+    """``{event, body}`` of the GitHub review that mirrors a devloop review. It carries no
+    marker: devloop reads only the review comment."""
+    body = (head + f'\n**Verdetto devloop:** {_VERDICT_TEXT[review["verdict"]]} (round '
+            f'{review["round"]}/{review["max_rounds"]}, commit `{review["head_sha"][:12]}`). '
+            'I dettagli sono nel commento della review automatica.')
+    return {'event': _REVIEW_EVENT[review['verdict']], 'body': publishable(body)}
+
+
 def render_fix(fix, head, round_no):
     parts = [f'## Correzioni per il round {round_no}', '', fix['summary'].strip()]
     if fix['responses']:

@@ -24,6 +24,10 @@ test_timeout_seconds = 1800
 blocked_labels = ["bloccata"]
 priority_labels = ["prerequisito"]
 
+# Changes under these paths are never pushed by devloop: a workflow or a local action pushed to
+# a branch of this repository would run in CI before anyone reviewed it.
+protected_paths = [".github/"]
+
 [roles]
 implementer = "claude"
 reviewer = "codex"    # must differ from the implementer
@@ -56,3 +60,25 @@ display_name = "Antigravity"
 model = "gemini-3.8-flash-high"
 model_label = "Gemini 3.8 Flash"
 effort = "high"
+
+# GitHub Apps (issue #65): one per agent and one for the dispatcher. App ids and slugs are not
+# secret. Private keys are read from key_dir (or $DEVLOOP_APP_KEY_DIR) as
+# <slug>.<date>.private-key.pem, mode 600. An actor without an app uses the ambient `gh` login.
+[apps]
+key_dir = "~/.ghapps"
+
+[apps.dispatcher]
+app_id = 5747835
+slug = "brushtyler-devloop-dispatcher"
+
+[apps.claude]
+app_id = 5735240
+slug = "brushtyler-devloop-claude-agent"
+
+[apps.codex]
+app_id = 5735296
+slug = "brushtyler-devloop-codex-agent"
+
+[apps.agy]
+app_id = 5735349
+slug = "brushtyler-devloop-agy-agent"

@@ -1,7 +1,12 @@
 """The dispatcher: reads GitHub state, plans the next steps, runs them.
 
-State lives on GitHub only (labels plus hidden markers in comments written by
-trusted users), so a tick can crash at any point and the next one resumes.
+State lives on GitHub only (labels plus hidden markers in comments), so a tick can crash at any
+point and the next one resumes.
+
+Identities: with GitHub Apps configured (``apps``), the dispatcher acts with its own app and each
+agent with its own, and every record is bound to the identity that may write it: a PR to its
+implementer's app, a review to its reviewer's app, a CI verdict to the dispatcher's app. Without
+an app an actor uses the ambient ``gh`` login, and its records must come from ``trusted_users``.
 
 Issue  agent:ready ─► agent:working ─► PR opened
 PR     agent:review ─► (CI fail | request_changes) ─► agent:changes ─► agent:review ─► …
@@ -19,9 +24,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .agents import AgentError
+from .apps import DISPATCHER, IMPLEMENT, ISSUE_COMMENT, PR_COMMENT, REVIEW
 from .github import GitHubError
 from .markdown import (RESUME, dispatcher_header, publishable, read_marker, render_escalation,
-                       render_fix, render_review)
+                       render_fix, render_native_review, render_review)
 from .review import ci_failure_review, normalize_review, open_findings
 from .workspace import WorkspaceError
 
@@ -199,29 +205,66 @@ def format_previous_rounds(reviews, fixes):
 
 
 class Dispatcher:
-    def __init__(self, cfg, gh, ws, runner, log=print):
+    """``gh`` acts as the dispatcher. ``identities`` (``apps.Identities``) gives each agent its
+    own GitHub identity; without it every actor uses ``gh``."""
+
+    def __init__(self, cfg, gh, ws, runner, log=print, identities=None):
         self.cfg = cfg
         self.gh = gh
         self.ws = ws
         self.runner = runner
         self.log = log
+        self.identities = identities
+
+    # Identities ------------------------------------------------------------
+    def _as(self, actor, permissions):
+        """The GitHub client ``actor`` acts with, holding only ``permissions``."""
+        return self.identities.github(actor, permissions) if self.identities else self.gh
+
+    def _git_auth(self, actor, permissions):
+        return self.identities.git_auth(actor, permissions) if self.identities else None
+
+    def _app_login(self, actor):
+        return self.identities.login(actor) if self.identities else None
+
+    def _wrote(self, login, actor):
+        """Whether ``login`` may write records for ``actor``: the actor's app if it has one,
+        otherwise a trusted user."""
+        expected = self._app_login(actor)
+        return login == expected if expected else login in self.cfg.trusted_users
 
     # Snapshot ------------------------------------------------------------
-    def _trusted_markers(self, comments, kind):
-        """Records of ``kind`` from trusted users' comments: at most one per comment."""
+    def _markers(self, pr, comments, kind):
+        """Records of ``kind`` from the identities allowed to write them, at most one per
+        comment: fixes from the PR's implementer, CI verdicts from the dispatcher, reviews from
+        the agent named in the record, never the implementer."""
+        implementer = pr.meta.get('implementer')
         found = []
         for comment in comments:
-            if (comment.get('author') or {}).get('login') in self.cfg.trusted_users:
-                record = read_marker(comment.get('body', ''), kind)
-                if record is not None:
-                    found.append(record)
+            record = read_marker(comment.get('body', ''), kind)
+            if record is None:
+                continue
+            if kind == 'fix':
+                actor = implementer
+            elif record['source'] == 'ci':
+                actor = DISPATCHER
+            elif record.get('reviewer') == implementer:
+                continue
+            else:
+                actor = record.get('reviewer')
+            if actor and self._wrote((comment.get('author') or {}).get('login'), actor):
+                found.append(record)
         return found
 
     def _devloop_pr(self, raw):
         """A devloop PR is recognised by its branch, ``<branch_prefix><issue>``, so that it stays
         in the flow (and its branch is never overwritten) even if its marker is lost. ``meta`` is
-        empty when the body no longer ends with a marker for that issue."""
-        if raw.get('isCrossRepository') or (raw.get('author') or {}).get('login') not in self.cfg.trusted_users:
+        empty when the body no longer ends with a marker for that issue, or when the PR was not
+        opened by the implementer the marker names."""
+        author = (raw.get('author') or {}).get('login')
+        agents = self.identities.agent_logins() if self.identities else set()
+        if raw.get('isCrossRepository') or (author not in self.cfg.trusted_users
+                                            and author not in agents):
             return None
         ref, prefix = raw['headRefName'], self.cfg.branch_prefix
         suffix = ref[len(prefix):] if ref.startswith(prefix) else ''
@@ -229,7 +272,8 @@ class Dispatcher:
             return None
         issue = int(suffix)
         meta = read_marker(raw.get('body', ''), 'pr')
-        if meta is not None and meta['issue'] != issue:
+        if meta is not None and (meta['issue'] != issue
+                                 or not self._wrote(author, meta['implementer'])):
             meta = None
         return PullRequest(number=raw['number'], issue=issue,
                            head_ref=ref, head_sha=raw['headRefOid'],
@@ -243,10 +287,10 @@ class Dispatcher:
             pr = self._devloop_pr(raw)
             if pr is None:
                 continue
-            if pr.labels & {lb.review, lb.changes, lb.ready_to_merge}:
+            if pr.meta and pr.labels & {lb.review, lb.changes, lb.ready_to_merge}:
                 comments = self.gh.pr_comments(pr.number)
-                pr.reviews = sorted(self._trusted_markers(comments, 'review'), key=lambda r: r['round'])
-                pr.fixes = self._trusted_markers(comments, 'fix')
+                pr.reviews = sorted(self._markers(pr, comments, 'review'), key=lambda r: r['round'])
+                pr.fixes = self._markers(pr, comments, 'fix')
             if pr.labels & {lb.review, lb.ready_to_merge}:
                 pr.checks, pr.failed_checks, pr.failed_runs = self.gh.checks(pr.head_sha)
             prs.append(pr)
@@ -331,10 +375,24 @@ class Dispatcher:
             message += f'\n{agent.commit_trailer}\n'
         return message
 
-    def _blocked(self, number, agent, reason, remove):
-        self.gh.comment(number, publishable(self.runner.header(agent) + '\n## Lavoro bloccato\n\n'
-                                            + reason.strip() + '\n\n' + RESUME))
+    def _blocked(self, number, agent, reason, remove, on_pr):
+        author = self._as(agent.key, PR_COMMENT if on_pr else ISSUE_COMMENT)
+        author.comment(number, publishable(self.runner.header(agent) + '\n## Lavoro bloccato\n\n'
+                                           + reason.strip() + '\n\n' + RESUME))
         self.gh.edit_labels(number, add=[self.cfg.labels.needs_human], remove=remove)
+
+    def _protected_changes(self, path, since=None):
+        """Changed files under ``protected_paths``, which devloop never pushes."""
+        return [f for f in self.ws.changed_files(path, since)
+                if any(f.startswith(prefix) for prefix in self.cfg.protected_paths)]
+
+    def _escalate_protected(self, number, files, remove):
+        listed = '\n'.join(f'- `{f}`' for f in files[:20])
+        self._escalate(number, 'La modifica tocca percorsi protetti (`protected_paths`), che devloop '
+                               'non pubblica: un workflow o una action locale su un branch di questo '
+                               'repository verrebbe eseguito dalla CI prima di qualsiasi review. Il '
+                               'commit resta nel worktree locale; la modifica va applicata a mano.'
+                               '\n\n' + listed, remove=remove)
 
     def _approval_current(self, pr, review):
         """Re-read head and CI just before promoting: approval holds only for the reviewed commit
@@ -427,16 +485,23 @@ class Dispatcher:
                            test_cmd=cfg.test_cmd, language=cfg.language)
         result, failure = self._write_turn(agent, prompt, 'implement', path, f'issue-{number}-implement')
         if result['status'] == 'blocked':
-            return self._blocked(number, agent, result['blocked_reason'], remove=[lb.working])
+            return self._blocked(number, agent, result['blocked_reason'], remove=[lb.working],
+                                 on_pr=False)
         if failure:
             return self._escalate(number, failure[0], failure[1], remove=[lb.working])
-        self.ws.commit_all(path, self._commit_message(agent, result['commit_message'], number))
-        self.ws.push(path, branch, replace=True)
+        auth = self._git_auth(agent.key, IMPLEMENT)
+        self.ws.commit_all(path, self._commit_message(agent, result['commit_message'], number),
+                           author=auth)
+        protected = self._protected_changes(path)
+        if protected:
+            return self._escalate_protected(number, protected, remove=[lb.working])
+        self.ws.push(path, branch, replace=True, auth=auth)
         meta = {'issue': number, 'implementer': agent.key, 'reviewer': cfg.reviewer}
         body = publishable(self.runner.header(agent) + '\n' + result['pr_body'].strip()
                            + f'\n\nCloses #{number}', 'pr', meta)
-        url = self.gh.create_pr(base=cfg.base_branch, head=branch, title=result['pr_title'],
-                                body=body, labels=[lb.review])
+        pr_number, url = self._as(agent.key, IMPLEMENT).create_pr(
+            base=cfg.base_branch, head=branch, title=result['pr_title'], body=body)
+        self.gh.edit_labels(pr_number, add=[lb.review])
         self.gh.edit_labels(number, remove=[lb.working])
         self.ws.remove(name)
         self.log(f'  opened {url}')
@@ -492,7 +557,16 @@ class Dispatcher:
         review = normalize_review(raw, previous_open=previous_open, round_no=round_no,
                                   max_rounds=cfg.max_review_rounds, head_sha=pr.head_sha,
                                   ci=pr.checks, reviewer=agent.key)
-        self.gh.comment(pr.number, render_review(review, self.runner.header(agent)))
+        reviewer_gh = self._as(agent.key, REVIEW)
+        reviewer_gh.comment(pr.number, render_review(review, self.runner.header(agent)))
+        if self._app_login(agent.key):
+            # A native review under the reviewer's own identity, visible to branch protection.
+            # The marker comment above stays the record devloop reads.
+            try:
+                reviewer_gh.submit_review(pr.number, commit=pr.head_sha,
+                                          **render_native_review(review, self.runner.header(agent)))
+            except GitHubError as exc:
+                self.log(f'  native review not submitted: {exc}')
         self._apply_verdict(pr, review, announce=True)
         self.ws.remove(name)
         self.log(f'  verdict: {review["verdict"]}')
@@ -527,14 +601,21 @@ class Dispatcher:
         result, failure = self._write_turn(agent, prompt, 'fix', path,
                                            f'pr-{pr.number}-fix-r{latest["round"]}')
         if result['status'] == 'blocked':
-            return self._blocked(pr.number, agent, result['blocked_reason'], remove=[lb.changes])
+            return self._blocked(pr.number, agent, result['blocked_reason'], remove=[lb.changes],
+                                 on_pr=True)
         if failure:
             return self._escalate(pr.number, failure[0], failure[1], remove=[lb.changes])
         if self.ws.has_changes(path):
-            self.ws.commit_all(path, self._commit_message(agent, result['commit_message'], pr.issue))
-            self.ws.push(path, pr.head_ref)
+            auth = self._git_auth(agent.key, IMPLEMENT)
+            self.ws.commit_all(path, self._commit_message(agent, result['commit_message'], pr.issue),
+                               author=auth)
+            protected = self._protected_changes(path, since=latest['head_sha'])
+            if protected:
+                return self._escalate_protected(pr.number, protected, remove=[lb.changes])
+            self.ws.push(path, pr.head_ref, auth=auth)
         fix = dict(result, head_sha=self.ws.head(path))
-        self.gh.comment(pr.number, render_fix(fix, self.runner.header(agent), latest['round']))
+        self._as(agent.key, PR_COMMENT).comment(
+            pr.number, render_fix(fix, self.runner.header(agent), latest['round']))
         self.gh.edit_labels(pr.number, add=[lb.review], remove=[lb.changes])
         self.ws.remove(name)
 

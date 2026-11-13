@@ -1,15 +1,16 @@
 import dataclasses
 import json
+import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from devloop import agents, config, markdown, review, schema
+from devloop import agents, apps, config, markdown, review, schema
 from devloop.dispatcher import (Action, Dispatcher, PullRequest, Snapshot, UntrustedChange, plan,
                                 untrusted_change)
-from devloop.github import GitHub, GitHubError, normalize_checks, summarize_checks
+from devloop.github import GitHub, GitHubError, author_login, normalize_checks, summarize_checks
 from devloop.workspace import Workspace, WorkspaceError
 
 CFG = config.load_config()
@@ -32,7 +33,7 @@ def raw_review(verdict='approve', blocking=(), previous=(), human=''):
 
 def norm(raw, previous_open=(), round_no=1, head=SHA1):
     return review.normalize_review(raw, previous_open=list(previous_open), round_no=round_no,
-                                   max_rounds=3, head_sha=head, ci='pass', reviewer='claude')
+                                   max_rounds=3, head_sha=head, ci='pass', reviewer=REV)
 
 
 class SchemaTests(unittest.TestCase):
@@ -76,6 +77,23 @@ class ConfigTests(unittest.TestCase):
             config.parse_config(dict(data, trusted_users=[]))
         with self.assertRaises(config.ConfigError):
             config.parse_config(dict(data, max_review_rounds=0))
+
+    def test_apps_belong_to_known_actors_and_bots_are_never_trusted(self):
+        import tomllib
+        data = tomllib.loads(config.DEFAULT_CONFIG.read_text())
+        self.assertEqual(set(CFG.apps), {'dispatcher', 'claude', 'codex', 'agy'})
+        self.assertEqual(CFG.apps['dispatcher'].slug, 'brushtyler-devloop-dispatcher')
+        self.assertEqual(CFG.protected_paths, ('.github/',))
+        bad = [dict(data, trusted_users=['brushtyler', 'brushtyler-devloop-claude-agent[bot]']),
+               dict(data, apps={'nobody': {'app_id': 1, 'slug': 's'}}),
+               dict(data, apps={'claude': {'app_id': 1, 'slug': 'a'},
+                                'codex': {'app_id': 1, 'slug': 'b'}}),
+               dict(data, apps={'claude': {'slug': 'a'}})]
+        for value in bad:
+            with self.subTest(value=value.get('apps') or value['trusted_users']), \
+                    self.assertRaises(config.ConfigError):
+                config.parse_config(value)
+        self.assertEqual(config.parse_config(dict(data, apps={})).apps, {})
 
 
 class MarkdownTests(unittest.TestCase):
@@ -361,12 +379,50 @@ class GitHubAdapterTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
         self.assertIn('number=7', self.calls[0][0])
 
-    def test_create_pr_then_labels(self):
+    def test_create_pr_leaves_labels_to_the_dispatcher(self):
         gh = self.make([('repos/o/r/pulls', (0, '{"number": 61, "html_url": "u"}', ''))])
-        self.assertEqual(gh.create_pr(base='main', head='agent/issue-7', title='t', body='b',
-                                      labels=['agent:review']), 'u')
+        self.assertEqual(gh.create_pr(base='main', head='agent/issue-7', title='t', body='b'),
+                         (61, 'u'))
         self.assertEqual(self.calls[0][1], 'b')
-        self.assertIn('repos/o/r/issues/61/labels', ' '.join(self.calls[1][0]))
+        self.assertEqual(len(self.calls), 1)
+
+    def test_native_review_targets_the_reviewed_commit(self):
+        gh = self.make([])
+        gh.submit_review(61, commit=SHA1, event='APPROVE', body='ok')
+        argv = ' '.join(self.calls[0][0])
+        self.assertIn('-X POST repos/o/r/pulls/61/reviews', argv)
+        self.assertIn(f'commit_id={SHA1}', argv)
+        self.assertIn('event=APPROVE', argv)
+        self.assertEqual(self.calls[0][1], 'ok')
+
+    def test_app_logins_are_read_in_rest_form(self):
+        # `gh pr list` says app/<slug>, `gh pr view` a bare <slug>: neither can be trusted as is.
+        self.assertEqual(author_login({'login': 'app/x-agent', 'is_bot': True}), 'x-agent[bot]')
+        self.assertEqual(author_login({'login': 'app/x-agent'}), 'app/x-agent')
+        self.assertEqual(author_login({'login': 'brushtyler'}), 'brushtyler')
+        gh = self.make([('pr list', (0, '[{"number":1,"author":{"login":"app/x-agent",'
+                                        '"is_bot":true}}]', '')),
+                        ('issues/1/comments', (0, '{"author":{"login":"x-agent[bot]"},'
+                                                  '"body":"b"}\n', ''))])
+        self.assertEqual(gh.open_prs()[0]['author'], {'login': 'x-agent[bot]'})
+        self.assertEqual(gh.pr_comments(1), [{'author': {'login': 'x-agent[bot]'}, 'body': 'b'}])
+        self.assertIn('repos/o/r/issues/1/comments', ' '.join(self.calls[-1][0]))
+
+    def test_a_token_replaces_the_ambient_login_for_each_call(self):
+        seen = []
+
+        def fake_run(argv, **kw):
+            seen.append(kw.get('env'))
+            return SimpleNamespace(returncode=0, stdout='{}', stderr='')
+        GitHub('o/r', run=fake_run).comment(1, 'x')
+        self.assertIsNone(seen[-1])
+        os.environ['GITHUB_TOKEN'] = 'ambient'
+        try:
+            GitHub('o/r', run=fake_run, token=lambda: 'app-token').comment(1, 'x')
+        finally:
+            del os.environ['GITHUB_TOKEN']
+        self.assertEqual(seen[-1]['GH_TOKEN'], 'app-token')
+        self.assertNotIn('GITHUB_TOKEN', seen[-1])
 
 
 # Dispatcher ------------------------------------------------------------------
@@ -536,6 +592,7 @@ class FakeGH:
         self.labels = {}
         self.comments = []
         self.created = []
+        self.native = []
         self.head = head
         self.ci = ci
 
@@ -571,19 +628,26 @@ class FakeGH:
 
     def create_pr(self, **kw):
         self.created.append(kw)
-        return 'https://example/pr/100'
+        return 100, 'https://example/pr/100'
+
+    def submit_review(self, number, **kw):
+        self.native.append((number, kw))
 
     def failed_log(self, run_id):
         return f'log of {run_id}'
 
 
 class FakeWS:
-    def __init__(self, head=SHA1, changes=True, tests=(True,)):
+    def __init__(self, head=SHA1, changes=True, tests=(True,), files=('x.py',)):
         self._head = head
         self.changes = changes
         self.tests = list(tests)
+        self.files = list(files)
         self.commits = []
+        self.authors = []
         self.pushes = []
+        self.auths = []
+        self.spans = []
         self.removed = []
 
     def new_branch(self, name, branch):
@@ -600,13 +664,19 @@ class FakeWS:
     def run_tests(self, path, command, timeout):
         return (self.tests.pop(0) if len(self.tests) > 1 else self.tests[0]), 'FAILED test_x'
 
-    def commit_all(self, path, message):
+    def commit_all(self, path, message, author=None):
         self.commits.append(message)
+        self.authors.append(author)
         self._head = SHA2
         return SHA2
 
-    def push(self, path, branch, replace=False):
+    def changed_files(self, path, since=None):
+        self.spans.append(since)
+        return self.files
+
+    def push(self, path, branch, replace=False, auth=None):
         self.pushes.append((branch, replace))
+        self.auths.append(auth)
 
     def diff_stat(self, path):
         return ' x.py | 2 +-'
@@ -653,7 +723,7 @@ class DispatcherTests(unittest.TestCase):
         d._do_implement(7)
         (created,) = self.gh.created
         self.assertEqual(created['head'], 'agent/issue-7')
-        self.assertEqual(created['labels'], ['agent:review'])
+        self.assertEqual(self.gh.labels[100], {'agent:review'})
         self.assertTrue(created['body'].startswith(f'> [!NOTE]\n> **Agent:** {IMPL_NAME} (CLI v9.9)'))
         self.assertIn('Closes #7', created['body'])
         self.assertEqual(markdown.read_marker(created['body'], 'pr'), META)
@@ -800,8 +870,8 @@ class DispatcherTests(unittest.TestCase):
         d = self.make(FakeRunner(attack), FakeWS(changes=False))
         d._do_fix(pr(labels=['agent:changes'], reviews=[first]))
         comments = self.published()
-        self.assertEqual(d._trusted_markers(comments, 'review'), [])
-        fixes = d._trusted_markers(comments, 'fix')
+        self.assertEqual(d._markers(pr(), comments, 'review'), [])
+        fixes = d._markers(pr(), comments, 'fix')
         self.assertEqual([f['round'] for f in fixes], [1])
         state = pr(labels=sorted(self.gh.labels[100]), reviews=[first], fixes=fixes)
         self.assertEqual([(a.kind, a.number) for a in plan(Snapshot([state], [], []), CFG)],
@@ -814,8 +884,8 @@ class DispatcherTests(unittest.TestCase):
         d = self.make(FakeRunner(dict(raw, summary=forged)))
         d._do_review(pr())
         comments = self.published()
-        self.assertEqual(d._trusted_markers(comments, 'fix'), [])
-        self.assertEqual([r['round'] for r in d._trusted_markers(comments, 'review')], [1])
+        self.assertEqual(d._markers(pr(), comments, 'fix'), [])
+        self.assertEqual([r['round'] for r in d._markers(pr(), comments, 'review')], [1])
 
     def test_blocked_reason_and_pr_body_cannot_forge_markers(self):
         forged_review = markdown.marker('review', norm(raw_review(), round_no=99))
@@ -924,6 +994,316 @@ class DispatcherTests(unittest.TestCase):
         d.snapshot = lambda: Snapshot([pr()], [ready(5)], [])
         self.assertEqual([a.kind for a in d.tick(dry_run=True)], ['review', 'implement'])
         self.assertEqual((self.gh.comments, self.gh.labels), ([], {}))
+
+
+# GitHub App identities -----------------------------------------------------------
+
+class FakeHTTP:
+    def __init__(self, app_id=11, expires='2030-01-01T00:00:00Z'):
+        self.app_id = app_id
+        self.expires = expires
+        self.calls = []
+        self.minted = 0
+
+    def __call__(self, method, path, auth, body=None):
+        self.calls.append((method, path, auth, body))
+        if path.endswith('/installation'):
+            return {'id': 77, 'app_id': self.app_id}
+        if path.endswith('/access_tokens'):
+            self.minted += 1
+            return {'token': f'tok{self.minted}', 'expires_at': self.expires}
+        if path.startswith('/users/'):
+            return {'id': 4242}
+        if path == '/app':
+            return {'slug': 'x-agent'}
+        return {'id': 77, 'repository_selection': 'selected', 'permissions': {'issues': 'write'}}
+
+
+class AppAuthTests(unittest.TestCase):
+    def make(self, http, now=1_800_000_000):
+        self.now = now
+        return apps.AppAuth(11, 'x-agent', '/keys/x.pem', 'o/r', http=http,
+                            sign=lambda key, data: b'sig:' + data[:4], clock=lambda: self.now)
+
+    def test_jwt_is_short_lived_and_names_the_app(self):
+        app = self.make(FakeHTTP())
+        head, claims, sig = app.jwt().split('.')
+        decode = lambda part: json.loads(apps.base64.urlsafe_b64decode(part + '=' * (-len(part) % 4)))
+        self.assertEqual(decode(head)['alg'], 'RS256')
+        self.assertEqual(decode(claims), {'iat': self.now - 60, 'exp': self.now + 540, 'iss': '11'})
+        self.assertTrue(sig)
+
+    def test_tokens_are_scoped_to_the_repository_and_the_permissions_asked(self):
+        http = FakeHTTP()
+        app = self.make(http)
+        self.assertEqual(app.token(apps.REVIEW), 'tok1')
+        method, path, auth, body = http.calls[-1]
+        self.assertEqual((method, path), ('POST', '/app/installations/77/access_tokens'))
+        self.assertTrue(auth.startswith('Bearer '))
+        self.assertEqual(body, {'repositories': ['r'], 'permissions': apps.REVIEW})
+        self.assertEqual(app.token(apps.REVIEW), 'tok1')          # cached
+        self.assertEqual(app.token(apps.IMPLEMENT), 'tok2')       # other permissions, other token
+        app.token()                                               # all the installation grants
+        self.assertNotIn('permissions', http.calls[-1][3])
+        self.assertEqual(app.login, 'x-agent[bot]')
+        self.assertEqual(app.user_id('tok2'), 4242)
+        self.assertEqual(http.calls[-1][2], 'token tok2')
+
+    def test_tokens_close_to_expiry_are_renewed(self):
+        http = FakeHTTP(expires='2027-01-15T08:00:00Z')
+        app = self.make(http, now=1_800_000_000)
+        app.token(apps.REVIEW)
+        self.now = 1_800_000_000 + 10 ** 9  # far beyond the expiry
+        self.assertEqual(app.token(apps.REVIEW), 'tok2')
+
+    def test_installation_of_another_app_is_refused(self):
+        with self.assertRaises(GitHubError):
+            self.make(FakeHTTP(app_id=99)).token()
+
+    def test_describe_checks_the_slug(self):
+        info = self.make(FakeHTTP()).describe()
+        self.assertEqual((info['login'], info['installation']), ('x-agent[bot]', 77))
+        app = apps.AppAuth(11, 'other', '/k', 'o/r', http=FakeHTTP(), sign=lambda k, d: b's')
+        with self.assertRaises(GitHubError):
+            app.describe()
+
+    def test_find_key_takes_the_newest_private_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old, new = (Path(tmp) / f'x-agent.{d}.private-key.pem' for d in ('2026-01-01', '2026-11-12'))
+            for key in (old, new, Path(tmp) / 'y-agent.2027-01-01.private-key.pem'):
+                key.write_text('k')
+                key.chmod(0o600)
+            self.assertEqual(apps.find_key(tmp, 'x-agent'), new)
+            new.chmod(0o640)
+            with self.assertRaises(PermissionError):
+                apps.find_key(tmp, 'x-agent')
+            with self.assertRaises(FileNotFoundError):
+                apps.find_key(tmp, 'z-agent')
+
+    def test_identities_fall_back_to_the_ambient_login(self):
+        envs = []
+
+        def fake_run(argv, **kw):
+            envs.append(kw.get('env'))
+            return SimpleNamespace(returncode=0, stdout='{}', stderr='')
+        app = self.make(FakeHTTP())
+        ids = apps.Identities('o/r', {'codex': app}, run=fake_run)
+        ids.github('claude', apps.IMPLEMENT).comment(1, 'x')
+        ids.github('codex', apps.REVIEW).comment(1, 'x')
+        self.assertIsNone(envs[0])
+        self.assertEqual(envs[1]['GH_TOKEN'], 'tok1')
+        self.assertEqual((ids.login('claude'), ids.login('codex')), (None, 'x-agent[bot]'))
+        self.assertIsNone(ids.git_auth('claude', apps.IMPLEMENT))
+        self.assertEqual(ids.git_auth('codex', apps.IMPLEMENT), {
+            'name': 'x-agent[bot]', 'email': '4242+x-agent[bot]@users.noreply.github.com',
+            'url': 'https://github.com/o/r.git', 'token': 'tok2'})
+        self.assertEqual(ids.agent_logins(), {'x-agent[bot]'})
+
+
+class CredentialIsolationTests(unittest.TestCase):
+    def test_agents_and_tests_get_no_github_credentials(self):
+        base = {'PATH': '/bin', 'HOME': '/root', 'GH_TOKEN': 'a', 'GITHUB_TOKEN': 'b',
+                'SSH_AUTH_SOCK': '/s', 'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'x'}
+        env = agents.isolated_env('/state/gh', base)
+        for name in ('GH_TOKEN', 'GITHUB_TOKEN', 'SSH_AUTH_SOCK'):
+            self.assertNotIn(name, env)
+        self.assertEqual((env['PATH'], env['HOME'], env['GH_CONFIG_DIR']), ('/bin', '/root', '/state/gh'))
+        self.assertEqual(env['GIT_SSH_COMMAND'], 'false')
+        self.assertEqual((env['GIT_CONFIG_KEY_0'], env['GIT_CONFIG_VALUE_0']), ('credential.helper', ''))
+
+    def test_runner_and_test_command_use_the_isolated_environment(self):
+        seen = []
+
+        def fake_run(argv, **kw):
+            seen.append(kw.get('env'))
+            return SimpleNamespace(returncode=0, stdout='ok', stderr='')
+        Workspace('/repo', '.state', 'main', run=fake_run, test_env={'X': '1'}).run_tests('/wt', 'true', 5)
+        self.assertEqual(seen[-1], {'X': '1'})
+
+    def git(self, *args, cwd):
+        subprocess.run(['git', *args], cwd=cwd, check=True, capture_output=True)
+
+    def test_push_with_an_app_token(self):
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append((argv, kw.get('env')))
+            out = 'https://github.com/o/r.git\n' if 'ls-remote' in argv else ''
+            return SimpleNamespace(returncode=0, stdout=out, stderr='')
+        ws = Workspace('/repo', '.state', 'main', run=fake_run)
+        ws.push('/wt', 'agent/issue-7', auth={'url': 'https://github.com/o/r.git', 'token': 'T'})
+        argv, env = calls[-1]
+        self.assertEqual(argv, ['git', 'push', 'https://github.com/o/r.git',
+                                'HEAD:refs/heads/agent/issue-7'])
+        self.assertNotIn('T', ' '.join(argv))
+        self.assertEqual((env['GIT_CONFIG_KEY_0'], env['GIT_CONFIG_VALUE_0']), ('credential.helper', ''))
+        self.assertEqual(env['GIT_CONFIG_VALUE_1'],
+                         'AUTHORIZATION: basic ' + apps.base64.b64encode(b'x-access-token:T').decode())
+        ws.commit_all('/wt', 'msg', author={'name': 'x-agent[bot]', 'email': 'e@x'})
+        commit_env = [env for argv, env in calls if 'commit' in argv][0]
+        self.assertEqual((commit_env['GIT_AUTHOR_NAME'], commit_env['GIT_COMMITTER_EMAIL']),
+                         ('x-agent[bot]', 'e@x'))
+        ws.push('/wt', 'agent/issue-7')
+        self.assertEqual(calls[-1], (['git', 'push', 'origin', 'HEAD:refs/heads/agent/issue-7'], None))
+
+    def test_push_refuses_a_url_that_git_rewrites(self):
+        # A url.insteadOf rule would send the push over SSH with a personal key.
+        with tempfile.TemporaryDirectory() as tmp:
+            self.git('init', '-q', cwd=tmp)
+            self.git('config', 'url.git@github.com:.insteadOf', 'https://github.com/', cwd=tmp)
+            ws = Workspace(tmp, '.state', 'main')
+            with self.assertRaisesRegex(WorkspaceError, 'rewrites'):
+                ws.push(tmp, 'b', auth={'url': 'https://github.com/o/r.git', 'token': 'T'})
+
+    def test_changed_files_since_a_commit_or_against_the_base(self):
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(argv)
+            return SimpleNamespace(returncode=0, stdout='a.py\n.github/workflows/x.yml\n', stderr='')
+        ws = Workspace('/repo', '.state', 'main', run=fake_run)
+        self.assertEqual(ws.changed_files('/wt'), ['a.py', '.github/workflows/x.yml'])
+        self.assertIn('origin/main...HEAD', calls[-1])
+        ws.changed_files('/wt', since=SHA1)
+        self.assertIn(f'{SHA1}..HEAD', calls[-1])
+
+
+class ActingAs:
+    """The GitHub client of one actor: records who did what on the shared FakeGH."""
+
+    def __init__(self, fake, actor, permissions):
+        self._fake, self._actor, self._perms = fake, actor, permissions
+
+    def __getattr__(self, name):
+        method = getattr(self._fake, name)
+
+        def call(*args, **kw):
+            self._fake.acts.append((self._actor, self._perms, name))
+            return method(*args, **kw)
+        return call
+
+
+class FakeIdentities:
+    LOGINS = {'dispatcher': 'devloop-dispatcher[bot]', 'claude': 'claude-agent[bot]',
+              'codex': 'codex-agent[bot]', 'agy': 'agy-agent[bot]'}
+
+    def __init__(self, fake):
+        self.fake = fake
+        fake.acts = []
+
+    def github(self, actor, permissions=None):
+        return ActingAs(self.fake, actor, permissions)
+
+    def login(self, actor):
+        return self.LOGINS.get(actor)
+
+    def agent_logins(self):
+        return {v for k, v in self.LOGINS.items() if k != 'dispatcher'}
+
+    def git_auth(self, actor, permissions):
+        return {'name': self.LOGINS[actor], 'email': f'1+{self.LOGINS[actor]}@x', 'url': 'u',
+                'token': f'{actor}:{sorted(permissions.items())}'}
+
+
+class IdentityTests(unittest.TestCase):
+    def make(self, runner, ws=None):
+        self.gh, self.ws = FakeGH(), ws or FakeWS()
+        self.ids = FakeIdentities(self.gh)
+        return Dispatcher(CFG, self.gh, self.ws, runner, log=lambda m: None, identities=self.ids)
+
+    def login(self, actor):
+        return FakeIdentities.LOGINS[actor]
+
+    def test_the_implementer_commits_pushes_and_opens_the_pr_the_dispatcher_labels_it(self):
+        d = self.make(FakeRunner(implemented()))
+        d._do_implement(7)
+        self.assertEqual(self.gh.acts, [(IMPL, apps.IMPLEMENT, 'create_pr')])
+        self.assertEqual(self.ws.authors[0]['name'], self.login(IMPL))
+        self.assertEqual(self.ws.auths[0]['token'], f'{IMPL}:{sorted(apps.IMPLEMENT.items())}')
+        self.assertEqual(self.gh.labels, {100: {'agent:review'}, 7: set()})
+
+    def test_protected_paths_are_never_pushed(self):
+        d = self.make(FakeRunner(implemented()), FakeWS(files=['a.py', '.github/workflows/ci.yml']))
+        d._do_implement(7)
+        self.assertEqual((self.ws.pushes, self.gh.created), ([], []))
+        self.assertEqual(self.gh.labels[7], {'agent:needs-human'})
+        self.assertIn('.github/workflows/ci.yml', self.gh.comments[-1][1])
+        # A fix is checked only on what it adds to the reviewed head.
+        first = norm(raw_review('request_changes', [finding()]))
+        d = self.make(FakeRunner(fixed()), FakeWS(files=['.github/actions/x/action.yml']))
+        d._do_fix(pr(labels=['agent:changes'], reviews=[first]))
+        self.assertEqual((self.ws.pushes, self.ws.spans), ([], [SHA1]))
+        self.assertEqual(self.gh.labels[100], {'agent:needs-human'})
+
+    def test_the_reviewer_posts_its_verdict_and_a_native_review(self):
+        for raw, event in ((raw_review(), 'APPROVE'),
+                           (raw_review('request_changes', [finding()]), 'REQUEST_CHANGES'),
+                           (raw_review('needs_human', human='call'), 'COMMENT')):
+            with self.subTest(event=event):
+                d = self.make(FakeRunner(raw))
+                d._do_review(pr())
+                self.assertEqual(self.gh.acts, [(REV, apps.REVIEW, 'comment'),
+                                                (REV, apps.REVIEW, 'submit_review')])
+                ((number, native),) = self.gh.native
+                self.assertEqual((number, native['commit'], native['event']), (100, SHA1, event))
+                self.assertTrue(native['body'].startswith(f'> [!NOTE]\n> **Agent:** {REV_NAME}'))
+                self.assertNotIn('<!--', native['body'])
+
+    def test_a_failed_native_review_does_not_stop_the_flow(self):
+        d = self.make(FakeRunner(raw_review()))
+
+        def refuse(number, **kw):
+            raise GitHubError('HTTP 422')
+        self.gh.submit_review = refuse
+        p = pr()
+        self.gh.labels[100] = set(p.labels)
+        d._do_review(p)
+        self.assertEqual(self.gh.labels[100], {'agent:ready-to-merge'})
+
+    def test_agents_comment_with_only_the_permission_they_need(self):
+        d = self.make(FakeRunner(implemented('blocked')))
+        d._do_implement(7)
+        self.assertEqual(self.gh.acts, [(IMPL, apps.ISSUE_COMMENT, 'comment')])
+        first = norm(raw_review('request_changes', [finding()]))
+        d = self.make(FakeRunner(fixed()))
+        d._do_fix(pr(labels=['agent:changes'], reviews=[first]))
+        self.assertEqual(self.gh.acts, [(IMPL, apps.PR_COMMENT, 'comment')])
+
+    def comment(self, actor, body):
+        return {'author': {'login': self.login(actor) if actor in FakeIdentities.LOGINS else actor},
+                'body': body}
+
+    def test_records_count_only_from_the_identity_that_may_write_them(self):
+        d = self.make(FakeRunner())
+        p = pr()
+        review_body = markdown.render_review(norm(raw_review()), 'h')
+        own_review = markdown.render_review(
+            review.normalize_review(raw_review(), previous_open=[], round_no=1, max_rounds=3,
+                                    head_sha=SHA1, ci='pass', reviewer=IMPL), 'h')
+        ci_body = markdown.render_review(review.ci_failure_review(
+            failed_checks=['t'], log_tail='', previous_open=[], round_no=1, max_rounds=3,
+            head_sha=SHA1), 'h')
+        fix_body = markdown.render_fix({'summary': 's', 'responses': [], 'head_sha': SHA1}, 'h', 1)
+        cases = [('review', REV, review_body, 1), ('review', IMPL, review_body, 0),
+                 ('review', 'brushtyler', review_body, 0), ('review', IMPL, own_review, 0),
+                 ('review', 'dispatcher', ci_body, 1), ('review', REV, ci_body, 0),
+                 ('fix', IMPL, fix_body, 1), ('fix', REV, fix_body, 0),
+                 ('fix', 'dispatcher', fix_body, 0)]
+        for kind, actor, body, expected in cases:
+            with self.subTest(kind=kind, actor=actor):
+                self.assertEqual(len(d._markers(p, [self.comment(actor, body)], kind)), expected)
+
+    def test_a_pr_is_bound_to_its_implementers_app(self):
+        d = self.make(FakeRunner())
+        body = markdown.publishable('Why.', 'pr', META)
+
+        def raw(author):
+            return {'number': 100, 'title': 't', 'body': body, 'labels': [], 'headRefName': 'agent/issue-7',
+                    'headRefOid': SHA1, 'author': {'login': author}, 'isCrossRepository': False}
+        self.assertEqual(d._devloop_pr(raw(self.login(IMPL))).meta, META)
+        self.assertEqual(d._devloop_pr(raw(self.login(REV))).meta, {})   # in the flow, escalated
+        self.assertEqual(d._devloop_pr(raw('brushtyler')).meta, {})
+        self.assertIsNone(d._devloop_pr(raw('stranger')))
 
 
 if __name__ == '__main__':
