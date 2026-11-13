@@ -17,8 +17,13 @@ class Workspace:
         self._run = run
 
     def _git(self, *args, cwd=None, check=True, stdin=None):
-        done = self._run(['git', *args], cwd=cwd or self.repo_root, input=stdin,
-                         capture_output=True, text=True, timeout=600)
+        try:
+            done = self._run(['git', *args], cwd=cwd or self.repo_root, input=stdin,
+                             capture_output=True, text=True, timeout=600)
+        except subprocess.TimeoutExpired as exc:
+            raise WorkspaceError(f'git {" ".join(args[:2])}: timed out after {exc.timeout}s') from exc
+        except OSError as exc:
+            raise WorkspaceError(f'git could not start: {exc}') from exc
         if check and done.returncode != 0:
             raise WorkspaceError(f'git {" ".join(args[:2])}: {done.stderr.strip()[:500]}')
         return done.stdout

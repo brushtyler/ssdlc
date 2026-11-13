@@ -11,6 +11,12 @@ import subprocess
 from urllib.parse import quote
 
 _RUN_ID = re.compile(r'/actions/runs/(\d+)')
+_ISSUE_HISTORY = (
+    'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){'
+    'issue(number:$number){title body author{login} lastEditedAt editor{login} '
+    'timelineItems(itemTypes:[LABELED_EVENT,RENAMED_TITLE_EVENT],last:100){nodes{__typename '
+    '... on LabeledEvent{createdAt actor{login} label{name}} '
+    '... on RenamedTitleEvent{createdAt actor{login}}}}}}}')
 _FAILED_CONCLUSIONS = {'failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure',
                        'stale'}
 _FAILED_STATUSES = {'failure', 'error'}
@@ -20,13 +26,23 @@ class GitHubError(RuntimeError):
     pass
 
 
+def _login(who):
+    return (who or {}).get('login')
+
+
 class GitHub:
     def __init__(self, repo, run=subprocess.run):
         self.repo = repo
         self._run = run
 
     def _gh(self, *args, stdin=None, check=True):
-        done = self._run(['gh', *args], input=stdin, capture_output=True, text=True, timeout=300)
+        try:
+            done = self._run(['gh', *args], input=stdin, capture_output=True, text=True,
+                             timeout=300)
+        except subprocess.TimeoutExpired as exc:
+            raise GitHubError(f'gh {" ".join(args[:3])}: timed out after {exc.timeout}s') from exc
+        except OSError as exc:
+            raise GitHubError(f'gh could not start: {exc}') from exc
         if check and done.returncode != 0:
             raise GitHubError(f'gh {" ".join(args[:3])}: {done.stderr.strip()[:500]}')
         return done
@@ -45,6 +61,25 @@ class GitHub:
     def issue(self, number):
         return self._json('issue', 'view', str(number), '-R', self.repo,
                           '--json', 'number,title,body,labels,comments,state')
+
+    def issue_history(self, number):
+        """Title, body and who changed them, read in one query so that the text and its history
+        match: ``{title, body, author, last_edited_at, editor, labeled, renamed}``. ``labeled`` is
+        a list of ``(label, login, at)`` and ``renamed`` of ``(login, at)``, oldest first."""
+        owner, name = self.repo.split('/', 1)
+        data = self._json('api', 'graphql', '-f', f'query={_ISSUE_HISTORY}', '-f', f'owner={owner}',
+                          '-f', f'name={name}', '-F', f'number={int(number)}')
+        issue = data['data']['repository']['issue']
+        nodes = issue['timelineItems']['nodes']
+        return {
+            'title': issue['title'], 'body': issue['body'] or '',
+            'author': _login(issue['author']), 'last_edited_at': issue['lastEditedAt'],
+            'editor': _login(issue['editor']),
+            'labeled': [((n.get('label') or {}).get('name'), _login(n['actor']), n['createdAt'])
+                        for n in nodes if n['__typename'] == 'LabeledEvent'],
+            'renamed': [(_login(n['actor']), n['createdAt'])
+                        for n in nodes if n['__typename'] == 'RenamedTitleEvent'],
+        }
 
     def last_labeler(self, number, label):
         """Login of whoever most recently added ``label`` to issue ``number``."""

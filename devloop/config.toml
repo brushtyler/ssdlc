@@ -25,8 +25,8 @@ blocked_labels = ["bloccata"]
 priority_labels = ["prerequisito"]
 
 [roles]
-implementer = "codex"
-reviewer = "claude"   # must differ from the implementer
+implementer = "claude"
+reviewer = "codex"    # must differ from the implementer
 
 [agents.claude]
 kind = "claude"

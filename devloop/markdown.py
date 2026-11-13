@@ -180,8 +180,14 @@ def render_fix(fix, head, round_no):
     return publishable(head + '\n' + '\n'.join(parts), 'fix', payload)
 
 
+RESUME = ('Per riprendere: correggere la causa, **rimuovere `agent:needs-human`** e impostare la '
+          'label del passo da eseguire (`agent:ready` sulla issue, `agent:review` o '
+          '`agent:changes` sulla PR).')
+
+
 def render_escalation(reason, detail=''):
-    body = dispatcher_header() + '\n## Serve un intervento umano\n\n' + reason.strip() + '\n'
+    body = (dispatcher_header() + '\n## Serve un intervento umano\n\n' + reason.strip() + '\n\n'
+            + RESUME + '\n')
     if detail:
         body += '\n```text\n' + detail.strip()[-6000:].replace('```', "'''") + '\n```\n'
     return publishable(body)
