@@ -796,6 +796,14 @@ class SandboxTests(unittest.TestCase):
 
 
 class OrchestratorBootstrapTests(RepositoryTests):
+    def setUp(self):
+        super().setUp()
+        environment = patch.object(SSDLCOrchestrator, '_verification_environment', return_value={
+            'mode': 'role_container', 'platform': 'fixture',
+            'image_id': 'sha256:' + '1' * 64, 'reuse_eligible': True})
+        environment.start()
+        self.addCleanup(environment.stop)
+
     def test_failure_pack_preserves_actual_failed_phase_and_category(self):
         orch = self.make_orchestrator()
         def fail(*args):
@@ -803,7 +811,7 @@ class OrchestratorBootstrapTests(RepositoryTests):
             raise DevelopmentBlocked('BASELINE_MISMATCH', 'Clean worktree checks failed')
         def pack(**kwargs):
             orch.state.update(current_phase='08-supervisor')
-        with patch.object(orch, '_task_mode', return_value=False), patch.object(orch, '_run_pipeline', side_effect=fail), patch.object(orch, 'compile_evidence_pack', side_effect=pack):
+        with patch.dict(os.environ, {'SSDLC_EXECUTION_MODE': 'local'}), patch.object(orch, '_ensure_quality_contract'), patch.object(orch, '_run_pipeline', side_effect=fail), patch.object(orch, 'compile_evidence_pack', side_effect=pack):
             with self.assertRaisesRegex(DevelopmentBlocked, 'BASELINE_MISMATCH'):
                 orch.run_pipeline('Scoped goal')
         self.assertEqual(orch.state['current_phase'], '03-dev')
@@ -847,6 +855,16 @@ class OrchestratorBootstrapTests(RepositoryTests):
         with patch('orchestrator.ProjectRuntimeIsolation.activate', return_value=meta), patch('orchestrator.get_cli_version', return_value='TEST'):
             return SSDLCOrchestrator(self.repo, 'TKT-1', sync_remote=False)
 
+    def prepare_checkpoint(self, orch):
+        wt = orch._ensure_worktree()
+        (wt / 'app.py').write_text('value = 1\n')
+        git(wt, 'add', 'app.py')
+        git(wt, 'commit', '-m', 'verified fixture')
+        orch.state['task_verified_head'] = git(wt, 'rev-parse', 'HEAD')
+        diff = orch.dir_dev / 'implementation.diff'
+        diff.write_text(git(wt, 'diff', '--binary', self.base, 'HEAD') + '\n')
+        orch.record_artifact('03-dev/implementation.diff', diff)
+
     def seed_inputs(self, orch):
         requirements = orch.dir_po / 'requirements.md'
         requirements.write_text('AC-1: Behavior\nSEC-1: Security invariant\n')
@@ -869,10 +887,10 @@ class OrchestratorBootstrapTests(RepositoryTests):
                 (kwargs['cwd'] / 'app.py').write_text('value = 1\n')
                 return 'Done', 0
             with patch('orchestrator.SquadDispatcher.dispatch_role', return_value=('codex', 'fake', 'low', 'test')), patch('orchestrator.EngineRunner.run_codex', side_effect=generate) as engine, patch('orchestrator.EngineRunner.run_sandboxed_cmd', return_value=('Ran 1 test\nOK', '', 0)):
-                diff, files = orch.run_phase_dev()
+                diff, files = orch._run_task_development()
                 self.assertIn('app.py', files)
                 self.assertIn('+value = 1', diff.read_text())
-                orch.run_phase_dev()
+                orch._run_task_development()
                 self.assertEqual(engine.call_count, 1)
                 self.assertEqual(orch.state['tasks_status']['T1']['status'], 'COMPLETED')
 
@@ -898,27 +916,21 @@ class OrchestratorBootstrapTests(RepositoryTests):
             orch.run_phase_dev()
             self.assertEqual(engine.call_count, 1)
 
-    def test_legacy_path_stays_default_and_enabled_ticket_cannot_downgrade(self):
-        with patch.dict(os.environ, {'SSDLC_ENABLE_TASK_BREAKDOWN': 'false'}):
-            orch = self.make_orchestrator()
-            with patch.object(orch, '_run_phase_dev_legacy', return_value=('legacy', [])) as legacy:
-                self.assertEqual(orch.run_phase_dev(), ('legacy', []))
-                legacy.assert_called_once()
-            orch.state['task_breakdown'] = True
-            with patch.object(orch, '_run_task_development', return_value=('tasks', [])) as tasks:
-                self.assertEqual(orch.run_phase_dev(), ('tasks', []))
-                tasks.assert_called_once()
+    def test_default_task_path_refuses_missing_quality_before_dispatch(self):
+        orch = self.make_orchestrator()
+        with patch('orchestrator.EngineRunner.run_codex') as developer:
+            with self.assertRaisesRegex(PlanError, 'No project checks'):
+                orch._run_task_development()
+            developer.assert_not_called()
 
-    def test_missing_or_tampered_plan_never_falls_back_to_monolithic(self):
-        with patch.dict(os.environ, {'SSDLC_ENABLE_TASK_BREAKDOWN': 'true'}):
-            orch = self.make_orchestrator()
-            self.seed_inputs(orch)
-            plan = orch.dir_design / 'plan.json'
-            plan.write_text('{}')
-            with patch.object(orch, '_run_phase_dev_legacy') as legacy:
-                with self.assertRaisesRegex(PlanError, 'unregistered or changed'):
-                    orch.run_phase_dev()
-                legacy.assert_not_called()
+    def test_missing_or_tampered_plan_never_dispatches(self):
+        orch = self.make_orchestrator()
+        self.seed_inputs(orch)
+        (orch.dir_design / 'plan.json').write_text('{}')
+        with patch('orchestrator.EngineRunner.run_codex') as developer:
+            with self.assertRaisesRegex(PlanError, 'unregistered or changed'):
+                orch._run_task_development()
+            developer.assert_not_called()
 
     def test_missing_registered_plan_is_not_regenerated(self):
         with patch.dict(os.environ, {'SSDLC_ENABLE_TASK_BREAKDOWN': 'true'}):
@@ -927,7 +939,7 @@ class OrchestratorBootstrapTests(RepositoryTests):
             (orch.dir_design / 'plan.json').unlink()
             with patch('orchestrator.EngineRunner.invoke_role') as engine:
                 with self.assertRaisesRegex(PlanError, 'disappeared'):
-                    orch.run_phase_dev()
+                    orch._run_task_development()
                 engine.assert_not_called()
 
     def test_registered_missing_upstream_artifact_blocks_code(self):
@@ -940,7 +952,7 @@ class OrchestratorBootstrapTests(RepositoryTests):
             adr.unlink()
             with patch('orchestrator.EngineRunner.run_codex') as engine:
                 with self.assertRaisesRegex(TaskError, 'disappeared'):
-                    orch.run_phase_dev()
+                    orch._run_task_development()
                 engine.assert_not_called()
 
     def test_worktree_is_pinned_to_recorded_base(self):
@@ -1084,18 +1096,14 @@ class OrchestratorBootstrapTests(RepositoryTests):
     def test_phase_review_requests_concrete_edge_case_analysis(self):
         orch = self.make_orchestrator()
         self.seed_inputs(orch)
-        (orch.dir_dev / "implementation.diff").write_text("--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-old\n+new\n")
+        self.prepare_checkpoint(orch)
         captured_sys_prompts = []
 
         def fake_invoke_role(engine, model, sys_prompt, user_prompt, *args, **kwargs):
             captured_sys_prompts.append(sys_prompt)
-            return (
-                "### ADR Conformance Checklist\nOK\n"
-                "### Threat Model Mitigation Checklist\nOK\n"
-                "### Edge Cases & Boundary Conditions Analysis\nOK\n"
-                "### Findings\nNone\n"
-                "REVIEW_STATUS: APPROVED"
-            ), 0.0, 10, 10, "trace"
+            from test_full_checkpoint_review import framed
+            return framed('review', orch), 0, 10, 10, 'trace'
+
 
         with patch("orchestrator.SquadDispatcher.resolve_review_models", return_value=(["mock-engine:mock-model"], "low")), \
              patch("orchestrator.EngineRunner.invoke_role", side_effect=fake_invoke_role):
@@ -1111,7 +1119,7 @@ class OrchestratorBootstrapTests(RepositoryTests):
     def test_review_gate_requires_one_unambiguous_final_verdict(self):
         orch = self.make_orchestrator()
         self.seed_inputs(orch)
-        (orch.dir_dev / 'implementation.diff').write_text('--- a/app.py\n+++ b/app.py\n-old\n+new\n')
+        self.prepare_checkpoint(orch)
         cases = [
             ('Analysis\nREVIEW_STATUS: APPROVED\n\n', True, 'APPROVED'),
             ('Analysis\nREVIEW_STATUS: CHANGES_REQUESTED', False, 'CHANGES_REQUESTED'),
@@ -1127,23 +1135,38 @@ class OrchestratorBootstrapTests(RepositoryTests):
         ]
         for attempt, (response, expected, ledger_status) in enumerate(cases, 1):
             with self.subTest(response=response), patch('orchestrator.SquadDispatcher.resolve_review_models', return_value=(['mock:reviewer'], 'low')), patch('orchestrator.EngineRunner.invoke_role', return_value=(response, 0, 0, 0, 'trace')):
-                passed, report = orch.run_phase_review(attempt)
+                from orchestrator import parse_review_verdict
+                verdict = parse_review_verdict(response)
+                self.assertEqual(verdict == 'APPROVED', expected)
+                self.assertEqual(verdict or 'INVALID_VERDICT', ledger_status)
+                from test_full_checkpoint_review import framed
+                from ssdlc_gate_reports import GateTerminalError
+                def invoke(*args, **kwargs):
+                    prefix = framed('review', orch).rsplit('REVIEW_STATUS:', 1)[0]
+                    return prefix + response, 0, 0, 0, 'trace'
+                with patch('orchestrator.EngineRunner.invoke_role', side_effect=invoke):
+                    try:
+                        passed, report = orch.run_phase_review(attempt)
+                    except GateTerminalError:
+                        passed = False
                 self.assertEqual(passed, expected)
-                self.assertEqual(orch.state['ledger'][-1]['status'], ledger_status)
                 self.assertEqual(orch.state['gate_history'][-1]['passed'], expected)
-                self.assertIn(response, report)
-                if ledger_status == 'INVALID_VERDICT':
-                    self.assertIn('approval withheld', report)
+                self.assertTrue(any(response in p.read_text() for p in orch.dir_review.glob('evaluations/*/response-1.md')))
+
 
     def test_one_invalid_reviewer_blocks_panel_approval(self):
         orch = self.make_orchestrator()
         self.seed_inputs(orch)
-        (orch.dir_dev / 'implementation.diff').write_text('--- a/app.py\n+++ b/app.py\n-old\n+new\n')
-        responses = [('REVIEW_STATUS: APPROVED', 0, 0, 0, 'trace'),
-                     ('REVIEW_STATUS: APPROVED\nREVIEW_STATUS: CHANGES_REQUESTED', 0, 0, 0, 'trace')]
+        self.prepare_checkpoint(orch)
+        from test_full_checkpoint_review import framed
+        calls = []
+        def responses(*args, **kwargs):
+            calls.append(1)
+            return (framed('review', orch) if len(calls) == 1 else 'REVIEW_STATUS: APPROVED\nREVIEW_STATUS: CHANGES_REQUESTED'), 0, 0, 0, 'trace'
         with patch('orchestrator.SquadDispatcher.resolve_review_models', return_value=(['mock:one', 'mock:two'], 'low')), patch('orchestrator.EngineRunner.invoke_role', side_effect=responses):
-            passed, _ = orch.run_phase_review()
-        self.assertFalse(passed)
+            from ssdlc_gate_reports import GateTerminalError
+            with self.assertRaises(GateTerminalError):
+                orch.run_phase_review()
 
 
 class SetupTests(unittest.TestCase):
@@ -1164,7 +1187,7 @@ class SetupTests(unittest.TestCase):
             standards = {p.name for p in existing.parent.glob('*.md')}
             self.assertEqual(standards, {'LOCAL.md', '00-PROJECT_CONVENTIONS.md'})
             self.assertEqual(existing.read_text(), 'Existing project rule')
-            self.assertIn('SSDLC_ENABLE_TASK_BREAKDOWN="false"', (repo / '.ssdlc/project.env').read_text())
+            self.assertNotIn('SSDLC_ENABLE_TASK_BREAKDOWN', (repo / '.ssdlc/project.env').read_text())
             self.assertIn('.tools/python/bin/python3', (repo / 'ssdlc').read_text())
             syntax = subprocess.run(['bash', '-n', str(repo / 'ssdlc')], capture_output=True, text=True)
             self.assertEqual(syntax.returncode, 0, syntax.stderr)

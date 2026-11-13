@@ -364,3 +364,71 @@ class DesignSession:
                 if field in record:
                     parts.append(f"## Round {record['round']} — {field}\n\n" + (self.root / record[field]).read_text())
         return '\n\n'.join(parts)
+
+
+def verify_legacy_rounds(registry, files):
+    """Verify registered immutable bytes, without accessing the filesystem."""
+    import hashlib
+    import re
+    numbered = sorted((int(m.group(1)), name) for name in files
+                      if (m := re.fullmatch(r'.*/adr-round-(\d+)\.md', name)))
+    if not numbered or [n for n, _ in numbered] != list(range(1, len(numbered) + 1)):
+        raise PlanError('Legacy round sequence is missing or ambiguous')
+    rounds = []
+    for index, name in numbered:
+        row = {}
+        for field, ref in [('adr', name), ('review', str(Path(name).with_name(f'security-review-round-{index}.md')))]:
+            if ref not in files and field == 'review' and index == len(numbered):
+                continue
+            data = files.get(ref)
+            if data is None or hashlib.sha256(data).hexdigest() != registry.get(ref, {}).get('sha256'):
+                raise PlanError('Legacy design evidence is missing, unregistered or changed')
+            row[field] = data.decode('utf-8')
+        rounds.append(row)
+    return rounds
+
+
+def read_history_rounds(repo, old_ticket, rel):
+    """Read bounded historical evidence with descriptor-relative no-follow opens."""
+    import re
+    import stat
+    if not isinstance(old_ticket, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', old_ticket) or old_ticket in {'.', '..'}:
+        raise PlanError('Invalid history ticket')
+    if not isinstance(rel, str) or not rel or Path(rel).is_absolute() or any(p in {'', '.', '..'} for p in rel.split('/')):
+        raise PlanError('Invalid history path')
+    handles = []
+    def directory(parent, name):
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY, dir_fd=parent)
+        handles.append(fd)
+        return fd
+    def read(parent, name):
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode) or os.fstat(fd).st_size > 1048576:
+                raise PlanError('History evidence exceeds limits')
+            data = os.read(fd, 1048577)
+            if len(data) > 1048576:
+                raise PlanError('History evidence exceeds limits')
+            return data
+        finally:
+            os.close(fd)
+    try:
+        base = directory(None, str(Path(repo).resolve()))
+        root = directory(directory(base, '.ssdlc'), old_ticket)
+        registry = json.loads(read(root, 'state.json')).get('artifacts', {})
+        current = directory(root, '02-design')
+        for part in rel.split('/'):
+            current = directory(current, part)
+        names = os.listdir(current)
+        if len(names) > 64:
+            raise PlanError('Too many historical files')
+        files = {f'02-design/{rel}/{name}': read(current, name) for name in names
+                 if re.fullmatch(r'(adr|security-review)-round-\d+\.md', name)}
+        if sum(map(len, files.values())) > 8388608:
+            raise PlanError('History evidence exceeds limits')
+        return verify_legacy_rounds(registry, files)
+    except (OSError, ValueError) as exc:
+        raise PlanError('History evidence unavailable or unsafe') from exc
+    finally:
+        for fd in reversed(handles):
+            os.close(fd)

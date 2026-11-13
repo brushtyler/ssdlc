@@ -17,9 +17,9 @@ class SequenceTests(checkpoint.FullCheckpointReviewTests):
             raise RuntimeError('reached_dev')
 
         legacy = SimpleNamespace(
-            ssdlc_root=self.repo / '.ssdlc/legacy', state={}, _task_mode=lambda: True,
+            ssdlc_root=self.repo / '.ssdlc/legacy', state={},
             PHASE_ORDER=checkpoint.SSDLCOrchestrator.PHASE_ORDER,
-            _ensure_task_plan=lambda: None, run_phase_dev=develop)
+            _ensure_task_plan=lambda: None, _reconcile_open_txn=lambda: None, run_phase_dev=develop)
         with patch('orchestrator.candidate_reports.reconcile_candidate_store') as reconcile:
             with self.assertRaisesRegex(RuntimeError, 'reached_dev'):
                 checkpoint.SSDLCOrchestrator._run_pipeline(legacy, 'goal', from_phase='03-dev')
@@ -51,7 +51,7 @@ class SequenceTests(checkpoint.FullCheckpointReviewTests):
         with patch.object(orch, '_controller_revision', return_value=dict(head='controller', files_sha256='b'*64)), \
              patch.object(orch, '_verification_environment', return_value=dict(
                  mode='role_container', platform='fixture', image_id='sha256:' + '1'*64, reuse_eligible=True)), \
-             patch.object(orch, '_ensure_task_plan', return_value=self.plan), patch.object(orch, 'run_phase_dev'), \
+             patch.object(orch, '_ensure_task_plan', return_value=self.plan), patch.object(orch, '_run_task_development'), \
              patch.object(orch, 'run_phase_qa', side_effect=qa), \
              patch.object(orch, 'run_phase_ops'), patch.object(orch, 'run_phase_docs'), \
              patch.object(orch, 'compile_evidence_pack', side_effect=lambda **kw: kw), \
@@ -83,7 +83,7 @@ class SequenceTests(checkpoint.FullCheckpointReviewTests):
                         raise fixtures.Crash()
                 with patch.object(orch, '_controller_revision', return_value=dict(head='controller', files_sha256='b'*64)), \
                      patch.object(orch, '_ensure_task_plan', return_value=self.plan), \
-                     patch.object(orch, 'run_phase_dev'), patch.object(orch, 'run_phase_qa', return_value=(True, 'passed')), \
+                     patch.object(orch, '_run_task_development'), patch.object(orch, 'run_phase_qa', return_value=(True, 'passed')), \
                      patch.object(orch, 'run_phase_ops'), patch.object(orch, 'run_phase_docs'), \
                      patch.object(orch, 'compile_evidence_pack', side_effect=lambda **kw: kw), \
                      patch('orchestrator.EngineRunner.run_sandboxed_cmd', side_effect=runner), \

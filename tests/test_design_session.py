@@ -237,7 +237,7 @@ class DesignResumeTests(RepositoryTests):
             self.assertEqual(source['sha256'], file_hash(self.repo/'app.py'))
             self.assertIn('1: value = 0', source['source'])
             return next(replies), 0, 0, 0, 'test'
-        with patch('orchestrator.SquadDispatcher.dispatch_role', side_effect=self.dispatcher), patch('orchestrator.EngineRunner.invoke_role', side_effect=invoke), patch.object(orch, 'run_phase_dev') as dev, patch.object(orch, 'run_phase_po') as po:
+        with patch('orchestrator.SquadDispatcher.dispatch_role', side_effect=self.dispatcher), patch('orchestrator.EngineRunner.invoke_role', side_effect=invoke), patch.object(orch, '_run_task_development') as dev, patch.object(orch, 'run_phase_po') as po:
             with self.assertRaisesRegex(PlanError, 'round limit exhausted'):
                 orch.resume_pair_design(round_limit=1)
             with self.assertRaisesRegex(PlanError, 'has not been independently approved'):

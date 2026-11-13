@@ -1,2 +1,2 @@
-# Optional task-breakdown path; legacy orchestration remains dependency-free.
+# Required for task-plan and quality-contract schema validation.
 jsonschema>=4.19,<5

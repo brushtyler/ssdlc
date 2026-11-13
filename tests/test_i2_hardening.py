@@ -377,13 +377,28 @@ class DeliveryDisclosureTests(unittest.TestCase):
             previous = getattr(_dispatch_local, 'limits', None); _dispatch_local.limits = store
             try:
                 with patch.dict('os.environ', {'SSDLC_MAX_DEV_RETRIES': '9', 'SSDLC_SUPERVISED_RUN_ID': ''}), \
-                     patch.object(owner, '_task_mode', return_value=False), \
+                     patch.object(owner, '_ensure_task_plan'), \
                      patch.object(owner, 'run_phase_dev') as developer, \
                      patch.object(owner, 'run_phase_review', return_value=(False, 'rejected')), \
                      patch.object(owner, '_stop_on_terminal_gate'), patch.object(owner, 'check_budget_circuit_breaker'), \
-                     patch.object(owner, 'compile_evidence_pack', return_value=root / 'evidence.md'):
+                     patch.object(owner, '_corrective_round', return_value={'next_gate_attempt': 2}) as repair, \
+                     patch.object(owner, '_corrective_limits', return_value={'gate_round_ceiling': 9}), \
+                     patch.object(owner, 'compile_evidence_pack', return_value=root / 'evidence.md') as pack:
                     owner._run_pipeline('offline', from_phase='03-dev')
-                self.assertEqual(developer.call_count, 2)
+                # Frozen policy bounds the outer cycle even if local limits are broader.
+                self.assertEqual(developer.call_count, 1)
+                repair.assert_called_once_with('04-review', 1)
+                pack.assert_called_once_with(ready_for_signoff=False)
+                envelope['policy']['development_attempts'] = 1
+                developer.reset_mock()
+                with patch.dict('os.environ', {'SSDLC_MAX_DEV_RETRIES': '9'}), \
+                     patch.object(owner, '_ensure_task_plan'), patch.object(owner, 'run_phase_dev', developer), \
+                     patch.object(owner, 'run_phase_review', return_value=(False, 'rejected')), \
+                     patch.object(owner, '_stop_on_terminal_gate'), patch.object(owner, 'check_budget_circuit_breaker'), \
+                     patch.object(owner, 'compile_evidence_pack', return_value=root / 'evidence.md') as pack:
+                    owner._run_pipeline('offline', from_phase='03-dev')
+                developer.assert_called_once_with()
+                pack.assert_called_once_with(ready_for_signoff=False)
             finally: _dispatch_local.limits = previous
 
 

@@ -342,7 +342,7 @@ class ReviewTests(GateFixture):
 def _pipeline(self, engine, *, outer=False, breaker=None, retries='2'):
     orch = self.orch
     with patch.dict(os.environ, {'SSDLC_EXECUTION_MODE': 'local', 'SSDLC_MAX_DEV_RETRIES': retries}), \
-         patch.object(orch, 'run_phase_dev') as developer, \
+         patch.object(orch, '_run_task_development') as developer, \
          patch.object(orch, '_ensure_task_plan', return_value=self.plan), \
          patch('orchestrator.EngineRunner.invoke_role', side_effect=engine) as invoke:
         self.developer = developer
@@ -360,7 +360,7 @@ class PipelineBoundaryTests(GateFixture):
     def test_layer_a_protocol_propagation_no_developer_retry(self):
         with self.assertRaises(gates.GateTerminalError):
             self.pipeline(lambda *a, **k: ('No frame', 0, 0, 0, 'fake'))
-        self.developer.assert_called_once_with(feedback='', attempt=1)
+        self.developer.assert_called_once_with(None)
         self.assertEqual(self.engine.call_count, 2)
 
     def test_layer_a_engine_exception_cause(self):
@@ -369,7 +369,7 @@ class PipelineBoundaryTests(GateFixture):
         with self.assertRaises(gates.GateTerminalError) as caught:
             self.pipeline(invoke)
         self.assertIsInstance(caught.exception.__cause__, RuntimeError)
-        self.developer.assert_called_once_with(feedback='', attempt=1)
+        self.developer.assert_called_once_with(None)
 
     def test_layer_b_protocol_and_engine_error_failure_metadata(self):
         captured = []
@@ -379,7 +379,7 @@ class PipelineBoundaryTests(GateFixture):
         with self.assertRaises(gates.GateTerminalError):
             self.pipeline(invoke, outer=True)
         assert_terminal_failure(self, self.orch, 'review', captured)
-        self.developer.assert_called_once_with(feedback='', attempt=1)
+        self.developer.assert_called_once_with(None)
 
     def test_layer_b_engine_exception(self):
         captured = []
@@ -413,7 +413,7 @@ class PipelineBoundaryTests(GateFixture):
         self.assertFalse(list(self.orch.dir_review.glob('evaluations/*/reservation-1.json')))
         assert_terminal_failure(self, self.orch, 'review', (seen[-1][0], self.orch.state.get('current_step')),
                                 'TaskError', 'HALTED_BUDGET_EXCEEDED')
-        self.developer.assert_called_once_with(feedback='', attempt=1)
+        self.developer.assert_called_once_with(None)
         self.assertTrue(any(g['gate'] == 'BUDGET_CAP_GATE' and not g['passed'] for g in self.orch.state['gate_history']))
 
     def test_budget_gate_postcall_retains_response_s3(self):
@@ -447,21 +447,20 @@ class PipelineBoundaryTests(GateFixture):
             self.pipeline(self.valid, outer=True, breaker=breaker)
         self.assertEqual(seen, ['INIT'])
         review.assert_not_called()
-        self.developer.assert_called_once_with(feedback='', attempt=1)
+        self.developer.assert_called_once_with(None)
         self.assertEqual(self.orch.state['failure']['phase'], seen[0])
         self.assertEqual(self.orch.state['status'], 'HALTED_BUDGET_EXCEEDED')
         self.assertEqual(self.orch._load_or_init_state()['failure']['phase'], seen[0])
 
-    def test_substantive_rejection_preserves_developer_feedback(self):
+    def test_substantive_rejection_requires_explicit_invalidation(self):
         def invoke(*a, **k):
             return framed('review', self.orch, [finding()], verdict='CHANGES_REQUESTED'), 0, 0, 0, 'fake'
-        self.pipeline(invoke, outer=True)
-        self.assertEqual(self.developer.call_count, 2)
-        self.assertEqual(self.developer.call_args.kwargs['attempt'], 2)
-        self.assertIn('CHANGES_REQUESTED', self.developer.call_args.kwargs['feedback'])
-        self.assertNotIn('failure', self.orch.state)
+        with self.assertRaisesRegex(TaskError, 'explicit invalidation'):
+            self.pipeline(invoke, outer=True)
+        self.developer.assert_called_once_with(None)
+        self.assertIn('failure', self.orch.state)
         self.assertEqual(self.orch.state['status'], 'ESCALATED_TO_SUPERVISOR')
-        self.assertEqual(self.orch.state['current_phase'], '08-supervisor')
+        self.assertEqual(self.orch.state['current_phase'], '04-review')
 
     def test_reviewer_substantive_rejection_cannot_hide_terminal_peer(self):
         def invoke(engine, model, *a, **k):
@@ -470,7 +469,7 @@ class PipelineBoundaryTests(GateFixture):
             return 'No frame', 0, 0, 0, 'fake'
         with patch('orchestrator.SquadDispatcher.resolve_review_models', return_value=(['mock:A', 'mock:B'], 'low')), self.assertRaises(gates.GateTerminalError):
             self.pipeline(invoke)
-        self.developer.assert_called_once_with(feedback='', attempt=1)
+        self.developer.assert_called_once_with(None)
         self.assertEqual(self.engine.call_count, 3)
 
     def test_qa_mutation_terminal_hook_layer_a(self):
@@ -482,7 +481,7 @@ class PipelineBoundaryTests(GateFixture):
             return 'QA_STATUS: PASSED', 0, 0, 0, 'fake'
         with patch.object(self.orch, '_run_deterministic_scanners', return_value=(True, 'passed')), self.assertRaises(gates.GateTerminalError):
             self.pipeline(invoke)
-        self.developer.assert_called_once_with(feedback='', attempt=1)
+        self.developer.assert_called_once_with(None)
 
     def test_qa_mutation_terminal_hook_layer_b(self):
         captured = []
@@ -495,7 +494,7 @@ class PipelineBoundaryTests(GateFixture):
         with patch.object(self.orch, '_run_deterministic_scanners', return_value=(True, 'passed')), self.assertRaises(gates.GateTerminalError):
             self.pipeline(invoke, outer=True)
         assert_terminal_failure(self, self.orch, 'qa', captured)
-        self.developer.assert_called_once_with(feedback='', attempt=1)
+        self.developer.assert_called_once_with(None)
 
     def test_source_level_exception_and_budget_guards(self):
         pipeline = inspect.getsource(SSDLCOrchestrator._run_pipeline)
@@ -528,7 +527,7 @@ class VerificationGateTests(GateFixture):
             return response, 0, 0, 0, 'fake'
         with patch.object(self.orch, '_run_deterministic_scanners', return_value=(det, 'deterministic log')), \
              patch.object(self.orch, '_run_appsec_scans', return_value=scanners or []), \
-             patch.object(self.orch, 'run_phase_dev') as dev, \
+             patch.object(self.orch, '_run_task_development') as dev, \
              patch('orchestrator.TaskScheduler') as scheduler, \
              patch('orchestrator.EngineRunner.invoke_role', side_effect=invoke):
             result = getattr(self.orch, 'run_phase_' + gate)(attempt=attempt)
@@ -637,18 +636,14 @@ class VerificationGateTests(GateFixture):
         self.assertTrue(all(r.status == 'not_applicable' and not r.required
                             for r in self.orch._run_appsec_scans(self.orch.worktree_dir)))
 
-    def test_legacy_gates_need_no_frame_and_hook_is_noop(self):
+    def test_obsolete_false_flag_cannot_bypass_structured_gate(self):
         self.orch.state['task_breakdown'] = False
         with patch.dict(os.environ, {'SSDLC_ENABLE_TASK_BREAKDOWN': 'false'}), \
              patch.object(self.orch, '_run_deterministic_scanners', return_value=(True, 'passed')), \
              patch('orchestrator.EngineRunner.invoke_role', return_value=('QA_STATUS: PASSED', 0, 0, 0, 'fake')):
-            self.assertTrue(self.orch.run_phase_qa()[0])
-            self.orch._stop_on_terminal_gate()
-        with patch('orchestrator.EngineRunner.invoke_role', return_value=('APPSEC_STATUS: SECURE', 0, 0, 0, 'fake')):
-            self.assertTrue(self.orch.run_phase_appsec()[0])
-        with patch('orchestrator.EngineRunner.invoke_role', return_value=('REVIEW_STATUS: APPROVED', 0, 0, 0, 'fake')):
-            self.assertTrue(self.orch.run_phase_review()[0])
-        self.assertFalse(list(self.orch.ssdlc_root.glob('*/evaluations/*/input.json')))
+            with self.assertRaises(gates.GateTerminalError):
+                self.orch.run_phase_qa()
+        self.assertTrue(list(self.orch.ssdlc_root.glob('*/evaluations/*/input.json')))
 
 
 class VerificationPipelineTests(GateFixture):
@@ -669,7 +664,7 @@ class VerificationPipelineTests(GateFixture):
         with patch.object(self.orch, '_run_deterministic_scanners', return_value=(True, 'passed')), \
              patch.object(self.orch, '_run_appsec_scans', return_value=[]), self.assertRaises(gates.GateTerminalError):
             self.pipeline(invoke, outer=outer)
-        self.developer.assert_called_once_with(feedback='', attempt=1)
+        self.developer.assert_called_once_with(None)
         self.assertEqual(self.engine.call_count, 3 if gate == 'qa' else 4)
         if outer:
             assert_terminal_failure(self, self.orch, gate, captured)

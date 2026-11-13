@@ -1,9 +1,9 @@
 # Task mode
 
-Task mode breaks development into a reviewed DAG of tasks. Each task has a strict file manifest, owned requirements and automated checks. It is opt-in, set in the target project's `.ssdlc/project.env`:
+Task mode breaks development into a reviewed DAG of tasks. Each task has a strict file manifest, owned requirements and automated checks. It is the default for every new run, including Tier S:
 
 ```bash
-export SSDLC_ENABLE_TASK_BREAKDOWN="true"
+# Task mode is the default for every new run, including Tier S.
 ```
 
 Before you enable it, review any project-specific standards already installed. Global review, QA and AppSec still run after development. Recovery after a stop is covered by the [recovery documents](../README.md#recovery-and-continuation).
@@ -192,3 +192,52 @@ python3 tests/docker_pid_smoke.py --image ssdlc-runner:bootstrap-test       # PI
 ```
 
 Both tests use synthetic credentials only. The selected image must contain the `requirements.txt` dependencies.
+
+## Unified execution and greenfield bootstrap
+
+Every new run uses the task engine. Tier S requires exactly one plan node and uses the same scheduler, journal and quality gates. `jsonschema` is required (install `requirements.txt`).
+
+The obsolete task-breakdown environment setting is ignored with a warning. Newly captured required checks carry candidate proof; historical sealed contracts remain unchanged. QA shell commands are reported separately and do not establish typed-check equivalence. Supervisor rejection records feedback only and authorizes no repair.
+
+For a normal project with a passing nonempty baseline, the supported CLI is:
+
+```bash
+python3 orchestrator.py run --repo . --ticket TKT-1 --goal "Scoped change" --tier S --no-sync-remote --test-cmd 'printf shell-smoke'
+```
+
+For a clean greenfield repository at its initial commit, explicitly create
+`.ssdlc/bootstrap-profile.json` (keep `.ssdlc/` ignored):
+
+```json
+{"schema_version":"1.0","profile_id":"python-unittest","window_tasks":1}
+```
+
+The same run command then captures baseline status `absent`, bound to the initial
+commit/tree and registered policy. The first implementation must add real tests:
+`python3 -m unittest discover -s tests` must execute at least one passing test.
+Empty, failing, missing, timed-out or interrupted checks block. The one-task
+exemption becomes journaled `PROVEN`/post-bootstrap without rewriting the sealed
+contract. Restart before proof fails explicitly; a profile cannot renew eligibility.
+Existing tests, dirty trees or later commits are ineligible (exit 24). Without an
+explicit profile, strict baseline rules apply. Protected paths and task checks
+remain enforced throughout.
+
+The offline suite executes these CLI/configuration behaviors through real entry
+points with fake providers and sandbox commands:
+
+```bash
+python3 -m unittest discover -s tests -p test_unified_integration.py
+```
+
+Run exits: **0** means the requested pipeline command completed (signoff remains
+separate); **23** refuses a legacy/non-executable startup, with a new-run command;
+**24** refuses bootstrap eligibility/profile validation; **2** is invalid CLI usage.
+Pipeline execution errors fail nonzero; they do not imply successful signoff.
+Preview's separate **0/10/20** outcomes are described above.
+
+Metrics are per-process counters, not billing units: `corrective_transactions_created`,
+`corrective_transactions_executed`, `corrective_transactions_refused` (by reason),
+`corrective_transactions_replayed`, `corrective_transactions_interrupted`,
+`corrective_transactions_reconciled`, `corrective_repair_attempts`,
+`bootstrap_eligible`, `bootstrap_ineligible` and `legacy_refusals`.
+Structured logs include stage and bounded reason codes without raw finding prose.

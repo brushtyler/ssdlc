@@ -432,8 +432,7 @@ Nessuna proposta genera automaticamente codice, nuovi ticket, altri subgoal o ag
 Default iniziali da validare durante l'implementazione; configurazioni effettive e limiti sono registrati nel ticket. Cambi di configurazione durante la ripresa sono espliciti e non azzerano i consumi.
 
 ```bash
-# Attivazione graduale; abilitare dopo i gate di integrazione.
-export SSDLC_ENABLE_TASK_BREAKDOWN="false"
+# Routing proposto per incrementi futuri; il motore task è sempre attivo.
 export SSDLC_TASK_SIMPLE_MODEL="gpt-6-luna"
 export SSDLC_TASK_CRITICAL_MODEL="gpt-6.1-sol"
 export SSDLC_MAX_REASONING_EFFORT="medium"
@@ -470,7 +469,7 @@ Ogni incremento include i relativi test; la suite non è rinviata alla fine. Per
 ### Step 1 — Contratto di qualità, schema del piano e schema advisory
 
 - Introdurre schema del contratto, del piano, del manifest effettivo, degli eventi advisory e della proiezione `advisory-proposals.json`, adapter degli standard, `TaskPlanValidator`, snapshot e gate di integrità.
-- Aggiornare setup, recon, design e pianificazione Tier S; definire migrazione e feature flag.
+- Aggiornare setup, recon, design e pianificazione Tier S; definire la compatibilità senza selettori di esecuzione.
 - Test: riferimenti mancanti, ID duplicati, cicli, dipendenze inesistenti, percorsi/symlink esterni, controlli mancanti, file protetti eliminati e standard non applicabili. Verificare schema/provenienza delle proposte, rifiuto di riferimenti inesistenti e distinzione tra ipotesi e osservazioni dimostrate. Un progetto diverso da yuna non eredita percorsi o regole yuna.
 - Accettazione: ogni task ha standard e verifiche risolvibili; piani incompleti non arrivano al codice.
 
@@ -508,21 +507,37 @@ Ogni incremento include i relativi test; la suite non è rinviata alla fine. Per
 - Scenari riproducibili per Tier S, M e L, con almeno un bounce, un arresto/ripresa, un subgoal, una lacuna scoperta dall'analisi critica e una proposta advisory. Includere consegna concorrente, sintesi opzionale incompleta e azioni su proposte riprese dopo crash; esercitare anche il percorso precedente e la migrazione.
 - Confrontare gli stessi scenari con routing diversi: i gate, gli standard applicati e i criteri di completamento devono restare identici.
 - Registrare percentuale di task accettati al primo tentativo, escalation, regressioni globali, violazioni di standard, recuperi riusciti, durata e consumi. Per l'advisory misurare duplicati, proposte validate/accettate e casi utili scoperti, senza ottimizzare il volume di suggerimenti o il solo numero di chiamate.
-- Accettazione finale: ripresa senza perdita o duplicazione, dipendenze rivalidate dopo una correzione, copertura indipendente delle interazioni, nessuna regressione non gestita nei controlli obbligatori, evidenze conservate, advisory classificato senza aggirare i gate e consegna vincolata alla revisione verificata. Abilitare il nuovo percorso dopo il superamento di questi scenari.
+- Accettazione finale: ripresa senza perdita o duplicazione, dipendenze rivalidate dopo una correzione, copertura indipendente delle interazioni, nessuna regressione non gestita nei controlli obbligatori, evidenze conservate, advisory classificato senza aggirare i gate e consegna vincolata alla revisione verificata. Verificare questi scenari prima della consegna.
 
 ## 12. Stato del bootstrap progressivo
 
-Stato aggiornato al 9 novembre 2026. Il percorso per task resta **opt-in**: i risultati del bootstrap e dei micro-ticket non equivalgono all'accettazione finale degli Step 1–6.
+Il motore task è ora il percorso unico; Tier S richiede un solo nodo. `jsonschema` è obbligatorio. Il flag precedente è ignorato: i risultati del bootstrap e dei micro-ticket non equivalgono all'accettazione finale degli Step 1–6.
 
-### Step 3b.3a — Preview only
+### Step 3b.3 — Implementato
 
-Step 3b.2 / PR #13 merged with **397 tests after review fixes**. This increment
-only prepares targeted bounce: it verifies recorded gate evidence and archives a
-deterministic preview with `execution_authorized=false`. It grants no approval
-or execution authority. The following remain pending: repair execution,
-cumulative recovery, revalidation integration, repeated global gates and
-advanced-target delivery. Provider accounting is tracked in GH issue #14 and is
-not implemented here.
+Esecuzione task unificata, bootstrap greenfield esplicito e bounce correttivo sono
+implementati. La preview resta immutabile con `execution_authorized=false`;
+l'autorità appartiene alla transazione verificata del motore. Review, QA e AppSec
+possono avviare riparazioni delle sole radici attribuite, rivalidazione topologica
+dei dipendenti e nuovi gate sul candidato finale. Test offline deterministici
+attraversano gli entry point reali in `tests/test_unified_integration.py`.
+
+Il bootstrap richiede repository pulito al primo commit e policy registrata;
+registra baseline `absent` e richiede test non vuoti al primo checkpoint. La prova
+spende l'esenzione senza riscrivere il contratto. Una ripresa prima della prova
+fallisce esplicitamente. I ticket task storici conservano semantica e contatori;
+i legacy sono leggibili ma non eseguibili (exit 23); profili inammissibili danno 24.
+
+Il recupero riconcilia intenti e acknowledgment senza duplicare invalidazione o
+riparazione. Solo replay COMPLETED/APPROVED è zero-write; transazioni incompiute
+aggiungono soltanto lavoro e record necessari. Dispatch incerti richiedono
+riconciliazione operatore. Limiti congelati e tentativi consumati restano validi.
+Metriche e comandi eseguiti dalla suite sono documentati nel README: contatori
+`corrective_transactions_created`, `corrective_transactions_executed`,
+`corrective_transactions_refused` per motivo, `corrective_transactions_replayed`,
+`corrective_transactions_interrupted`, `corrective_transactions_reconciled`,
+`corrective_repair_attempts`, `bootstrap_eligible`, `bootstrap_ineligible`,
+`legacy_refusals`. Nessuna nuova unità di fatturazione.
 
 Hashes are unkeyed integrity checks, not authentication. Verification provides
 point-in-time integrity checks; no continuous containment is claimed. A
@@ -543,7 +558,7 @@ coordinated external rewrite of the integrity chain is outside this protection.
 
 Questo incremento introduce `schemas/gate-findings.schema.json` e l'API pura in `ssdlc_findings.py`: validazione contro commit e cataloghi affidabili, attribuzione esplicita e distinzione tra violazioni/regressioni obbligatorie, lacune necessarie, osservazioni incerte e miglioramenti facoltativi. Un finding trasversale o non attribuito resta da valutare; una candidatura alla correzione non autorizza esecuzione e un report vuoto non approva un gate.
 
-Il modulo non è ancora collegato agli output delle fasi o al coordinatore e non implementa il bounce. La verifica deterministica controlla la coerenza delle dichiarazioni, non la loro veridicità semantica o l'integrità delle prove oltre all'appartenenza al catalogo fornito dal chiamante.
+Il modulo è collegato agli output dei gate e al coordinatore correttivo Step 3b.3. La verifica deterministica controlla la coerenza delle dichiarazioni, non la loro veridicità semantica o l'integrità delle prove oltre all'appartenenza al catalogo fornito dal chiamante.
 
 ### Validazione e limiti osservati
 
@@ -555,14 +570,19 @@ La versione esecutrice di ogni run è fissata e separata dal checkout sviluppato
 
 ### Prossimi incrementi
 
-1. **Step 3b.2 — Report dei gate (merged, PR #13)**: contratto dei finding integrato in review, QA e AppSec, con output grezzi e report immutabili legati a commit/input. La preview Step 3b.3a prepara soltanto il bounce mirato; non esegue riparazioni.
-2. **Step 3b.3 — Bounce mirato**: collegare finding, analisi d'impatto, invalidazione, riparazione e rivalidazione topologica; conservare tentativi, contributi e limiti e ripetere i gate globali dopo le modifiche. Implementare un recupero esplicito e tracciato dei candidati interrotti, senza adottare modifiche esterne implicitamente.
+1. **Step 3b.2 — Report dei gate (merged, PR #13)**: contratto dei finding integrato in review, QA e AppSec, con output grezzi e report immutabili legati a commit/input. La preview resta priva di autorità; il motore Step 3b.3 esegue transazioni correttive verificate.
+2. **Step 3b.3 — Bounce mirato (implementato)**: finding verificati, transazioni durevoli, invalidazione, riparazione, rivalidazione topologica, nuovi gate e recupero conservativo senza duplicazioni. L'accettazione con provider e runner reali resta distinta dai test offline.
 3. **Chiusura Step 3**: completare analisi critica obbligatoria, matrice delle evidenze e consegna su destinazione avanzata con riconciliazione e nuove verifiche sul candidato integrato. Oggi l'approvazione richiede ancora una destinazione pulita e invariata.
 4. **Step 4**: dispatcher per rischio/capacità, matrice indipendente di review per task e interazioni, classificazione dei fallimenti e limiti comuni persistenti per l'intero ticket.
 5. **Step 5**: subgoal sequenziali e ciclo di vita advisory, inclusi registro, proiezioni, deduplicazione e azioni esplicite/idempotenti. Gli schemi advisory disponibili non implicano che il motore sia operativo.
 6. **Step 6**: scenari end-to-end Tier S/M/L, recuperi e concorrenza, confronto dei routing, metriche e attivazione dopo l'accettazione complessiva.
 
-Restano anche i vincoli conservativi da risolvere negli incrementi pertinenti: estensione controllata dei manifest, ripianificazione versionata, migrazione esplicita dei ticket precedenti e task `review_only`. Un feedback di review interrompe ancora la pipeline per task; non viene ignorato e non attiva oggi una riparazione mirata automatica. Ogni incremento mantiene specifica e criteri di accettazione circoscritti, con codice e test nello stesso task.
+Restano fuori milestone: merge su destinazione avanzata, migrazione automatica di
+scope, adapter GitHub #4, accounting #14, nuove unità di fatturazione e quota polling,
+scheduler parallelo, accettazione advisory e framework subgoal. Controller esecutore,
+artefatti runtime e dipendenze non cambiano.
+
+Restano anche i vincoli conservativi da risolvere negli incrementi pertinenti: estensione controllata dei manifest, ripianificazione versionata, migrazione esplicita dei ticket precedenti e task `review_only`. Un rifiuto sostanziale attendibile attiva il bounce mirato; feedback libero, diagnostica e fallimenti degli scanner non autorizzano riparazioni. Ogni incremento mantiene specifica e criteri di accettazione circoscritti, con codice e test nello stesso task.
 
 ## 13. Supervisione persistente e workflow GitHub
 
@@ -627,7 +647,7 @@ Non è tecnicamente necessario completare gli Step 1–6 prima di iniziare. Supe
 1. **Supervisore persistente e recupero operativo**: prima priorità nella [#16](https://github.com/brushtyler/ssdlc/issues/16), sotto l'epic [#1](https://github.com/brushtyler/ssdlc/issues/1). Introdurre processo persistente, preflight, classificazione degli arresti, riprese supportate, ownership, contatori e diagnostica. Usare engine simulati per validare crash/ripresa; non attendere subgoal o advisory.
 2. **Intake e visibilità GH**: attuare la prima parte della [#4](https://github.com/brushtyler/ssdlc/issues/4), coordinata con #1: label autorizzata, mapping Issue/run/PR, commento unico, check sul commit e consegna idempotente. Nessuna duplicazione dello scheduler in workflow YAML.
 3. **Consumi e quote**: anticipare la [#14](https://github.com/brushtyler/ssdlc/issues/14) per distinguere spesa misurata, valore API stimato e quote. La raccolta completa dei provider può essere incrementale; il budget non viene disattivato per aggirare dati mancanti o falsi confronti. Restano limiti indipendenti su tentativi, invocazioni e durata.
-4. **Ciclo automatico di correzione**: completare il bounce Step 3b.3, quindi collegare le review GH alla riparazione, invalidazione, rivalidazione e ripetizione dei gate. Questo prerequisito riguarda l'attivazione del ciclo correttivo, non l'intera integrazione GH.
+4. **Ciclo automatico di correzione**: usare il bounce Step 3b.3 implementato, quindi collegare le review GH alla riparazione, invalidazione, rivalidazione e ripetizione dei gate. Questo prerequisito riguarda l'attivazione del ciclo correttivo, non l'intera integrazione GH.
 5. **Ripresa del piano funzionale**: completare consegna verificata, routing/capacità e limiti condivisi, subgoal/advisory e validazione finale, mantenendo l'accettazione degli Step 3–6.
 
 La [#9](https://github.com/brushtyler/ssdlc/issues/9) sul parallelismo resta successiva al bounce e al contratto di integrazione: ottimizza la durata, ma non elimina le attese manuali tra arresto e ripresa. La [#3](https://github.com/brushtyler/ssdlc/issues/3) sull'autenticità resta un filone separato; le garanzie correnti degli hash non vengono ampliate implicitamente.

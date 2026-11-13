@@ -265,10 +265,9 @@ class DevelopmentCase(bootstrap.RepositoryTests):
     def execute(self, engine, task, rc=0, raised=False):
         orch = self.make_orchestrator()
         orch.state.update(risk_tier='M', dev_profile='ALGORITHMIC')
-        if task:
-            self.seed_inputs(orch)
-            orch.state.update(status='PLAN_READY', task_breakdown=True)
-            orch._save_state()
+        self.seed_inputs(orch)
+        orch.state.update(status='PLAN_READY', task_breakdown=True)
+        orch._save_state()
         store = self.attach_hooks(orch)
         def command(argv, **kw):
             self.assertEqual(getattr(o._dispatch_local, 'depth', 0), 1)
@@ -278,7 +277,7 @@ class DevelopmentCase(bootstrap.RepositoryTests):
             return subprocess.CompletedProcess(argv, rc, output, '')
         # Task capture requires a container; this semantic adapter simulates its
         # command boundary while preserving the real supervised dispatch hooks.
-        with patch.dict(os.environ, hook_environment(store)), patch.dict(os.environ, {'SSDLC_ENABLE_TASK_BREAKDOWN': str(task).lower(), 'SSDLC_DEV_ENGINE': engine, 'SSDLC_MAX_DEV_RETRIES': '1'}), patch.object(o.EngineRunner, '_should_spawn_role_container', return_value=task), patch.object(o.EngineRunner, '_run_role_command', side_effect=command), patch.object(o.EngineRunner, 'run_sandboxed_cmd', return_value=('Ran 1 test\nOK', '', 0)), contextlib.redirect_stdout(io.StringIO()):
+        with patch.dict(os.environ, hook_environment(store)), patch.dict(os.environ, {'SSDLC_ENABLE_TASK_BREAKDOWN': str(task).lower(), 'SSDLC_DEV_ENGINE': engine, 'SSDLC_MAX_DEV_RETRIES': '1'}), patch.object(o.EngineRunner, '_should_spawn_role_container', return_value=True), patch.object(orch, '_verification_environment', return_value={'mode': 'role_container', 'platform': 'fixture', 'image_id': 'sha256:' + '1' * 64, 'reuse_eligible': True}), patch.object(o.EngineRunner, '_run_role_command', side_effect=command), patch.object(o.EngineRunner, 'run_sandboxed_cmd', return_value=('Ran 1 test\nOK', '', 0)), contextlib.redirect_stdout(io.StringIO()):
             try:
                 orch.run_phase_dev()
             except (DevelopmentBlocked, subprocess.TimeoutExpired):
@@ -288,8 +287,7 @@ class DevelopmentCase(bootstrap.RepositoryTests):
         dispatches = [e for e in events if e['type'] == 'dispatch_started']
         self.assertEqual(len(dispatches), 1)
         self.assertEqual(dispatches[0]['engine'], engine)
-        if task:
-            self.assertEqual((dispatches[0]['task_id'], dispatches[0]['attempt']), ('T1', 1))
+        self.assertEqual((dispatches[0]['task_id'], dispatches[0]['attempt']), ('T1', 1))
         finished = [e for e in events if e['type'] == 'dispatch_finished']
         self.assertEqual(finished[0]['outcome'], 'raised' if raised else 'returned')
         return orch, store
@@ -325,26 +323,26 @@ class TestRealDevelopmentAndParity(DevelopmentCase):
     def test_real_TaskScheduler_develop_timeout(self):
         self.execute('codex', True, raised=True)
 
-    def test_real_legacy_success(self):
+    def test_real_claude_obsolete_false_success(self):
         self.execute('claude', False)
 
-    def test_real_legacy_nonzero(self):
+    def test_real_claude_obsolete_false_nonzero(self):
         self.execute('claude', False, rc=7)
 
-    def test_real_legacy_timeout(self):
+    def test_real_claude_obsolete_false_timeout(self):
         self.execute('claude', False, raised=True)
 
 
     def test_F26_real_task_develop_kill_restart(self):
         self.crash_real_develop(True, 'dispatch.after_started_before_engine')
 
-    def test_F26_real_legacy_develop_kill_restart(self):
+    def test_F26_real_claude_obsolete_false_develop_kill_restart(self):
         self.crash_real_develop(False, 'dispatch.after_started_before_engine')
 
     def test_F27_real_task_develop_kill_restart(self):
         self.crash_real_develop(True, 'dispatch.after_engine_before_finished')
 
-    def test_F27_real_legacy_develop_kill_restart(self):
+    def test_F27_real_claude_obsolete_false_develop_kill_restart(self):
         self.crash_real_develop(False, 'dispatch.after_engine_before_finished')
 
 
@@ -356,7 +354,7 @@ class TestRouteDispatchParity(DevelopmentCase):
     def test_task_claude_development_and_task_review_route_parity(self):
         self.parity(task=True, engine='claude')
 
-    def test_legacy_development_and_legacy_review_route_parity(self):
+    def test_obsolete_false_task_development_and_review_route_parity(self):
         self.parity(task=False, engine='claude')
 
     def parity(self, task, engine):
@@ -380,7 +378,7 @@ class TestRouteDispatchParity(DevelopmentCase):
             def command(argv, **kwargs):
                 self.assertEqual(getattr(o._dispatch_local, 'depth', 0), 1)
                 value = 'REVIEW_STATUS: APPROVED'
-                if task:
+                if True:
                     prompt = kwargs.get('input', '')
                     nonce = re.search(r'BEGIN SSDLC GATE REPORT ([a-f0-9]{16})', prompt)[1]
                     report = dict(schema_version='1.0', reviewed_commit=orch.state['task_verified_head'], source_gate='code_review', findings=[])
