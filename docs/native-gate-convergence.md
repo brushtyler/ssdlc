@@ -165,6 +165,10 @@ Recognized summaries include Python unittest/pytest, Jest/Vitest, Node TAP and
 Mocha. An unrecognized test summary blocks until the runner emits a supported
 count; it is not guessed to be a passing nonempty suite. The final recognized
 summary takes precedence over earlier or nested examples.
+Skipped tests do not provide positive proof. An all-skipped unittest, Jest/Vitest
+or TAP suite blocks even when its process exits zero; mixed suites must report
+at least one executed test. A total without an executed/passed breakdown is not
+accepted as a Jest/Vitest passing count.
 
 The `positive_test_count_required` capability is sealed in new contracts. Loading
 a historical contract preserves its bytes and earlier semantics. It is never

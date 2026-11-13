@@ -97,19 +97,39 @@ def decide(repo, base_commit, profile, *, run_id='-'):
 
 
 def positive_test_count(stdout, stderr):
-    """Use the final recognized runner summary; never turn silence into a count."""
+    """Use the final runner summary, excluding tests reported as skipped."""
     text = stdout + '\n' + stderr
     patterns = (
-        r'(?m)^Ran (\d{1,12}) tests?\b',
-        r'(?m)^\s*=*\s*(\d{1,12}) passed\b',
-        r'(?m)^\s*Tests:?\s+(\d{1,12})\b',
-        r'(?m)^# tests (\d{1,12})\b',
-        r'(?m)^\s*(\d{1,12}) passing\b',
-        r'(?m)^collected (0) items?\b',
+        ('unittest', r'(?m)^Ran (\d{1,12}) tests?\b'),
+        ('pytest', r'(?m)^\s*=*\s*(\d{1,12}) passed\b'),
+        ('jest', r'(?m)^\s*Tests:?\s+(\d{1,12})\b[^\r\n]*'),
+        ('tap', r'(?m)^# tests (\d{1,12})\b'),
+        ('mocha', r'(?m)^\s*(\d{1,12}) passing\b'),
+        ('pytest', r'(?m)^collected (0) items?\b'),
     )
-    counts = [(match.start(), int(match.group(1))) for pattern in patterns
+    counts = [(match.start(), int(match.group(1)), kind, match.end()) for kind, pattern in patterns
               for match in re.finditer(pattern, text)]
     empty = [match.start() for match in re.finditer(r'(?m)^=*\s*no tests ran\b', text)]
-    if empty and (not counts or max(empty) > max(pos for pos, count in counts)):
+    if empty and (not counts or max(empty) > max(row[0] for row in counts)):
         return 0
-    return max(counts, key=lambda item: item[0])[1] if counts else None
+    if not counts:
+        return None
+    position, total, kind, end = max(counts, key=lambda item: item[0])
+    tail = text[end:]
+    if kind == 'unittest':
+        skipped = re.search(r'(?m)^(?:OK|FAILED)\s*\([^\r\n)]*\bskipped=(\d{1,12})\b', tail)
+        return max(0, total - int(skipped.group(1))) if skipped else total
+    if kind == 'jest':
+        summary = text[position:end]
+        passed = re.search(r'\b(\d{1,12}) passed\b', summary)
+        if passed:
+            return int(passed.group(1))
+        return 0 if re.search(r'\b(?:skipped|pending|todo|failed)\b', summary) else None
+    if kind == 'tap':
+        passed = re.search(r'(?m)^# pass (\d{1,12})\b', tail)
+        if passed:
+            return min(total, int(passed.group(1)))
+        skipped = sum(int(match.group(1)) for match in re.finditer(
+            r'(?m)^# (?:skip(?:ped)?|cancelled|todo) (\d{1,12})\b', tail))
+        return max(0, total - skipped)
+    return total

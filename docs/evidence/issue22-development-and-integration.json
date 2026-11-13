@@ -2,7 +2,7 @@
   "schema_version": 1,
   "scope": "Issue22 task-only execution, explicit bootstrap and corrective gate recovery; includes current-main integration",
   "source_manifest": {
-    "sha256": "669112a0f64376e039b9c5446de4dc5c0ee22d75aef78a27f4a4d48b033e18ca",
+    "sha256": "a6bf570f39bf08ec79d475f7491cee2f27109d61c1b9a21549625f0795d2eadb",
     "definition": "SHA256 of canonical JSON mapping every tracked or nonignored source path to SHA256(file bytes), sorted by path; docs/evidence/ is excluded to avoid self-reference",
     "files": 212
   },
@@ -117,5 +117,13 @@
     "result": "PASS",
     "scope": "Frozen I2 policy, stage observability and crash recovery; includes missing-transaction refusal before fresh gates",
     "full_integrated_suite_still_required": true
+  },
+  "all_skipped_proof_regression": {
+    "tests": 62,
+    "seconds": 5.817,
+    "result": "PASS",
+    "scope": "Real all-skipped unittest baseline, mixed and empty unittest/Jest/Vitest/TAP counts, bootstrap, candidate evidence and documentation contracts",
+    "historical_contract_capability_unchanged": true,
+    "final_full_integrated_suite_still_required": true
   }
 }
