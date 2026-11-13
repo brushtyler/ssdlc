@@ -48,11 +48,17 @@ class SequenceTests(checkpoint.FullCheckpointReviewTests):
             candidate = orch._collect_candidate_evidence('qa', 1, orch.worktree_dir, quality)
             self.assertEqual(candidate.decisions[0]['decision'], 'reused')
             return True, 'passed'
+        def appsec(**kwargs):
+            order.append('appsec')
+            candidate = orch._collect_candidate_evidence('appsec', 1, orch.worktree_dir, quality)
+            self.assertEqual(candidate.decisions[0]['decision'], 'reused')
+            return True, 'passed'
         with patch.object(orch, '_controller_revision', return_value=dict(head='controller', files_sha256='b'*64)), \
              patch.object(orch, '_verification_environment', return_value=dict(
                  mode='role_container', platform='fixture', image_id='sha256:' + '1'*64, reuse_eligible=True)), \
              patch.object(orch, '_ensure_task_plan', return_value=self.plan), patch.object(orch, '_run_task_development'), \
              patch.object(orch, 'run_phase_qa', side_effect=qa), \
+             patch.object(orch, 'run_phase_appsec', side_effect=appsec), \
              patch.object(orch, 'run_phase_ops'), patch.object(orch, 'run_phase_docs'), \
              patch.object(orch, 'compile_evidence_pack', side_effect=lambda **kw: kw), \
              patch('orchestrator.EngineRunner.run_sandboxed_cmd', side_effect=runner), \
@@ -60,7 +66,7 @@ class SequenceTests(checkpoint.FullCheckpointReviewTests):
              patch('orchestrator.EngineRunner.invoke_role', side_effect=invoke):
             result = orch._run_pipeline('goal', from_phase='03-dev')
         self.assertTrue(result['ready_for_signoff'])
-        self.assertEqual(order, ['check', 'review', 'qa'])
+        self.assertEqual(order, ['check', 'review', 'qa', 'appsec'])
 
     def test_pipeline_faults_restart_without_losing_snapshot(self):
         for point in ('before_check', 'after_check_before_log', 'after_log_before_record',
@@ -84,6 +90,7 @@ class SequenceTests(checkpoint.FullCheckpointReviewTests):
                 with patch.object(orch, '_controller_revision', return_value=dict(head='controller', files_sha256='b'*64)), \
                      patch.object(orch, '_ensure_task_plan', return_value=self.plan), \
                      patch.object(orch, '_run_task_development'), patch.object(orch, 'run_phase_qa', return_value=(True, 'passed')), \
+                     patch.object(orch, 'run_phase_appsec', return_value=(True, 'passed')) as appsec, \
                      patch.object(orch, 'run_phase_ops'), patch.object(orch, 'run_phase_docs'), \
                      patch.object(orch, 'compile_evidence_pack', side_effect=lambda **kw: kw), \
                      patch('orchestrator.EngineRunner.run_sandboxed_cmd', side_effect=runner), \
@@ -96,6 +103,7 @@ class SequenceTests(checkpoint.FullCheckpointReviewTests):
                     before = snapshot.read_bytes() if snapshot.exists() else None
                     orch._candidate_fault = lambda point: None
                     self.assertTrue(orch._run_pipeline('goal', from_phase='03-dev')['ready_for_signoff'])
+                    appsec.assert_called_once_with(attempt=1)
                     if before is not None:
                         self.assertEqual(before, snapshot.read_bytes())
 

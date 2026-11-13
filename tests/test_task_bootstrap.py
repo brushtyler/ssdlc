@@ -1078,17 +1078,19 @@ class OrchestratorBootstrapTests(RepositoryTests):
                         def generate(prompt, **kwargs):
                             (kwargs['cwd'] / 'app.py').write_text('value = 1\n')
                             return 'Done', 0
-                        with patch('orchestrator.SquadDispatcher.dispatch_role', return_value=('codex', 'fake', 'low', 'test')), patch('orchestrator.EngineRunner.run_codex', side_effect=generate), patch('orchestrator.EngineRunner.run_sandboxed_cmd', return_value=('Ran 1 test\nOK', '', 0)), patch.object(orch, 'run_phase_review', return_value=(review_passes, 'Review result')), patch.object(orch, 'run_phase_qa', return_value=(True, 'QA passed')) as qa:
+                        with patch('orchestrator.SquadDispatcher.dispatch_role', return_value=('codex', 'fake', 'low', 'test')), patch('orchestrator.EngineRunner.run_codex', side_effect=generate), patch('orchestrator.EngineRunner.run_sandboxed_cmd', return_value=('Ran 1 test\nOK', '', 0)), patch.object(orch, 'run_phase_review', return_value=(review_passes, 'Review result')), patch.object(orch, 'run_phase_qa', return_value=(True, 'QA passed')) as qa, patch.object(orch, 'run_phase_appsec', return_value=(True, 'AppSec passed')) as appsec:
                             if review_passes:
                                 evidence = orch.run_pipeline('Scoped goal', from_phase='03-dev')
                                 self.assertTrue(evidence.exists())
                                 self.assertEqual(orch.state['status'], 'AWAITING_SUPERVISOR_SIGNOFF')
                                 qa.assert_called_once()
+                                appsec.assert_called_once_with(attempt=1)
                             else:
                                 with self.assertRaisesRegex(TaskError, 'explicit invalidation'):
                                     orch.run_pipeline('Scoped goal', from_phase='03-dev')
                                 self.assertEqual(orch.state['status'], 'ESCALATED_TO_SUPERVISOR')
                                 qa.assert_not_called()
+                                appsec.assert_not_called()
                                 self.assertTrue((orch.ssdlc_root / 'EVIDENCE_PACK.md').exists())
                     finally:
                         self.repo, self.base, self.artifacts, self.quality, self.plan = old_repo, old_base, old_artifacts, old_quality, old_plan

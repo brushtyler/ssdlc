@@ -2,7 +2,7 @@
   "schema_version": 1,
   "scope": "Issue22 task-only execution, explicit bootstrap and corrective gate recovery; includes current-main integration",
   "source_manifest": {
-    "sha256": "23f428960fb008ae86cf7f44e2e650f5483107c2997e6c0a49b0bf31ffc95598",
+    "sha256": "da9c9ea523aa8f605129452a492917dfd97ae1443ff16c91410dc5ae95fbe9c4",
     "definition": "SHA256 of canonical JSON mapping every tracked or nonignored source path to SHA256(file bytes), sorted by path; docs/evidence/ is excluded to avoid self-reference",
     "files": 213
   },
@@ -141,6 +141,13 @@
       "Console diagnostics redact secrets before truncation while preserving private evidence hashes",
       "Admitted pre-isolation sealed journals retain their mode, attempts, contracts and journal prefix"
     ],
+    "fresh_full_suite_and_independent_gates_required": true
+  },
+  "mandatory_appsec_sequence_regression": {
+    "tests": 18,
+    "seconds": 11.207,
+    "result": "PASS",
+    "scope": "All global gates remain in sequence; QA/AppSec reuse candidate proof; fault restart preserves snapshot; AppSec is skipped only after an earlier rejection",
     "fresh_full_suite_and_independent_gates_required": true
   }
 }
