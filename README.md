@@ -428,13 +428,33 @@ Apache-2.0
 
 ## Targeted bounce preview
 
-Step 3b.2 / PR #13 merged with **397 tests after review fixes**. This increment
-only prepares targeted bounce: it verifies recorded gate evidence and archives a
-deterministic preview with `execution_authorized=false`. It grants no approval
-or execution authority. The following remain pending: repair execution,
-cumulative recovery, revalidation integration, repeated global gates and
-advanced-target delivery. Provider accounting is tracked in GH issue #14 and is
-not implemented here.
+See the [native gate convergence guide](docs/native-gate-convergence.md) for
+execution, bootstrap and corrective recovery examples.
+
+Unified task execution, explicit greenfield bootstrap and targeted corrective bounce
+(Step 3b.3) are implemented. Every new run uses the scheduler, including a
+single-node plan for Tier S. Historical sealed task runs retain their contracts,
+attempts and budgets. Legacy runs remain readable; execution, resume and approval
+are refused before record writes. Start a new ticket instead.
+
+A trusted substantive Review, QA or AppSec rejection enters the corrective
+executor. It verifies evidence, durably records a separate transaction, invalidates
+exact roots, repairs them and revalidates dependents in topological order. All three
+global gates run again on the final candidate before signoff readiness. Free text,
+scanner failures and diagnostic reports grant no repair authority. The preview
+remains immutable with `execution_authorized=false`.
+
+Recovery reconciles both journals without duplicating invalidation or committed
+repair. Unfinished transactions may append missing acknowledgments and required
+work; only COMPLETED/APPROVED transaction replay is a zero-write no-op. An uncertain
+developer dispatch stops for operator reconciliation without redispatch. Attempts,
+retained evidence and frozen budget limits are preserved; raising or disabling an
+environment limit cannot lift a transaction's frozen limit.
+
+Advanced-target merge reconciliation, automatic scope migration, GitHub delivery
+(#4), provider accounting (#14), new billing units/quota polling, parallel scheduling,
+advisory acceptance and subgoals remain later milestones. No controller/runtime
+editing or new dependencies are introduced by this milestone.
 
 Hashes are unkeyed integrity checks, not authentication. Verification provides
 point-in-time integrity checks; no continuous containment is claimed. A
@@ -462,7 +482,7 @@ artifacts block without overwriting old evidence. Changed verified inputs use a
 new revision. Failed post-publication checks never produce a successful preview;
 restart recovery always verifies again.
 
-CLI exits: **0** means candidates with no blockers, ready for a later executor;
+CLI exits: **0** means candidates with no blockers, eligible for the engine-owned corrective executor;
 **10** means a produced non-executable or diagnostic preview (including an empty
 plan); **20** means blocked or rejected; **2** means invalid CLI usage. Exit 0
 grants no approval or execution authority. Every result has
@@ -473,7 +493,7 @@ text or provider payloads.
 
 ## Unified task execution
 
-The first implementation increment provides versioned JSON schemas in `schemas/`,
+The implemented task engine provides versioned JSON schemas in `schemas/`,
 `TaskPlanValidator`, and a sequential DAG executor in `ssdlc_tasks.py`. The controller
 captures a quality contract and baseline, requests a structured plan and independent
 plan review, then executes one task at a time with the existing model routing.
@@ -596,6 +616,49 @@ Every new run uses the task engine. Tier S requires exactly one plan node and us
 
 The obsolete task-breakdown environment setting is ignored with a warning. Newly captured required checks carry candidate proof; historical sealed contracts remain unchanged. QA shell commands are reported separately and do not establish typed-check equivalence. Supervisor rejection records feedback only and authorizes no repair.
 
+For a normal project with a passing nonempty baseline, the supported CLI is:
+
+```bash
+python3 orchestrator.py run --repo . --ticket TKT-1 --goal "Scoped change" --tier S --no-sync-remote --test-cmd 'printf shell-smoke'
+```
+
+For a clean greenfield repository at its initial commit, explicitly create
+`.ssdlc/bootstrap-profile.json` (keep `.ssdlc/` ignored):
+
+```json
+{"schema_version":"1.0","profile_id":"python-unittest","window_tasks":1}
+```
+
+The same run command then captures baseline status `absent`, bound to the initial
+commit/tree and registered policy. The first implementation must add real tests:
+`python3 -m unittest discover -s tests` must execute at least one passing test.
+Empty, failing, missing, timed-out or interrupted checks block. The one-task
+exemption becomes journaled `PROVEN`/post-bootstrap without rewriting the sealed
+contract. Restart before proof fails explicitly; a profile cannot renew eligibility.
+Existing tests, dirty trees or later commits are ineligible (exit 24). Without an
+explicit profile, strict baseline rules apply. Protected paths and task checks
+remain enforced throughout.
+
+The offline suite executes these CLI/configuration behaviors through real entry
+points with fake providers and sandbox commands:
+
+```bash
+python3 -m unittest discover -s tests -p test_unified_integration.py
+```
+
+Run exits: **0** means the requested pipeline command completed (signoff remains
+separate); **23** refuses a legacy/non-executable startup, with a new-run command;
+**24** refuses bootstrap eligibility/profile validation; **2** is invalid CLI usage.
+Pipeline execution errors fail nonzero; they do not imply successful signoff.
+Preview's separate **0/10/20** outcomes are described above.
+
+Metrics are per-process counters, not billing units: `corrective_transactions_created`,
+`corrective_transactions_executed`, `corrective_transactions_refused` (by reason),
+`corrective_transactions_replayed`, `corrective_transactions_interrupted`,
+`corrective_transactions_reconciled`, `corrective_repair_attempts`,
+`bootstrap_eligible`, `bootstrap_ineligible` and `legacy_refusals`.
+Structured logs include stage and bounded reason codes without raw finding prose.
+
 New projects default to generic standards. The existing yuna templates require
 `SSDLC_STANDARDS_PROFILE=yuna` during initialization. Existing project standards are
 preserved; review project-specific rules already installed before starting a run.
@@ -680,8 +743,8 @@ raw output under `05-qa/runs/`, and requires one exact final `QA_STATUS` marker 
 passing deterministic checks. Quoted, contradictory or annotated verdicts cannot
 approve a checkpoint; source changes during QA also withhold approval.
 
-This bootstrap requires strict file manifests and automated task checks. Runtime
-scope expansion, targeted review bounce, granular model
+Task execution requires strict file manifests and automated task checks. Targeted
+Review/QA/AppSec bounce is implemented. Runtime scope expansion, granular model
 routing, shared invocation/time budgets, subgoals and the advisory lifecycle remain
 subsequent increments. Advisory schemas and provenance validation are available;
 proposal collection, export and `--from-proposal` are not implemented yet. Global
@@ -724,12 +787,12 @@ Verification supports a toolkit or target in a linked Git checkout: its shared G
 metadata is mounted read-only, preserving Git visibility without granting writes to
 repository configuration or other worktrees.
 
-The bootstrap stops on review feedback instead of skipping rejected completed tasks.
-Approval requires passing global gates, a clean checkpoint and an unchanged clean
+Trusted substantive gate feedback triggers targeted corrective execution. Approval
+requires fresh passing global gates, a clean checkpoint and an unchanged clean
 target, then fast-forwards to the verified SHA and preserves evidence. Advanced-target
-integration and conditional remote delivery remain later work. This feature stays off
-by default until the integration scenarios, including real Docker isolation and model
-calls, have been validated for the chosen runner.
+integration and conditional remote delivery remain later work. Offline integration
+uses deterministic providers; real Docker and provider acceptance remain separate
+runner validation milestones.
 
 The real Docker smoke test uses only synthetic credentials and verifies source
 read-only mounts, hidden runtime/authentication data and writable isolated scratch:

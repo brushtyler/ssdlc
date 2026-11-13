@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+import doc_contracts as docs
 import orchestrator
 import ssdlc_bounce as bounce
 import ssdlc_gate_reports as gates
@@ -382,15 +383,33 @@ class PreviewTests(GateFixture):
         self.assertFalse(self.files())
 
     def test_docs_required_facts_and_limits(self):
-        root = Path(orchestrator.__file__).parent
-        for name in ('README.md', 'PLAN_TASK_ROUTING_AND_SUBGOALS.md'):
-            text = (root / name).read_text()
-            if name.startswith('PLAN_'):
-                text = text.split('## 12. Stato del bootstrap progressivo', 1)[1]
-            for fact in ('Step 3b.2', 'PR #13', '397 tests after review fixes',
-                         'only prepares targeted bounce', 'repair execution',
-                         'cumulative recovery', 'revalidation integration',
-                         'repeated global gates', 'advanced-target delivery',
-                         'GH issue #14', 'not implemented here',
-                         'unkeyed integrity checks', 'not authentication'):
-                self.assertIn(fact, text)
+        # Public behavior and limits are contracts; milestone names, PR numbers
+        # and historical test totals are not acceptance criteria.
+        corpus = docs.user_facing_docs()
+        contracts = {
+            'task execution': (
+                'Every new run uses the scheduler', 'single-node plan for Tier S',
+                'Legacy runs remain readable',
+                'execution, resume and approval are refused before record writes'),
+            'preview authority': (
+                'preview remains immutable', 'execution_authorized=false',
+                'Preview invokes no model, developer, scanner or test runner',
+                'perform no artifact or registration writes'),
+            'corrective execution': (
+                'durably records a separate transaction',
+                'revalidates dependents in topological order',
+                'All three global gates run again on the final candidate',
+                'Free text, scanner failures and diagnostic reports grant no repair authority',
+                'COMPLETED/APPROVED transaction replay is a zero-write no-op',
+                'uncertain developer dispatch stops for operator reconciliation without redispatch',
+                'Attempts, retained evidence and frozen budget limits are preserved',
+                "raising or disabling an environment limit cannot lift a transaction's frozen limit"),
+            'remaining limits and integrity': (
+                'Advanced-target merge reconciliation', 'provider accounting',
+                'parallel scheduling', 'subgoals remain later milestones',
+                'unkeyed integrity checks', 'not authentication',
+                'no continuous containment is claimed'),
+        }
+        for contract, facts in contracts.items():
+            with self.subTest(contract=contract):
+                docs.assert_documented(self, corpus, facts, issues=(4, 14))

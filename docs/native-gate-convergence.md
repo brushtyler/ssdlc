@@ -1,10 +1,14 @@
 # Native gate convergence
 
 Native gate convergence collects deterministic candidate checks before the review
-that needs them. It is opt-in: an explicit quality contract must set
-`candidate_proof: true` on at least one required check. The auto-discovered
-contract does not opt in. Without that switch, the legacy pipeline and artifact
-formats remain unchanged, including the legacy Ops/Docs context limitations.
+that needs them. Newly captured required checks set `candidate_proof: true`,
+including auto-discovered and explicit bootstrap contracts. Historical sealed
+contracts are loaded unchanged and keep their original proof semantics. Every new
+run uses task execution; the obsolete task-breakdown flag is ignored.
+
+Unified execution, explicit greenfield bootstrap and corrective bounce (Step 3b.3)
+are implemented. See the [README](../README.md#unified-task-execution) for executed
+CLI/profile examples, exit codes and per-process metric names.
 
 ## Candidate evidence and decisions
 
@@ -62,7 +66,7 @@ omissions; history never automatically resolves findings.
 
 ## Ops/Docs context and integrity boundaries
 
-Opted-in task-mode Ops/Docs use the verified candidate commit and clean worktree
+Candidate-proof Ops/Docs use the verified candidate commit and clean worktree
 as their cwd. The implementation diff is full-or-rejected: an oversized diff
 fails rather than being silently truncated. Other inputs may be truncated, with
 machine-readable disclosure of included and total sizes, truncation flags and
@@ -85,10 +89,13 @@ is recorded, while an exhausted resource retry returning 125 is a failed check.
 
 ## Rollback and known limits
 
-Rollback is additive: reverting code leaves new artifact directories inert and
-preserves prior state and evidence without deletion or rewriting. Opted-in
-contracts fail old schemas loudly because `candidate_proof` is not accepted by
-their closed check schema. Legacy contracts continue on their existing path.
+Records are additive, but a code revert does not make every ticket executable.
+Historical ordinary task records retain their sealed semantics. Bootstrap contracts
+with an absent baseline may fail older schemas/validators and must not be resumed
+under reverted code. Invalidated/open/failed corrective tickets require restoring
+the matching pre-invalidation journal/snapshot, implementation diff and registry
+checkpoint before old code can execute them. Without that restoration they remain
+readable only. Uncertain dispatch has no automated operator-resolution command.
 
 1. Ignored-file contents are not checked for mutation; HEAD, tree and non-ignored
    status are checked.
@@ -98,9 +105,13 @@ their closed check schema. Legacy contracts continue on their existing path.
    is declined when an identity element cannot be established.
 3. A failed verified record is reused for the same binding. The remedy is changing
    source.
-4. The default auto-discovered contract does not opt in.
-5. Task-mode review rejection ends the run. Later evaluations come from later
-   gates or operator-driven resumes; no bounce execution or scheduler is added.
+4. Historical contracts are never rewritten to activate candidate proof.
+5. Trusted substantive Review/QA/AppSec rejection starts an engine-owned corrective
+   transaction. Preview remains `execution_authorized=false`. Roots are repaired,
+   dependents revalidated and all global gates rerun on the final verified commit.
+   Stale evidence, source mutation, exhausted attempts, budgets and cancellation
+   stop at verified boundaries. Recovery adds required acknowledgments/work without
+   duplicate invalidation or repair; only COMPLETED/APPROVED replay is zero-write.
 6. An operator-resolution command for uncertain diagnosis is out of scope.
    Resolution requires changed source or rejection.
 7. The diagnosis lock coordinates cooperating processes only. Holding it across
@@ -118,3 +129,11 @@ history, Ops/Docs disclosures and protected-artifact integrity. AC-25 verificati
 runs all five files and the existing full suite unmodified; AC-14 is checked by
 legacy compatibility coverage. Run the global suite on a temporary copy of
 tracked sources when subprocesses could generate ignored files in the checkout.
+
+The unified acceptance suite is `test_unified_integration.py`: deterministic fake
+Claude/Codex processes and sandbox commands exercise real CLI/pipeline entry points,
+bootstrap checkpoints, corrective gates, journal reconciliation and limit boundaries.
+No network or provider credentials are required. These offline checks do not claim
+real Docker/provider acceptance. Advanced-target merge, automatic scope migration,
+GitHub #4, accounting #14, quota polling/new billing units, parallel scheduling,
+advisory acceptance and subgoals remain later milestones.
