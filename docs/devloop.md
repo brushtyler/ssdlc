@@ -78,11 +78,66 @@ values come from the configured agent: CLI version from its `--version`, model a
 as passed on the command line. Text the dispatcher writes on its own, such as escalations and CI
 rounds, names `devloop dispatcher` as the agent and no model.
 
+## GitHub identities
+
+Each agent and the dispatcher can act on GitHub with its own GitHub App (#65), configured under
+`[apps]` in `config.toml`:
+
+| Actor | Does |
+|---|---|
+| dispatcher | every read, labels, escalations, CI rounds, readiness |
+| implementer | commits (author and committer are its bot), push, opens the PR, fix and blocked comments |
+| reviewer | the review comment and a native GitHub review (`APPROVE`, `REQUEST_CHANGES` or `COMMENT`) on the reviewed commit |
+
+Apps are per agent, not per role: GitHub keeps one review state per identity, and it already
+refuses an approval from the author of a PR. Least privilege per role comes from the tokens:
+devloop mints an installation token for each action, limited to this repository and to the
+permissions that action needs. A reviewer's token can read contents and write pull requests, but
+cannot push; labels are always set by the dispatcher.
+
+Records are bound to identities. A PR counts as a devloop PR with its marker only if it was opened
+by the app of the implementer the marker names; a review counts only if its comment was written by
+the app of the reviewer named in it, and never by the PR's implementer; a CI round only from the
+dispatcher's app; a fix only from the implementer's app. `trusted_users` stays for people: it
+decides who can start work with `agent:ready`, and it cannot contain bots.
+
+The native review mirrors the verdict for GitHub and branch protection; devloop itself reads only
+the review comment, and a failed native review is logged without stopping the flow.
+
+Private keys are read from `key_dir` (or `$DEVLOOP_APP_KEY_DIR`) as
+`<slug>.<date>.private-key.pem`, the newest one per app, and must have mode `600`. The JWT is
+signed with the `openssl` binary. Tokens stay in the dispatcher: they reach `gh` through
+`GH_TOKEN` and `git push` through an HTTP header in the environment of that single command, never
+through a file or the command line. No other credential can join the push: it refuses a URL that
+an `insteadOf` or `pushInsteadOf` rule would rewrite, allows only the HTTPS transport, and
+disables credential helpers, askpass programs and preconfigured authentication headers. The
+header is keyed on the exact push URL, so that no `http.<url>.extraHeader` in a config file is
+more specific, and `git -c` settings inherited through `GIT_CONFIG_PARAMETERS` are dropped. An actor
+without an app uses the ambient `gh` login and its records must come from `trusted_users`, as
+before. An app that is configured but whose key is missing stops devloop at startup instead of
+silently falling back to the operator's login: remove it from `[apps]` (or use `--config`) to run
+that actor without it. `python3 -m devloop apps` checks each app, its installation and its
+permissions.
+
+The apps have no `Workflows` permission, and devloop never pushes changes under
+`protected_paths` (default `.github/`): a workflow or a local action pushed to a branch of this
+repository would run in CI before any review. Such a change goes to `agent:needs-human` and is
+applied by a person.
+
+Agent CLIs and the test command run without GitHub credentials in reach: `GH_TOKEN` and
+`GITHUB_TOKEN` are removed, `gh` gets an empty config directory, and git may only use local
+repositories (`GIT_ALLOW_PROTOCOL=file`), so neither SSH keys nor HTTPS credentials apply whatever
+the config files say; credential helpers, askpass programs, preconfigured authentication headers
+and SSH are disabled as further layers. This prevents accidental use of the operator's credentials, not
+deliberate access: code running as the same system user can still read files. Real isolation
+needs a dedicated system user or a container.
+
 ## Usage
 
 ```bash
 python3 -m devloop setup            # create the agent:* labels
 python3 -m devloop status           # devloop PRs, ready issues, planned actions
+python3 -m devloop apps             # check the GitHub App of each actor
 python3 -m devloop tick --dry-run   # print the plan, change nothing
 python3 -m devloop tick             # run one round
 python3 -m devloop run --interval 600
@@ -128,16 +183,17 @@ implementer is no longer configured, the PR goes to `agent:needs-human`.
 Agents run headless: `claude -p`, `codex exec`, `agy -p`, with the schema in
 [`devloop/schemas/`](../devloop/schemas/). Reviewers run read-only (codex `read-only` sandbox,
 agy `plan` mode, claude without edit tools). Implementers edit only their worktree; the
-dispatcher does every commit, push and GitHub write.
+dispatcher process does every commit, push and GitHub write, with the identity of the actor
+it acts for.
 
 ## Limits
 
 - **No automatic merge.** A human merges every PR.
-- **Same GitHub identity.** All agents publish through the operator's `gh` login, so reviews
-  are comments, not GitHub approvals, and branch protection cannot tell agents apart.
-- **Trust comes from labels.** Only issues whose `agent:ready` label was added by a user in
-  `trusted_users` start, only comments by those users reach the prompts, and only their markers
-  are read. Labelling approves the issue's title and body as they are: if someone outside
+- **Identities need apps.** An agent without a GitHub App publishes through the operator's `gh`
+  login, and then cannot submit a native review of a PR opened with that same login.
+- **Trust comes from labels and identities.** Only issues whose `agent:ready` label was added by
+  a user in `trusted_users` start, only comments by those users reach the prompts, and markers are
+  read only from the identity that may write them (see GitHub identities). Labelling approves the issue's title and body as they are: if someone outside
   `trusted_users` changes them later (or in the same second, since GitHub timestamps cannot
   order the two), implementation, review and fixes stop at
   `agent:needs-human` until a trusted user adds `agent:ready` again. Issue text is still model

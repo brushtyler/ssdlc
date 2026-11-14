@@ -1,14 +1,41 @@
 """Headless invocation of the agent CLIs with schema-validated final output."""
 
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
 
 from .markdown import header, parse_version
 from .schema import load_schema, schema_path, validate, SchemaError
+from .workspace import git_config_env
 
 MODES = ('write', 'review')
+CREDENTIAL_VARS = ('GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN',
+                   'SSH_AUTH_SOCK', 'GIT_CONFIG_PARAMETERS')
+
+
+def isolated_env(gh_config_dir, base=None):
+    """Environment for agent CLIs and the test command: no GitHub credentials in reach of `gh`
+    or `git`.
+
+    - ``gh`` gets an empty config directory and no token variables;
+    - git may only use local repositories (``GIT_ALLOW_PROTOCOL=file``), so neither SSH keys nor
+      HTTPS credentials can be used, whatever the config files say;
+    - as further layers, credential helpers, askpass programs (``GIT_ASKPASS`` overrides
+      ``core.askPass``), preconfigured authentication headers and SSH are disabled.
+
+    This prevents accidental use of the operator's credentials, not deliberate access: code
+    running as the same system user can still read files. Real isolation needs a dedicated
+    system user or a container.
+    """
+    env = {k: v for k, v in (os.environ if base is None else base).items()
+           if k not in CREDENTIAL_VARS and not k.startswith('GIT_CONFIG_')}
+    env.update(git_config_env([('credential.helper', ''), ('http.extraHeader', '')]))
+    env.update({'GH_CONFIG_DIR': str(gh_config_dir), 'GIT_ALLOW_PROTOCOL': 'file',
+                'GIT_TERMINAL_PROMPT': '0', 'GIT_ASKPASS': 'false', 'SSH_ASKPASS': 'false',
+                'GIT_SSH_COMMAND': 'false'})
+    return env
 
 
 class AgentError(RuntimeError):
@@ -65,10 +92,11 @@ def extract_output(kind, stdout, out_file):
 
 
 class AgentRunner:
-    def __init__(self, log_dir, timeout, run=subprocess.run):
+    def __init__(self, log_dir, timeout, run=subprocess.run, env=None):
         self.log_dir = Path(log_dir)
         self.timeout = timeout
         self._run = run
+        self._env = env
         self._versions = {}
 
     def version(self, agent):
@@ -92,9 +120,10 @@ class AgentRunner:
                                     out_file=out_file)
         stem.with_suffix('.prompt.md').write_text(prompt, encoding='utf-8')
         log = stem.with_suffix('.log')
+        kwargs = {'env': self._env} if self._env is not None else {}
         try:
             done = self._run(argv, input=stdin, cwd=workdir, capture_output=True, text=True,
-                             timeout=self.timeout)
+                             timeout=self.timeout, **kwargs)
         except subprocess.TimeoutExpired as exc:
             raise AgentError(f'{agent.key} timed out after {self.timeout}s', log) from exc
         except OSError as exc:

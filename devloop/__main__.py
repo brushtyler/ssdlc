@@ -1,4 +1,4 @@
-"""devloop command line: python3 -m devloop {setup,status,tick,run,cleanup}."""
+"""devloop command line: python3 -m devloop {setup,status,apps,tick,run,cleanup}."""
 
 import argparse
 import fcntl
@@ -8,10 +8,11 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from .agents import AgentRunner
+from .agents import AgentRunner, isolated_env
+from .apps import DISPATCHER, Identities
 from .config import ConfigError, load_config
 from .dispatcher import Dispatcher, ensure_labels, plan, run_forever
-from .github import GitHub
+from .github import GitHubError
 from .workspace import Workspace
 
 
@@ -41,10 +42,20 @@ def build(args):
     cfg = load_config(args.config)
     root = main_checkout()
     state = root / cfg.state_dir
-    gh = GitHub(cfg.repo)
-    ws = Workspace(root, cfg.state_dir, cfg.base_branch)
-    runner = AgentRunner(state / 'logs', cfg.agent_timeout_seconds)
-    return cfg, state, Dispatcher(cfg, gh, ws, runner, log=log)
+    try:
+        identities = Identities.from_config(cfg)
+    except OSError as exc:
+        raise ConfigError(f'GitHub App key: {exc}. Set $DEVLOOP_APP_KEY_DIR or remove the app '
+                          'from [apps] to use the ambient gh login.') from exc
+    # Agents and the test command never see the operator's GitHub credentials.
+    gh_config = state / 'agent-gh-config'
+    gh_config.mkdir(parents=True, exist_ok=True)
+    agent_env = isolated_env(gh_config)
+    ws = Workspace(root, cfg.state_dir, cfg.base_branch, test_env=agent_env)
+    runner = AgentRunner(state / 'logs', cfg.agent_timeout_seconds, env=agent_env)
+    dispatcher = Dispatcher(cfg, identities.github(DISPATCHER), ws, runner, log=log,
+                            identities=identities)
+    return cfg, state, dispatcher
 
 
 def main(argv=None):
@@ -53,6 +64,7 @@ def main(argv=None):
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('setup', help='create or update the agent:* labels')
     sub.add_parser('status', help='show devloop PRs, ready issues and the planned actions')
+    sub.add_parser('apps', help='check the GitHub App of each actor and its installation')
     tick = sub.add_parser('tick', help='plan and run one round of actions')
     tick.add_argument('--dry-run', action='store_true', help='only print the planned actions')
     run = sub.add_parser('run', help='tick forever')
@@ -68,6 +80,25 @@ def main(argv=None):
     if args.command == 'setup':
         ensure_labels(dispatcher.gh, cfg.labels)
         log('labels ready: ' + ', '.join(cfg.labels.all()))
+        return
+    if args.command == 'apps':
+        failed = False
+        for actor in [DISPATCHER, *cfg.agents]:
+            app = dispatcher.identities.apps.get(actor)
+            if app is None:
+                log(f'{actor}: no app, uses the ambient gh login')
+                continue
+            try:
+                info = app.describe()
+            except GitHubError as exc:
+                failed = True
+                log(f'{actor}: {exc}')
+                continue
+            perms = ', '.join(f'{k}={v}' for k, v in sorted(info['permissions'].items()))
+            log(f'{actor}: {info["login"]} installation {info["installation"]} '
+                f'({info["repository_selection"]}): {perms}')
+        if failed:
+            sys.exit(1)
         return
     if args.command == 'status':
         snap = dispatcher.snapshot()

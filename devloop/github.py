@@ -6,6 +6,7 @@ output is long-standing (`issue list/view`, `pr list/view`).
 """
 
 import json
+import os
 import re
 import subprocess
 from urllib.parse import quote
@@ -30,15 +31,32 @@ def _login(who):
     return (who or {}).get('login')
 
 
+def author_login(author):
+    """A login in REST form. `gh` porcelain reports an app as ``app/<slug>``; REST and the
+    trust checks use ``<slug>[bot]``."""
+    login = _login(author)
+    if login and (author or {}).get('is_bot') and login.startswith('app/'):
+        return login[len('app/'):] + '[bot]'
+    return login
+
+
 class GitHub:
-    def __init__(self, repo, run=subprocess.run):
+    """``token``, when given, is a callable returning the token every call runs with; otherwise
+    the ambient ``gh`` login is used."""
+
+    def __init__(self, repo, run=subprocess.run, token=None):
         self.repo = repo
         self._run = run
+        self._token = token
 
     def _gh(self, *args, stdin=None, check=True):
+        kwargs = {}
+        if self._token is not None:
+            env = {k: v for k, v in os.environ.items() if k not in ('GITHUB_TOKEN', 'GH_TOKEN')}
+            kwargs['env'] = dict(env, GH_TOKEN=self._token())
         try:
             done = self._run(['gh', *args], input=stdin, capture_output=True, text=True,
-                             timeout=300)
+                             timeout=300, **kwargs)
         except subprocess.TimeoutExpired as exc:
             raise GitHubError(f'gh {" ".join(args[:3])}: timed out after {exc.timeout}s') from exc
         except OSError as exc:
@@ -90,12 +108,16 @@ class GitHub:
         return logins[-1] if logins else None
 
     def open_prs(self):
-        return self._json('pr', 'list', '-R', self.repo, '--state', 'open', '--limit', '200',
-                          '--json', 'number,title,body,labels,headRefName,headRefOid,author,'
-                                    'isCrossRepository')
+        prs = self._json('pr', 'list', '-R', self.repo, '--state', 'open', '--limit', '200',
+                         '--json', 'number,title,body,labels,headRefName,headRefOid,author,'
+                                   'isCrossRepository')
+        return [dict(raw, author={'login': author_login(raw.get('author'))}) for raw in prs]
 
     def pr_comments(self, number):
-        return self._json('pr', 'view', str(number), '-R', self.repo, '--json', 'comments')['comments']
+        """Conversation comments, read with REST so that an app's login is ``<slug>[bot]``
+        (`gh pr view` reports it as a bare ``<slug>``, indistinguishable from a user)."""
+        return self._json_lines('api', '--paginate', f'repos/{self.repo}/issues/{number}/comments',
+                                '--jq', '.[] | {author: {login: .user.login}, body}')
 
     def pr_head(self, number):
         """The PR's current head commit, read fresh."""
@@ -135,12 +157,17 @@ class GitHub:
         self._gh('api', '-X', 'POST', f'repos/{self.repo}/issues/{number}/comments',
                  '-F', 'body=@-', stdin=body)
 
-    def create_pr(self, *, base, head, title, body, labels=()):
+    def create_pr(self, *, base, head, title, body):
+        """``(number, url)`` of the new PR. Labels are the dispatcher's job, not the author's."""
         created = json.loads(self._gh(
             'api', '-X', 'POST', f'repos/{self.repo}/pulls', '-f', f'title={title}',
             '-f', f'head={head}', '-f', f'base={base}', '-F', 'body=@-', stdin=body).stdout)
-        self.edit_labels(created['number'], add=labels)
-        return created['html_url']
+        return created['number'], created['html_url']
+
+    def submit_review(self, number, *, commit, event, body):
+        """A native PR review (APPROVE, REQUEST_CHANGES or COMMENT) on ``commit``."""
+        self._gh('api', '-X', 'POST', f'repos/{self.repo}/pulls/{number}/reviews',
+                 '-f', f'commit_id={commit}', '-f', f'event={event}', '-F', 'body=@-', stdin=body)
 
     def ensure_label(self, name, color, description):
         self._gh('label', 'create', name, '-R', self.repo, '--color', color,

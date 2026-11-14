@@ -27,6 +27,13 @@ class AgentConfig:
 
 
 @dataclass(frozen=True)
+class AppConfig:
+    """A GitHub App: its id and slug. The private key is found by slug in ``app_key_dir``."""
+    app_id: int
+    slug: str
+
+
+@dataclass(frozen=True)
 class Labels:
     ready: str = 'agent:ready'
     working: str = 'agent:working'
@@ -60,6 +67,9 @@ class Config:
     test_timeout_seconds: int = 1800
     blocked_labels: tuple = ('bloccata',)
     priority_labels: tuple = ('prerequisito',)
+    protected_paths: tuple = ('.github/',)
+    apps: dict = field(default_factory=dict)
+    app_key_dir: str = '~/.ghapps'
     labels: Labels = field(default_factory=Labels)
 
     def agent(self, key):
@@ -110,6 +120,23 @@ def parse_config(data):
     trusted = _str_list(data, 'trusted_users', 'config')
     if not trusted:
         raise ConfigError('trusted_users: at least one GitHub login is required')
+    if any(login.endswith('[bot]') for login in trusted):
+        raise ConfigError('trusted_users: bots and apps cannot approve work')
+    apps_table = dict(data.get('apps') or {})
+    key_dir = apps_table.pop('key_dir', '~/.ghapps')
+    if not isinstance(key_dir, str):
+        raise ConfigError('apps.key_dir: expected str')
+    apps = {}
+    for actor, table in apps_table.items():
+        where = f'apps.{actor}'
+        if actor != 'dispatcher' and actor not in agents:
+            raise ConfigError(f'{where}: not the dispatcher nor a configured agent')
+        if not isinstance(table, dict):
+            raise ConfigError(f'{where}: expected a table')
+        apps[actor] = AppConfig(app_id=_require(table, 'app_id', int, where),
+                                slug=_require(table, 'slug', str, where))
+    if len({app.app_id for app in apps.values()}) != len(apps):
+        raise ConfigError('apps: each actor needs its own app')
     ints = {}
     for key in ('max_open_prs', 'max_review_rounds', 'max_actions_per_tick',
                 'implement_test_retries', 'agent_timeout_seconds', 'test_timeout_seconds'):
@@ -129,6 +156,8 @@ def parse_config(data):
         trusted_users=trusted,
         blocked_labels=_str_list(data, 'blocked_labels', 'config', ('bloccata',)),
         priority_labels=_str_list(data, 'priority_labels', 'config', ('prerequisito',)),
+        protected_paths=_str_list(data, 'protected_paths', 'config', ('.github/',)),
+        apps=apps, app_key_dir=key_dir,
         **ints)
 
 
