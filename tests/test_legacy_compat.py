@@ -60,6 +60,7 @@ class CompatibilityTests(RepositoryTests):
             for words in [['run', '--ticket', 'OLD', '--goal', 'g'], ['approve', 'OLD'],
                           ['reject', 'OLD', '--reason', 'no'], ['plan', '--ticket', 'OLD'],
                           ['design', '--ticket', 'OLD'], ['design', '--ticket', 'OLD', '--import-legacy', 'rounds/x'],
+                          ['po', '--ticket', 'OLD'],
                           ['resume', '--ticket', 'OLD', '--entrypoint', 'run', '--goal', 'g']]:
                 with patch.object(o, 'SSDLCOrchestrator', side_effect=AssertionError('constructor')) as ctor:
                     # Parser uses class constants, so preserve these without constructing.
@@ -102,12 +103,12 @@ class CompatibilityTests(RepositoryTests):
                     'expected_head': 'abc',
                     'tasks': {'T1': {'status': 'COMPLETED', 'attempts': 2}}})
                 before = self.snapshot()
-                for command in ('run', 'resume', 'approve', 'reject', 'plan', 'design'):
+                for command in ('run', 'resume', 'approve', 'reject', 'plan', 'design', 'po'):
                     self.assertEqual(o.execution_compatibility(self.repo, 'OLD', command)['code'],
                                      'legacy_not_executable')
                 for words in (['run', '--ticket', 'OLD', '--goal', 'g'], ['approve', 'OLD'],
                               ['reject', 'OLD', '--reason', 'no'], ['plan', '--ticket', 'OLD'],
-                              ['design', '--ticket', 'OLD']):
+                              ['design', '--ticket', 'OLD'], ['po', '--ticket', 'OLD']):
                     with patch.object(o, 'SSDLCOrchestrator', side_effect=AssertionError('constructor')) as ctor:
                         ctor.PHASE_ORDER = ['00-recon', '03-dev']
                         with contextlib.redirect_stderr(io.StringIO()):

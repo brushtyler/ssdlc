@@ -4044,7 +4044,8 @@ class SSDLCOrchestrator:
         """Repair/validate recorded PO syntax only; never call a provider."""
         with ticket_lock(getattr(self, 'ticket_lock_path', self.ssdlc_root / 'ticket.lock')):
             self.state = self._load_or_init_state()
-            if (self.state.get('current_phase') not in ('01-po', '02-design')
+            if (self.state.get('task_engine_v1') is not True
+                    or self.state.get('current_phase') not in ('01-po', '02-design')
                     or self.worktree_dir.exists() or (self.dir_design / 'plan.json').exists()
                     or (self.dir_design / 'design-session/session.json').exists()
                     or (self.dir_dev / 'tasks/task-journal.jsonl').exists()
@@ -5838,7 +5839,7 @@ def _foreground_main(argv=None) -> int:
 
     args = parser.parse_args(argv)
     _warn_obsolete_task_flag(getattr(args, 'ticket', '-'))
-    if args.subcommand in {'run', 'start', 'resume', 'approve', 'reject', 'plan', 'design'}:
+    if args.subcommand in {'run', 'start', 'resume', 'approve', 'reject', 'plan', 'design', 'po'}:
         command = getattr(args, 'entrypoint', 'run') if args.subcommand == 'resume' else args.subcommand
         importing = args.subcommand == 'design' and getattr(args, 'import_from_ticket', None)
         check = startup_preflight(args.repo, args.ticket, 'run' if importing else command, args)
