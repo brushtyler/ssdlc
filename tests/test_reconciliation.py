@@ -452,10 +452,22 @@ class FailureHistoryTests(ReconciliationTests):
         self.select(staged)
         root = runtime_root(self.target)
         envelope = LimitsStore(root)._load(repair=False)[0]
+        failure = TaskJournal(root / '03-dev/tasks').peek()['tasks']['T1']['failed_attempts'][0]
+        self.assertEqual(file_hash(root / '03-dev/tasks' / failure['diff_ref']), failure['diff_sha256'])
         calls = []
         def same_repair(task, attempt, prompt, workspace):
             calls.append(attempt)
-            self.assertIn('origin-history/T1/attempt-1/implementation.diff', prompt)
+            current_failure = scheduler.state['tasks']['T1']['failed_attempts'][-1]
+            context = json.loads(prompt.split('\nREPAIR CONTEXT:\n')[1])
+            self.assertEqual(context['attempt'], 1)
+            self.assertEqual(context['category'], 'CHECK_FAILURE')
+            self.assertEqual([{key: check[key] for key in
+                              ('check_id', 'exit_code', 'empty_suite', 'log_ref', 'sha256')}
+                             for check in context['checks']], current_failure['checks'])
+            self.assertTrue(all(len(check.get('log_excerpt', '')) <= 2000
+                                for check in context['checks']))
+            self.assertNotIn(failure['diff_ref'], prompt)
+            self.assertNotIn(failure['developer_output'], prompt)
             return {'output': 'unchanged repair', 'exit_code': 0, 'quiescent': True}
         scheduler = TaskScheduler(root / 'worktree', root / '03-dev/tasks', self.new_plan,
             json.loads((root / '00-recon/quality-contract.json').read_text()), self.context,

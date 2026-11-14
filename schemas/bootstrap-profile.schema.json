@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "profile_id": {
+      "enum": [
+        "python-unittest",
+        "python-pytest"
+      ]
+    },
+    "window_tasks": {
+      "type": "integer",
+      "const": 1
+    }
+  },
+  "required": [
+    "schema_version",
+    "profile_id",
+    "window_tasks"
+  ],
+  "additionalProperties": false
+}

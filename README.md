@@ -58,7 +58,7 @@ flowchart TD
 | **M** | standard feature | adds pair design, multi-model review and docs |
 | **L** | high risk or architectural | full pipeline, including STRIDE threat model, AppSec and ops runbooks |
 
-With **task mode** enabled (`SSDLC_ENABLE_TASK_BREAKDOWN=true`), design produces a reviewed **task plan**: a DAG of tasks with file manifests, owned requirements and automated checks. Development then runs one task at a time:
+**Every new run uses task mode.** Design produces a reviewed **task plan**: a DAG of tasks with file manifests, owned requirements and automated checks. Development then runs one task at a time:
 
 1. The host checks the baseline at a clean checkpoint, then dispatches the developer into a disposable workspace.
 2. The candidate is **captured** and verified by the host. Only passing checks create a Git checkpoint.
@@ -163,7 +163,7 @@ The settings used most often:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `SSDLC_EXECUTION_MODE` | `docker` | `docker` (isolated) or `local` (trusted code only) |
-| `SSDLC_ENABLE_TASK_BREAKDOWN` | `false` | Enables task mode: task plan, scheduler and structured gates |
+| `SSDLC_ENABLE_TASK_BREAKDOWN` | Ignored | Obsolete; all new runs use the task plan, scheduler and structured gates |
 | `SSDLC_DEFAULT_TIER` | `auto` | Risk tier when `--tier` is not given |
 | `SSDLC_<ROLE>_ENGINE` / `_MODEL` | `auto` | Per-role routing override |
 | `SSDLC_BUDGET_CAP_USD` | S $3, M $6, L $20 | Reported-spend circuit breaker |
@@ -219,6 +219,8 @@ Recovered runs keep each generation under `<ticket>/execution-runtimes/<id>/`, s
 
 ## Documentation
 
+All new runs use the task scheduler, including Tier S. See [unified execution and bootstrap](docs/task-mode.md#unified-execution-and-greenfield-bootstrap), [corrective bounce](docs/bounce-preview.md) and [native gate convergence](docs/native-gate-convergence.md).
+
 ### Using SSDLC
 
 | Document | Content |
@@ -239,7 +241,7 @@ Recovered runs keep each generation under `<ticket>/execution-runtimes/<id>/`, s
 | [Historical reconciliation](docs/historical-reconciliation.md) | Admitting a stopped I1 generation to native development with cumulative limits |
 | [Scope amendments](docs/scope-amendments.md) | Recovering a task stopped on `SCOPE_REQUIRED` after a checkpoint |
 | [Developer feedback](docs/developer-feedback.md) | Scope diagnosis, reviewed feedback roles, delegated amendments, GitHub projections (#39) |
-| [Native gate convergence](docs/native-gate-convergence.md) | Candidate checks collected before the reviews that need them (opt-in) |
+| [Native gate convergence](docs/native-gate-convergence.md) | Candidate checks collected before the reviews that need them |
 | [Bounce preview](docs/bounce-preview.md) | Read-only preview of a targeted bounce from a gate |
 
 ### Plans
@@ -250,7 +252,7 @@ Recovered runs keep each generation under `<ticket>/execution-runtimes/<id>/`, s
 
 ## Project status and limitations
 
-- **Task mode is opt-in** and remains under active development. Recovery transitions, scope amendments and the feedback workflow apply to task-mode runs.
+- **Task mode is the default for all new runs**, including Tier S. Recovery transitions, scope amendments and the feedback workflow apply to task-mode runs.
 - **No automatic merge.** Approval and every limit extension are explicit operator actions.
 - **Integrity checks are not authentication.** SHA-256 hashes detect changes at checkpoints. They do not protect against a host user who rewrites both evidence and hashes, and there is no continuous containment (workstream B).
 - **Cost accounting is partial.** Claude reports CLI estimates and OpenRouter reports metered usage. Subscription CLIs such as Codex do not report a cost; see [#43](https://github.com/brushtyler/ssdlc/issues/43) and [#14](https://github.com/brushtyler/ssdlc/issues/14).

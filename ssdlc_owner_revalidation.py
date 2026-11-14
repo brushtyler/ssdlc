@@ -180,6 +180,31 @@ def coverage_ok(scheduler, value, review, changed):
     return True
 
 
+def _current_owner_checkpoint(scheduler, tid, frozen):
+    """A frozen attribution is historical; a later native repair has its own receipt."""
+    record = scheduler.state['tasks'][tid]
+    if record.get('commit') == frozen['commit']:
+        return True
+    repairs = record.get('repairs', [])
+    if not repairs:
+        return False
+    txn_id = repairs[-1]['txn_id']
+    if not any(inv['reason'] == 'corrective:' + txn_id and tid in inv['roots']
+               for inv in scheduler.state.get('invalidations', [])):
+        return False
+    if not scheduler._evidence_valid(record, tid):
+        return False
+    from ssdlc_tasks import TaskJournal
+    raw = scheduler.journal.path.read_bytes()
+    TaskJournal._replay(raw)
+    events = [json.loads(line) for line in raw.splitlines()]
+    return any(event['event'] == 'TASK_COMPLETED'
+               and event['state']['tasks'][tid].get('commit') == record.get('commit')
+               and event['state']['tasks'][tid].get('capture_sha256') == record.get('capture_sha256')
+               and event['state']['tasks'][tid].get('repairs', [{}])[-1].get('txn_id') == txn_id
+               for event in events)
+
+
 def verify(scheduler, task, record, directory, changed):
     authority = scheduler.scope_reconciliations.get(task['task_id'], {}).get('owner_revalidation')
     if not authority:
@@ -193,7 +218,7 @@ def verify(scheduler, task, record, directory, changed):
     for tid in owners:
         if (tasks.get(tid) != value['owners'][tid]['task']
                 or scheduler.state['tasks'][tid]['status'] != 'COMPLETED'
-                or scheduler.state['tasks'][tid].get('commit') != value['owners'][tid]['commit']):
+                or not _current_owner_checkpoint(scheduler, tid, value['owners'][tid])):
             raise TaskError('Owner contract or completed checkpoint changed')
     runs = record.setdefault('owner_revalidations', [])
     for previous in runs:

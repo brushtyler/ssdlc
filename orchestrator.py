@@ -45,6 +45,8 @@ import ssdlc_gate_reports as candidate_reports
 
 OPS_DOCS_TEXT_CAP = 60000
 OPS_DOCS_COVERAGE_NOTE = "When full_audit_coverage_permitted is false, you must not claim complete audit coverage."
+import ssdlc_bootstrap as bootstrap
+import ssdlc_corrective as corrective
 import ssdlc_bounce as bounce
 from ssdlc_bounce import request_identity
 from ssdlc_catalogues import CatalogueError, requirement_catalogue
@@ -54,7 +56,7 @@ from ssdlc_transitions import runtime_root
 
 from ssdlc_tasks import (
     PlanError, TaskError, DevelopmentBlocked, ResourceLimitError, TaskPlanValidator, TaskScheduler, TaskJournal, atomic_json,
-    confined, digest, file_hash, git, ticket_lock, validate_document, log_retry_reason, diagnostic_excerpt, test_suite_is_empty, parse_plan_output,
+    confined, digest, file_hash, git, ticket_lock, validate_document, log_retry_reason, diagnostic_excerpt, test_suite_is_empty, test_check_is_empty, parse_plan_output,
 )
 
 
@@ -128,6 +130,10 @@ def _supervision_event(event_type, **fields):
         # A missing finish leaves an open dispatch; exception paths keep their
         # original exception. The dispatcher requires a durable start below.
         return False
+
+
+def _corrective_fault(point):
+    """Inert corrective persistence fault seam."""
 
 
 def _supervision_fault(point):
@@ -311,9 +317,7 @@ def _resume_git(repo, *args):
     return proc.stdout.rstrip('\n')
 
 
-def _resume_plan_refusal(repo, root, state, task_mode):
-    if not task_mode:
-        raise PlanError("Planning resume requires task breakdown")
+def _resume_plan_refusal(repo, root, state):
     if (root / "worktree").exists() or ((root / "03-dev") / "tasks/task-journal.jsonl").exists():
         raise PlanError("Execution already started; explicit plan migration is required")
     gates = [g for g in state.get("gate_history", []) if g['gate'] == 'PAIR_DESIGN_GATE']
@@ -329,7 +333,7 @@ def _resume_plan_refusal(repo, root, state, task_mode):
             raise PlanError(f"Planning input is missing, unapproved or changed: {name}")
 
 
-def _resume_design_refusal(repo, root, state, task_mode, read_git=None):
+def _resume_design_refusal(repo, root, state, read_git=None):
     read_git = read_git or _resume_git
     if (root / "worktree").exists() or ((root / "02-design") / 'plan.json').exists():
         raise PlanError('Planning or execution already started; explicit design migration required')
@@ -338,8 +342,7 @@ def _resume_design_refusal(repo, root, state, task_mode, read_git=None):
         if not history or not history[-1]['passed']:
             raise PlanError(f'Design requires approved upstream gate: {gate}')
     required = ['00-recon/context-and-blast-radius.md', '01-po/requirements.md']
-    if task_mode:
-        required.append('00-recon/quality-contract.json')
+    required.append('00-recon/quality-contract.json')
     for name in required:
         meta = state.get('artifacts', {}).get(name)
         path = root / name
@@ -349,19 +352,184 @@ def _resume_design_refusal(repo, root, state, task_mode, read_git=None):
         raise PlanError('Design requires the unchanged clean target baseline')
 
 
-def _resume_run_refusal(root, state, task_mode, from_phase, baseline_exists=True):
+def _resume_run_refusal(root, state, from_phase, baseline_exists=True):
     if from_phase not in ('00-recon', '03-dev'):
         raise TaskError('Bootstrap task mode resumes from 03-dev; skipping later gates requires Step 3 attestations')
     if from_phase == '03-dev' and not baseline_exists:
         raise TaskError('Resume requires baseline state')
-    if task_mode and from_phase == '00-recon' and (root / '03-dev/tasks/task-journal.jsonl').exists():
+    if from_phase == '00-recon' and (root / '03-dev/tasks/task-journal.jsonl').exists():
         raise TaskError('Existing task execution must resume with --from-phase 03-dev to preserve its approved inputs')
+
+
+
+LEGACY_COUNTERS = {'legacy_refusals': 0}
+
+
+def legacy_message(ticket):
+    return (f'Run {ticket} is a legacy run and is not executable. Start a new run: '
+            'ssdlc run --ticket <NEW_TICKET> --goal "<goal>" --repo <repo>')
+
+
+def verify_signoff_evidence(repo, root, state, worktree=None):
+    """Read native final-candidate approvals; mutable status is not authority."""
+    root = Path(root)
+    worktree = Path(worktree) if worktree is not None else root / 'worktree'
+    for phase in ('04-review', '05-qa', '05b-appsec'):
+        attempts = []
+        for path in (root / phase / 'provenance').glob('attempt-*/roster.json'):
+            match = re.fullmatch(r'attempt-([1-9][0-9]*)', path.parent.name)
+            if match is None:
+                raise TaskError('Global gate approval provenance is malformed: ' + phase)
+            attempts.append(int(match.group(1)))
+        if not attempts:
+            raise TaskError('Verified global gate approval evidence is missing: ' + phase)
+        evidence = bounce.read_evidence(root=root, state=state, repo=Path(repo),
+            worktree=worktree, phase=phase, attempt=max(attempts))
+        if (evidence['status'] != 'verified' or not evidence['evaluations']
+                or any(row['outcome_class'] != 'approved' for row in evidence['evaluations'])):
+            raise TaskError('Global gate approval evidence is missing, rejected or stale: ' + phase)
+
+
+def execution_compatibility(repo_root, ticket, command):
+    """Classify persisted execution evidence without locks or writable objects."""
+    result = dict(ok=False, cls='legacy', code='legacy_not_executable', reason='incompatible_state')
+    try:
+        if not isinstance(ticket, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', ticket) or ticket in {'.', '..'}:
+            return dict(result, code='unsupported_transition', reason='invalid_ticket')
+        repo = Path(repo_root).resolve()
+        root = repo / '.ssdlc' / ticket
+        root = runtime_root(root)
+        if any(path.is_symlink() for path in [root / 'state.json', root, *root.parents]):
+            raise PlanError('Symlinked execution root')
+        def read(name):
+            path = root / name
+            if any(part.is_symlink() for part in [root, *path.parents, path]):
+                raise PlanError('Symlinked execution evidence')
+            return path.read_bytes()
+        if not (root / 'state.json').exists():
+            if any((root / name).exists() or (root / name).is_symlink() for name in (
+                    'worktree', '03-dev/tasks/task-journal.jsonl', '03-dev/implementation.diff',
+                    '00-recon/quality-contract.json', '01-po/requirements.md', '02-design/plan.json')):
+                return dict(result, reason='missing_state_with_execution_evidence')
+            return dict(ok=command in {'run', 'start'}, cls='new_run',
+                        code='compatible' if command in {'run', 'start'} else 'no_such_run', reason='no_such_run')
+        state = json.loads(read('state.json'))
+        def registered(name):
+            data = read(name)
+            if hashlib.sha256(data).hexdigest() != state.get('artifacts', {}).get(name, {}).get('sha256'):
+                raise PlanError('Unregistered execution evidence')
+            return json.loads(data)
+        if state.get('task_breakdown') is True:
+            try:
+                quality = registered('00-recon/quality-contract.json')
+                plan = registered('02-design/plan.json')
+                validate_document('quality-contract', quality)
+                validate_document('plan', plan)
+                for name in CONTEXT_NAMES:
+                    path = root / name
+                    if any(part.is_symlink() for part in [path, *path.parents]):
+                        raise PlanError('Symlinked context')
+                    if path.exists() and hashlib.sha256(read(name)).hexdigest() != state.get('artifacts', {}).get(name, {}).get('sha256'):
+                        raise PlanError('Changed context')
+                data = read('03-dev/tasks/task-journal.jsonl')
+                journal, sequence, _ = TaskJournal._replay(data[:data.rfind(b'\n') + 1])
+                if not journal or sequence < 1 or journal.get('inputs_sha256') != digest(dict(plan=plan, quality=quality, context=build_task_context(root))):
+                    raise PlanError('Unsealed task inputs')
+                if command == 'approve' and (state.get('status') != 'AWAITING_SUPERVISOR_SIGNOFF' or
+                        not journal.get('tasks') or any(t.get('status') != 'COMPLETED' for t in journal['tasks'].values()) or
+                        not state.get('task_verified_head') or state['task_verified_head'] != journal.get('expected_head')):
+                    raise PlanError('Incomplete task approval')
+                if command == 'approve':
+                    verify_signoff_evidence(repo, root, state)
+                return dict(ok=True, cls='sealed_task', code='compatible', reason='compatible')
+            except (OSError, ValueError, KeyError, TypeError, AttributeError, TaskError):
+                pass
+        if (state.get('task_engine_v1') is True and
+                not any((root / name).exists() or (root / name).is_symlink() for name in
+                        ('worktree', '03-dev/tasks', '03-dev/implementation.diff')) and
+                command in {'run', 'start', 'plan', 'design', 'po'}):
+            return dict(ok=True, cls='pre_execution', code='compatible', reason='compatible')
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, TaskError):
+        pass
+    return result
+
+
+def _discover_checks(repo):
+    repo = Path(repo)
+    checks = []
+    test_files = list((repo / "tests").rglob("test_*.py"))
+    if test_files:
+        pytest_style = any(re.search(r"^def test_|^import pytest|^from pytest", p.read_text(), re.M) for p in test_files)
+        argv = ["python3", "-m", "pytest", "tests"] if pytest_style else ["python3", "-m", "unittest", "discover", "-s", "tests"]
+        checks.append({"check_id": "CHECK-TESTS", "argv": argv, "cwd": ".", "timeout_sec": 300, "kind": "test", "required": True})
+    package = repo / "package.json"
+    if package.exists():
+        scripts = json.loads(package.read_text()).get("scripts", {})
+        for script, kind in (("test", "test"), ("lint", "lint"), ("typecheck", "types")):
+            if script in scripts:
+                checks.append({"check_id": f"CHECK-NPM-{script.upper()}", "argv": ["npm", "run", script], "cwd": ".", "timeout_sec": 300, "kind": kind, "required": True})
+    pyproject = ((repo / "pyproject.toml").read_text() if (repo / "pyproject.toml").exists() else "")
+    for marker, name, argv, kind in (
+        ("[tool.ruff", "RUFF", ["python3", "-m", "ruff", "check", "."], "lint"),
+        ("[tool.mypy", "MYPY", ["python3", "-m", "mypy", "."], "types"),
+    ):
+        if marker in pyproject:
+            checks.append({"check_id": f"CHECK-{name}", "argv": argv, "cwd": ".", "timeout_sec": 300, "kind": kind, "required": True})
+    return checks
+
+
+def _bootstrap_run_invocation(method):
+    """Limit a freshly sealed exemption to this foreground invocation."""
+    @functools.wraps(method)
+    def wrapped(self, *args, **kwargs):
+        bootstrap.require_unproven_run_is_current(self.ssdlc_root)
+        self._bootstrap_invocation_active = True
+        self._bootstrap_contract_captured = False
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self._bootstrap_invocation_active = False
+            self._bootstrap_contract_captured = False
+    return wrapped
+
+
+def startup_preflight(repo_root, ticket, command, args=None):
+    result = execution_compatibility(repo_root, ticket, command)
+    _log_mode_decision(ticket, command, result)
+    if result['ok']:
+        try:
+            root = runtime_root(Path(repo_root) / '.ssdlc' / str(ticket))
+            bootstrap.require_unproven_run_is_current(root)
+        except bootstrap.BootstrapError as exc:
+            return dict(ok=False, cls=result['cls'], code='bootstrap_ineligible', reason=exc.code)
+        except PlanError:
+            return dict(ok=False, cls='legacy', code='legacy_not_executable', reason='invalid_persisted_contract')
+    phase = args.get('from_phase') if isinstance(args, dict) else getattr(args, 'from_phase', None)
+    if result['cls'] == 'pre_execution' and command in {'run', 'start'} and phase not in {None, '00-recon'}:
+        result = dict(ok=False, cls='legacy', code='legacy_not_executable', reason='execution_not_started')
+    if result['ok'] and result['cls'] in {'new_run', 'pre_execution'}:
+        sealed = Path(repo_root) / '.ssdlc' / str(ticket) / '00-recon/quality-contract.json'
+        if not sealed.exists():
+            try:
+                profile = bootstrap.load_profile(Path(repo_root), run_id=ticket)
+                if profile is not None:
+                    base = git(Path(repo_root), 'rev-parse', 'HEAD')
+                    state_path = Path(repo_root) / '.ssdlc' / str(ticket) / 'state.json'
+                    if state_path.exists():
+                        base = json.loads(state_path.read_text())['base_commit']
+                    result['bootstrap'] = bootstrap.decide(Path(repo_root), base, profile, run_id=ticket)
+            except bootstrap.BootstrapError as exc:
+                return dict(ok=False, cls=result['cls'], code='bootstrap_ineligible', reason=exc.code)
+    return result
 
 
 def resume_compatibility(repo_root, ticket, entrypoint, from_phase=None, env=None):
     """Read-only transition check; never activates runtime or constructs a controller."""
     if not isinstance(ticket, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', ticket) or ticket in {'.', '..'}:
         return dict(ok=False, code='unsupported_transition', reason='invalid_ticket')
+    compatible = startup_preflight(repo_root, ticket, entrypoint, {'from_phase': from_phase})
+    if not compatible['ok']:
+        return compatible
     repo = Path(repo_root).resolve()
     root = repo / '.ssdlc' / ticket
     try:
@@ -373,16 +541,65 @@ def resume_compatibility(repo_root, ticket, entrypoint, from_phase=None, env=Non
             root = resolved
         path = root / 'state.json'
         state = json.loads(path.read_text()) if path.is_file() else {}
-        task_mode = bool(state.get('task_breakdown')) or (os.environ if env is None else env).get('SSDLC_ENABLE_TASK_BREAKDOWN', 'false').lower() == 'true'
         if entrypoint == 'run':
-            _resume_run_refusal(root, state, task_mode, from_phase or '00-recon', path.is_file())
+            _resume_run_refusal(root, state, from_phase or '00-recon', path.is_file())
         elif entrypoint in {'plan', 'design'}:
-            globals()['_resume_' + entrypoint + '_refusal'](repo, root, state, task_mode)
+            globals()['_resume_' + entrypoint + '_refusal'](repo, root, state)
         else:
             raise PlanError('Unsupported resume entrypoint')
         return dict(ok=True, code='compatible', reason='compatible')
     except (TaskError, OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
         return dict(ok=False, code='unsupported_transition', reason='incompatible_state')
+
+
+OPTIONAL_FALLBACK = "(Skipped in Tier S)"
+CONTEXT_NAMES = ("01-po/requirements.md", "02-design/adr.md", "02-design/threat-model.md")
+_OBSOLETE_FLAG_WARNED = False
+
+
+def build_task_context(ssdlc_root: Path) -> Dict[str, str]:
+    """Read the exact context values sealed by the task scheduler."""
+    return {name: (ssdlc_root / name).read_text(encoding="utf-8")
+            if (ssdlc_root / name).exists() else OPTIONAL_FALLBACK for name in CONTEXT_NAMES}
+
+
+def _stage_log_field(value, limit=128):
+    value = TaskScheduler._scrub_prompt(str(value))
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', value):
+        return '-'
+    return value if len(value) <= limit else value[:limit-13] + '-' + digest(value)[:12]
+
+
+def _log_mode_decision(ticket, command, result):
+    logging.getLogger(__name__).info(
+        'mode-decision run=%s txn=- preview=- tasks=- command=%s class=%s decision=%s reason=%s',
+        _stage_log_field(ticket), _stage_log_field(command), _stage_log_field(result.get('cls', '-')),
+        'task' if result.get('ok') else 'refused', _stage_log_field(result.get('reason', result.get('code', '-'))))
+
+
+def _configure_stage_logging():
+    # CLI stage events go to stderr; stdout remains usable for JSON responses.
+    # Limit configuration to host stage loggers rather than changing root logging.
+    for name in (__name__, 'ssdlc_corrective', bootstrap.__name__):
+        logger = logging.getLogger(name)
+        if not any(getattr(handler, '_ssdlc_stage_handler', False) for handler in logger.handlers):
+            handler = logging.StreamHandler(sys.stderr)
+            handler._ssdlc_stage_handler = True
+            formatter = logging.Formatter('%(asctime)sZ %(message)s', datefmt='%Y-%m-%dT%H:%M:%S')
+            formatter.converter = time.gmtime
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+
+
+def _warn_obsolete_task_flag(ticket='-') -> None:
+    global _OBSOLETE_FLAG_WARNED
+    if 'SSDLC_ENABLE_TASK_BREAKDOWN' in os.environ and not _OBSOLETE_FLAG_WARNED:
+        _OBSOLETE_FLAG_WARNED = True
+        logging.getLogger(__name__).warning(
+            'obsolete-flag name=SSDLC_ENABLE_TASK_BREAKDOWN action=ignored run=%s txn=- preview=- tasks=-',
+            _stage_log_field(ticket))
 
 
 def utc_now() -> str:
@@ -1896,6 +2113,16 @@ class SSDLCOrchestrator:
         self.issue_id = issue_id or self.state.get("issue_id")
 
     def preview_bounce(self, phase: str, attempt: int) -> dict:
+        """Acquire the ticket lock once; the pipeline may use the locked helper."""
+        try:
+            bounce._safe_path(self.ssdlc_root, 'ticket.lock')
+            with ticket_lock(getattr(self, 'ticket_lock_path', self.ssdlc_root / 'ticket.lock')):
+                return self._preview_bounce_locked(phase, attempt)
+        except (TaskError, OSError, bounce.BounceError):
+            return dict(status='blocked', execution_authorized=False,
+                        blockers=[{'code': 'integrity_mismatch'}])
+
+    def _preview_bounce_locked(self, phase: str, attempt: int) -> dict:
         """Host-only preview of one exact task gate; never run pipeline roles."""
         counters = getattr(self, 'preview_counters', None)
         if counters is None:
@@ -1906,56 +2133,56 @@ class SSDLCOrchestrator:
             if (not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', self.ticket_id)
                     or phase not in bounce.PHASES or type(attempt) is not int or attempt < 1):
                 raise bounce.BounceError('malformed_record')
-            # Acquire before loading. Do not initialize or migrate legacy state.
+            # The caller holds ticket_lock. Never initialize or migrate legacy state.
             bounce._safe_path(self.ssdlc_root, 'ticket.lock')
-            with ticket_lock(getattr(self, 'ticket_lock_path', self.ssdlc_root / 'ticket.lock')):
-                self.state = json.loads(bounce._safe_path(self.ssdlc_root, 'state.json').read_text())
-                initial = bounce.read_evidence(root=self.ssdlc_root, state=self.state,
-                    repo=self.repo_root, worktree=self.worktree_dir, phase=phase, attempt=attempt)
-                if initial['status'] != 'verified':
-                    result = {k: initial[k] for k in ('status', 'execution_authorized', 'blockers')}
-                else:
-                    controller_root = Path(__file__).resolve().parent
-                    if controller_root == self.worktree_dir.resolve():
-                        raise bounce.BounceError('controller_unpinned')
-                    contract_ref = '00-recon/controller-contract.json'
-                    contract_path = bounce._safe_path(self.ssdlc_root, contract_ref)
-                    meta = self.state['artifacts'].get(contract_ref)
-                    if not meta or not contract_path.is_file() or file_hash(contract_path) != meta['sha256']:
-                        raise bounce.BounceError('controller_integrity')
-                    controller = json.loads(contract_path.read_text())
+            self.state = json.loads(bounce._safe_path(self.ssdlc_root, 'state.json').read_text())
+            initial = bounce.read_evidence(root=self.ssdlc_root, state=self.state,
+                repo=self.repo_root, worktree=self.worktree_dir, phase=phase, attempt=attempt)
+            if initial['status'] != 'verified':
+                result = {k: initial[k] for k in ('status', 'execution_authorized', 'blockers')}
+            else:
+                controller_root = Path(__file__).resolve().parent
+                if controller_root == self.worktree_dir.resolve():
+                    raise bounce.BounceError('controller_unpinned')
+                contract_ref = '00-recon/controller-contract.json'
+                contract_path = bounce._safe_path(self.ssdlc_root, contract_ref)
+                meta = self.state['artifacts'].get(contract_ref)
+                if not meta or not contract_path.is_file() or file_hash(contract_path) != meta['sha256']:
+                    raise bounce.BounceError('controller_integrity')
+                controller = json.loads(contract_path.read_text())
+                assert_controller(controller_root, controller)
+                repo_before = (git(self.repo_root, 'rev-parse', 'HEAD'),
+                               git(self.repo_root, 'status', '--porcelain'),
+                               git(self.repo_root, 'diff', '--binary', 'HEAD'))
+                frozen = bounce.preview_snapshot(self.ssdlc_root, self.state)
+                # The revision binds consumed evidence, not unrelated phases
+                # that may register their own outputs between previews.
+                sources = dict(initial['source_hashes'])
+                sources[contract_ref] = meta['sha256']
+
+                def verify():
+                    fresh = json.loads(bounce._safe_path(self.ssdlc_root, 'state.json').read_text())
                     assert_controller(controller_root, controller)
-                    repo_before = (git(self.repo_root, 'rev-parse', 'HEAD'),
-                                   git(self.repo_root, 'status', '--porcelain'),
-                                   git(self.repo_root, 'diff', '--binary', 'HEAD'))
-                    frozen = bounce.preview_snapshot(self.ssdlc_root, self.state)
-                    # The revision binds consumed evidence, not unrelated phases
-                    # that may register their own outputs between previews.
-                    sources = dict(initial['source_hashes'])
-                    sources[contract_ref] = meta['sha256']
+                    if repo_before != (git(self.repo_root, 'rev-parse', 'HEAD'),
+                                       git(self.repo_root, 'status', '--porcelain'),
+                                       git(self.repo_root, 'diff', '--binary', 'HEAD')):
+                        raise bounce.BounceError('source_changed')
+                    if bounce.preview_snapshot(self.ssdlc_root, fresh) != frozen:
+                        raise bounce.BounceError('snapshot_mismatch')
+                    evidence = bounce.read_evidence(root=self.ssdlc_root, state=fresh,
+                        repo=self.repo_root, worktree=self.worktree_dir, phase=phase, attempt=attempt)
+                    if evidence != initial:
+                        raise bounce.BounceError('postcheck_failed')
 
-                    def verify():
-                        fresh = json.loads(bounce._safe_path(self.ssdlc_root, 'state.json').read_text())
-                        assert_controller(controller_root, controller)
-                        if repo_before != (git(self.repo_root, 'rev-parse', 'HEAD'),
-                                           git(self.repo_root, 'status', '--porcelain'),
-                                           git(self.repo_root, 'diff', '--binary', 'HEAD')):
-                            raise bounce.BounceError('source_changed')
-                        if bounce.preview_snapshot(self.ssdlc_root, fresh) != frozen:
-                            raise bounce.BounceError('snapshot_mismatch')
-                        evidence = bounce.read_evidence(root=self.ssdlc_root, state=fresh,
-                            repo=self.repo_root, worktree=self.worktree_dir, phase=phase, attempt=attempt)
-                        if evidence != initial:
-                            raise bounce.BounceError('postcheck_failed')
-
-                    proposal = bounce.plan_bounce(repo=self.repo_root, artifacts=self.ssdlc_root,
-                        plan=initial['plan'], requirements_text=initial['requirements_text'],
-                        quality=initial['quality'], reviewed_commit=initial['reviewed_commit'],
-                        evaluations=initial['evaluations'], phase=phase, attempt=attempt)
-                    result = bounce.publish_preview(root=self.ssdlc_root, state=self.state,
-                        proposal=proposal, sources=sources, verify=verify,
-                        record_artifact=self.record_artifact)
-                    counters[result['publication']] += 1
+                proposal = bounce.plan_bounce(repo=self.repo_root, artifacts=self.ssdlc_root,
+                    plan=initial['plan'], requirements_text=initial['requirements_text'],
+                    quality=initial['quality'], reviewed_commit=initial['reviewed_commit'],
+                    evaluations=initial['evaluations'], phase=phase, attempt=attempt)
+                proposal['journal_head'] = TaskJournal.head(self.ssdlc_root / '03-dev/tasks/task-journal.jsonl')
+                result = bounce.publish_preview(root=self.ssdlc_root, state=self.state,
+                    proposal=proposal, sources=sources, verify=verify,
+                    record_artifact=self.record_artifact)
+                counters[result['publication']] += 1
         except bounce.BounceError as exc:
             result = dict(status='blocked', execution_authorized=False, blockers=[{'code': exc.code}])
         except bounce.FindingsError:
@@ -1981,8 +2208,780 @@ class SSDLCOrchestrator:
             len(plan.get('repair_roots', [])), len(plan.get('revalidation_tasks', [])), len(reasons))
         return result
 
-    def _task_mode(self) -> bool:
-        return bool(self.state.get("task_breakdown")) or os.environ.get("SSDLC_ENABLE_TASK_BREAKDOWN", "false").lower() == "true"
+    def _corrective_stage(self, stage, preview=None, txn_id='-', tasks=(), reason='-'):
+        reason = _stage_log_field(reason, 64)
+        counters = getattr(self, 'corrective_counters', None)
+        if counters is None:
+            counters = self.corrective_counters = {}
+        metric = {'created': 'corrective_transactions_created',
+                  'invalidated': 'corrective_transactions_executed',
+                  'refused': 'corrective_transactions_refused',
+                  'replayed': 'corrective_transactions_replayed',
+                  'interrupted': 'corrective_transactions_interrupted',
+                  'reconciled': 'corrective_transactions_reconciled',
+                  'repair_dispatched': 'corrective_repair_attempts'}.get(stage, 'corrective_' + stage)
+        if stage == 'refused':
+            counts = counters.setdefault(metric, {})
+            counts[reason] = counts.get(reason, 0) + 1
+        else:
+            counters[metric] = counters.get(metric, 0) + 1
+        task_ids = list(tasks)
+        logging.getLogger('ssdlc_corrective').info(
+            'corrective stage=%s run=%s txn=%s preview=%s tasks=%s omitted_tasks=%d reason=%s',
+            _stage_log_field(stage, 64), _stage_log_field(getattr(self, 'ticket_id', '-')),
+            _stage_log_field(txn_id, 64)[:12], _stage_log_field((preview or {}).get('revision', '-'), 64)[:12],
+            ','.join(_stage_log_field(tid, 64) for tid in task_ids[:32]) or '-', max(0, len(task_ids)-32), reason)
+
+
+    @staticmethod
+    def _corrective_preview_code(preview):
+        payload = preview.get('plan', {})
+        codes = {b.get('code') for b in payload.get('blockers', []) + preview.get('blockers', [])}
+        if codes & {'control_failed', 'scanner_failed', 'tool_failure', 'scanner_failure'}:
+            return 'gate_failure_not_repairable'
+        if payload.get('diagnosis') or 'evaluation_diagnostic' in codes:
+            return 'diagnostic_only'
+        if payload.get('replanning'):
+            return 'replan_required'
+        if payload.get('impact_analysis'):
+            return 'impact_ambiguous'
+        if preview.get('status') != 'ready-for-later-executor':
+            return 'diagnostic_only' if preview.get('status') == 'diagnostic' else 'preview_not_candidates'
+        return None
+
+    def _corrective_round(self, phase, attempt):
+        """Registered rejection entry; the caller owns ticket_lock."""
+        preview = self._preview_bounce_locked(phase, attempt)
+        return self._execute_corrective(phase, attempt, preview)
+
+    def _create_corrective(self, phase, attempt, preview):
+        """Durably bind verified rejection evidence before exact-root invalidation."""
+        from ssdlc_recovery import RecoveryStop
+        txn_id = '-'
+        try:
+            self.state = json.loads(bounce._safe_path(self.ssdlc_root, 'state.json').read_text())
+            self.check_budget_circuit_breaker()
+            code = self._corrective_preview_code(preview)
+            if code:
+                raise corrective.CorrectiveError(code, 'explicit invalidation requires registered substantive gate evidence'
+                                                 if code == 'preview_not_candidates' else '')
+            payload = preview.get('plan', {})
+            revision = preview.get('revision')
+            if (phase not in bounce.PHASES or type(attempt) is not int or attempt < 1
+                    or not isinstance(revision, str) or not re.fullmatch('[0-9a-f]{64}', revision)):
+                raise corrective.CorrectiveError('preview_tampered')
+            base = f'bounce-preview/{phase}/attempt-{attempt}/{revision}'
+            preview_ref, summary_ref = base + '/plan.json', base + '/summary.txt'
+
+            def registered(ref, expected=None):
+                path = bounce._safe_path(self.ssdlc_root, ref)
+                if not path.is_file():
+                    raise corrective.CorrectiveError('evidence_missing')
+                sha = file_hash(path)
+                if self.state.get('artifacts', {}).get(ref, {}).get('sha256') != sha or (expected and expected != sha):
+                    raise corrective.CorrectiveError('evidence_mutated')
+                return dict(ref=ref, sha256=sha)
+
+            preview_binding = registered(preview_ref)
+            summary_binding = registered(summary_ref)
+            published = json.loads(bounce._safe_path(self.ssdlc_root, preview_ref).read_text())
+            unsigned = dict(published)
+            unsigned.pop('revision', None)
+            if (published != payload or bounce._sha(bounce.canonical_json(unsigned).encode()) != revision
+                    or payload.get('revision') != revision or payload.get('phase') != phase
+                    or payload.get('attempt') != attempt or preview.get('execution_authorized') is not False
+                    or payload.get('execution_authorized') is not False):
+                raise corrective.CorrectiveError('preview_tampered')
+            if payload.get('status') != 'candidates' or payload.get('blockers') or not payload.get('repair_roots'):
+                raise corrective.CorrectiveError('preview_not_candidates')
+
+            # Verify the published inventory before the reader, so a partial
+            # report/proof swap has the stable evidence_mutated classification.
+            for ref, sha in payload['source_hashes'].items():
+                registered(ref, sha)
+            fresh = bounce.read_evidence(root=self.ssdlc_root, state=self.state,
+                repo=self.repo_root, worktree=self.worktree_dir, phase=phase, attempt=attempt)
+            if fresh['status'] != 'verified':
+                codes = {b['code'] for b in fresh.get('blockers', [])}
+                raise corrective.CorrectiveError('evidence_stale' if 'stale_checkpoint' in codes else 'evidence_mutated')
+            controller = registered('00-recon/controller-contract.json')
+            manifest = corrective.frozen_manifest(payload, fresh, controller)
+            def verify_controller(binding):
+                assert_controller(Path(__file__).resolve().parent,
+                    json.loads(bounce._safe_path(self.ssdlc_root, binding['ref']).read_text()))
+            verify_controller(controller)
+            plan, quality = fresh['plan'], fresh['quality']
+            context = build_task_context(self.ssdlc_root)
+            inputs = digest(dict(plan=plan, quality=quality, context=context))
+            ordered = TaskPlanValidator(self.repo_root, context['01-po/requirements.md'],
+                                        quality, self.ssdlc_root).validate(plan)
+            # Re-derive attribution from verified substantive gate results; no
+            # caller-supplied roots or prose become execution authority.
+            derived = bounce.plan_bounce(repo=self.repo_root, artifacts=self.ssdlc_root,
+                plan=plan, quality=quality, requirements_text=fresh['requirements_text'],
+                reviewed_commit=fresh['reviewed_commit'], evaluations=fresh['evaluations'],
+                phase=phase, attempt=attempt)
+            for key in ('repair_roots', 'revalidation_tasks', 'status', 'blockers'):
+                if derived[key] != payload[key]:
+                    raise corrective.CorrectiveError('preview_tampered')
+            roots = payload['repair_roots']
+            affected = set(roots) | set(payload['revalidation_tasks'])
+            closure = [t['task_id'] for t in ordered if t['task_id'] in affected]
+            journal_path = self.ssdlc_root / '03-dev/tasks/task-journal.jsonl'
+            head = TaskJournal.head(journal_path)
+            if not head or head != payload.get('journal_head'):
+                raise corrective.CorrectiveError('evidence_stale')
+            anchor_state, descendants = TaskJournal.replay_range(journal_path, head['sequence'], head['sha256'])
+            if descendants or anchor_state['inputs_sha256'] != inputs:
+                raise corrective.CorrectiveError('evidence_mutated')
+            if set(anchor_state['tasks']) != {t['task_id'] for t in ordered} or any(
+                    t['status'] != 'COMPLETED' for t in anchor_state['tasks'].values()):
+                raise corrective.CorrectiveError('tasks_not_completed')
+            prior_path = bounce._safe_path(self.ssdlc_root, 'bounce-txn/' + corrective.txn_id_for(
+                dict(payload, preview_revision=revision)) + '/transaction.json')
+            prior = json.loads(prior_path.read_text()) if prior_path.exists() else None
+            if prior:
+                corrective.verify_record(prior)
+            effective = self._corrective_limits(self._open_or_any_txns() + ([prior] if prior else []))
+            limits = dict(prior['limits']) if prior else dict(effective, spend_at_creation_usd=
+                self._corrective_accounted_spend())
+            if any(anchor_state['tasks'][tid]['attempts'] >= effective['max_attempts'] for tid in roots):
+                raise corrective.CorrectiveError('attempts_exhausted')
+            def no_dispatch(*args, **kwargs):
+                raise TaskError('Preparatory corrective driver cannot dispatch')
+            active_limits = getattr(_dispatch_local, 'limits', None)
+            limit_binding = active_limits._load(repair=False)[0]['binding'] if active_limits else {}
+            scheduler = TaskScheduler(self.worktree_dir, journal_path.parent, plan, quality,
+                context, no_dispatch, no_dispatch, budget=self.check_budget_circuit_breaker,
+                max_attempts=effective['max_attempts'],
+                isolate_candidates=bool(anchor_state.get('candidate_isolation', 0)),
+                runtime_identity=anchor_state.get('candidate_runtime', {}),
+                historical_task_floors=limit_binding.get('task_floors', {}),
+                historical_capture_authority=limit_binding.get('historical_capture_bindings_sha256'),
+                recover_timeouts=bool(anchor_state.get('bounded_recovery', 0)))
+            scheduler._assert_candidate_runtime(anchor_state)
+            scheduler.state = anchor_state
+            if scheduler.verify_inventory():
+                raise corrective.CorrectiveError('evidence_mutated')
+            outcomes = []
+            for ref in sorted(manifest['reader']):
+                if ref.endswith('/outcome.json'):
+                    outcome = json.loads(bounce._safe_path(self.ssdlc_root, ref).read_text())
+                    outcomes.append(dict(registered(ref), outcome_class=outcome['outcome_class']))
+            gate_outcomes = [{k: e[k] for k in ('gate', 'identity', 'outcome_class', 'verdict')}
+                             for e in fresh['evaluations']]
+            record_payload = dict(payload, preview_revision=revision, closure=closure)
+            record = corrective.build_record(record_payload, ticket_id=self.ticket_id,
+                preview=dict(preview_binding, revision=revision, summary_ref=summary_ref,
+                             summary_sha256=summary_binding['sha256']),
+                plan=registered('02-design/plan.json'), quality=registered('00-recon/quality-contract.json'),
+                requirements=registered('01-po/requirements.md'),
+                roster=registered(f'{phase}/provenance/attempt-{attempt}/roster.json'),
+                completion=registered(f'{phase}/provenance/attempt-{attempt}/completion.json'),
+                outcomes=outcomes, gate_outcomes=gate_outcomes, evidence_manifest=manifest,
+                inputs_sha256=inputs, journal_head=head, limits=limits, next_gate_attempt=attempt + 1)
+            txn_id = record['txn_id']
+            txn_base = f'bounce-txn/{txn_id}'
+            record_ref = txn_base + '/transaction.json'
+            record_path = bounce._safe_path(self.ssdlc_root, record_ref)
+            if record_path.exists() and record_path.read_bytes() != canon(record):
+                raise corrective.CorrectiveError('txn_record_conflict')
+            txn = None
+            txn_state = dict(status='CREATED', txn_id=txn_id, journal_head=head)
+            # During P0 implementation.diff is still immutable. Layer E can
+            # compare its original registered bytes directly.
+            def verify(invalidated=False):
+                self.state = json.loads(bounce._safe_path(self.ssdlc_root, 'state.json').read_text())
+                registered(preview_ref, preview_binding['sha256'])
+                registered(summary_ref, summary_binding['sha256'])
+                current_inputs = digest(dict(plan=json.loads((self.ssdlc_root / record['plan']['ref']).read_text()),
+                    quality=json.loads((self.ssdlc_root / record['quality']['ref']).read_text()),
+                    context=build_task_context(self.ssdlc_root)))
+                corrective.verify_evidence(record, self.ssdlc_root, self.state['artifacts'],
+                    inputs_sha256=current_inputs, controller_verifier=verify_controller,
+                    captured_diff_ref='03-dev/implementation.diff')
+                if record_path.exists():
+                    expected_record = hashlib.sha256(canon(record)).hexdigest()
+                    if file_hash(record_path) != expected_record:
+                        raise corrective.CorrectiveError('txn_record_conflict')
+                    if record_ref in self.state['artifacts']:
+                        registered(record_ref, expected_record)
+                if txn is not None and txn.path.exists():
+                    TaskJournal.head(txn.path)
+                if scheduler._inventory_problems(anchor_state):
+                    raise corrective.CorrectiveError('evidence_mutated')
+                if invalidated:
+                    corrective.verify_lineage(journal_path, dict(head, event='TXN_CREATED', txn_id=txn_id),
+                                              closure, roots, limits)
+                elif TaskJournal.head(journal_path) != head:
+                    raise corrective.CorrectiveError('evidence_stale')
+                if (git(self.worktree_dir, 'rev-parse', 'HEAD') != record['reviewed_commit']
+                        or anchor_state['expected_head'] != record['reviewed_commit']
+                        or self.state.get('task_verified_head') != record['reviewed_commit']
+                        or git(self.worktree_dir, 'status', '--porcelain')
+                        or git(self.repo_root, 'rev-parse', 'HEAD') != self.state['base_commit']
+                        or plan['base_commit'] != self.state['base_commit']
+                        or git(self.repo_root, 'status', '--porcelain')):
+                    raise corrective.CorrectiveError('source_changed')
+                for task in anchor_state['tasks'].values():
+                    if 'protected_snapshot' in task and scheduler._protected() != task['protected_snapshot']:
+                        raise corrective.CorrectiveError('protected_path_modified')
+
+            verify()
+            for name in ('task-journal.jsonl', 'tasks-state.json'):
+                source = bounce._safe_path(self.ssdlc_root, '03-dev/tasks/' + name)
+                if not source.is_file():
+                    raise corrective.CorrectiveError('evidence_missing')
+                verify()
+                ref = txn_base + '/pre-invalidation/' + name
+                path = bounce._safe_path(self.ssdlc_root, ref)
+                write_or_verify(path, source.read_bytes(), root=self.ssdlc_root)
+                verify()
+                self._register_new(ref, path)
+                _corrective_fault('txn.after_backup_' + name)
+            verify()
+            _corrective_fault('txn.before_record_write')
+            write_or_verify(record_path, canon(record), root=self.ssdlc_root)
+            _corrective_fault('txn.after_record_before_registry')
+            verify()
+            self._register_new(record_ref, record_path)
+            _corrective_fault('txn.after_registry_before_journal')
+            verify()
+            txn = corrective.TransactionJournal(record_path.parent)
+            verify()
+            txn.append('TXN_CREATED', txn_state)
+            _corrective_fault('txn.after_created')
+            self._corrective_stage('created', preview, txn_id, roots)
+            verify()
+            txn_state = dict(txn_state, status='INVALIDATING')
+            txn.append('INVALIDATION_INTENT', txn_state)
+            _corrective_fault('invalidate.after_intent_before_call')
+            self.check_budget_circuit_breaker()
+            verify()
+            scheduler.invalidate(roots, reason='corrective:' + txn_id)
+            _corrective_fault('invalidate.after_call_before_ack')
+            verify(invalidated=True)
+            position = TaskJournal.head(journal_path)
+            txn_state = dict(txn_state, status='INVALIDATED', event=position)
+            txn.append('INVALIDATION_APPLIED', txn_state)
+            _corrective_fault('invalidate.after_ack')
+            self._corrective_stage('invalidated', preview, txn_id, roots)
+            return dict(status='INVALIDATED', txn_id=txn_id, repair_roots=roots, event=position)
+        except corrective.CorrectiveError as exc:
+            self._corrective_stage('refused', preview, txn_id, reason=exc.code)
+            raise
+        except RecoveryStop as exc:
+            self._mark_open_txn_interrupted('budget_interrupted' if exc.category == 'LIMIT_REACHED' else 'uncertain_dispatch')
+            raise
+        except (TaskError, bounce.BounceError, OSError, ValueError, KeyError, TypeError):
+            self._corrective_stage('refused', preview, txn_id, reason='evidence_mutated')
+            raise corrective.CorrectiveError('evidence_mutated') from None
+
+    def _execute_corrective(self, phase, attempt, preview):
+        """Execute or reconcile a verified transaction under the pipeline lock."""
+        payload = preview.get('plan', {})
+        identity = dict(payload, preview_revision=preview.get('revision'))
+        if all(identity.get(k) for k in ('phase', 'attempt', 'reviewed_commit', 'preview_revision')):
+            txn_id = corrective.txn_id_for(identity)
+            path = bounce._safe_path(self.ssdlc_root, f'bounce-txn/{txn_id}/transaction.json')
+            if path.exists():
+                record = json.loads(path.read_text())
+                return self._resume_corrective(record)
+        self._create_corrective(phase, attempt, preview)
+        return self._resume_corrective(json.loads(path.read_text()))
+
+    def _reconcile_open_txn(self):
+        """Reconcile durable records before any ordinary scheduler execution."""
+        directory = self.ssdlc_root / 'bounce-txn'
+        if not directory.exists():
+            return None
+        result = None
+        records = []
+        for path in sorted(directory.glob('*/transaction.json')):
+            path = bounce._safe_path(self.ssdlc_root, str(path.relative_to(self.ssdlc_root)))
+            record = json.loads(path.read_text())
+            corrective.verify_record(record)
+            records.append(record)
+        for record in sorted(records, key=lambda r: r['next_gate_attempt']):
+            result = self._resume_corrective(record)
+        return result
+
+    def _resume_corrective(self, record):
+        root = self.ssdlc_root
+        txn_id = record['txn_id']
+        ref = f'bounce-txn/{txn_id}/transaction.json'
+        path = bounce._safe_path(root, ref)
+        corrective.verify_record(record)
+        if path.read_bytes() != canon(record):
+            raise corrective.CorrectiveError('txn_record_conflict')
+        journal = corrective.TransactionJournal(path.parent)
+        state = journal.peek()
+        # Terminal replay performs no load(), registration, snapshot rewrite or guard.
+        if state and state['status'] in ('COMPLETED', 'APPROVED'):
+            if self.state['artifacts'].get(ref, {}).get('sha256') != file_hash(path):
+                raise corrective.CorrectiveError('txn_record_conflict')
+            self._corrective_stage('replayed', preview={'revision': record['preview']['revision']}, txn_id=txn_id, tasks=record['closure'])
+            return dict(state, replayed=True)
+        if state and state['status'] == 'FAILED':
+            raise corrective.CorrectiveError(state['code'])
+        if not state:
+            preview = json.loads(bounce._safe_path(root, record['preview']['ref']).read_text())
+            self._create_corrective(record['phase'], record['attempt'], dict(
+                plan=preview, revision=preview['revision'], execution_authorized=False,
+                status='ready-for-later-executor'))
+            state = journal.peek()
+        journal.load()
+        self._corrective_stage('reconciled', preview={'revision': record['preview']['revision']}, txn_id=txn_id, tasks=record['closure'])
+        if self.state['artifacts'].get(ref, {}).get('sha256') != file_hash(path):
+            raise corrective.CorrectiveError('txn_record_conflict')
+        scheduler, ordered = self._make_task_scheduler(corrective_run=True)
+        scheduler.state = scheduler.journal.peek()
+        limits = self._corrective_limits()
+        scheduler.max_attempts = limits['max_attempts']
+        positions = {'TXN_CREATED', 'INVALIDATION_APPLIED', 'REPAIR_COMMITTED',
+                     'DEPENDENT_VERIFIED', 'REVALIDATION_RUN_FINISHED', 'FINAL_PREFLIGHT_PASSED'}
+        def entries():
+            return [json.loads(line) for line in journal.path.read_bytes().splitlines()]
+        def anchor():
+            for entry in reversed(entries()):
+                if entry['event'] in positions:
+                    value = entry['state']
+                    position = value['journal_head'] if entry['event'] == 'TXN_CREATED' else value['event']
+                    return dict(position, event=entry['event'], txn_id=txn_id,
+                                closure_index=value.get('closure_index', -1))
+            raise corrective.CorrectiveError('txn_record_conflict')
+        manifest = record['evidence_manifest']['reader']
+        old_diff = manifest['03-dev/implementation.diff']
+        captured = next((name for name, sha in manifest.items()
+                         if '/evidence/' in name and sha == old_diff), None)
+        def evidence():
+            self.state = json.loads((root / 'state.json').read_text())
+            if self.state['artifacts'].get(ref, {}).get('sha256') != file_hash(path):
+                raise corrective.CorrectiveError('txn_record_conflict')
+            TaskJournal.head(journal.path)
+            current = digest(dict(plan=json.loads(bounce._safe_path(root, record['plan']['ref']).read_text()),
+                quality=json.loads(bounce._safe_path(root, record['quality']['ref']).read_text()),
+                context=build_task_context(root)))
+            corrective.verify_evidence(record, root, self.state['artifacts'], inputs_sha256=current,
+                captured_diff_ref=captured,
+                controller_verifier=lambda binding: assert_controller(Path(__file__).resolve().parent,
+                    json.loads(bounce._safe_path(root, binding['ref']).read_text())))
+            for binding in (record['preview'], record['plan'], record['quality'], record['requirements']):
+                source = bounce._safe_path(root, binding['ref'])
+                if (file_hash(source) != binding['sha256'] or
+                        self.state['artifacts'].get(binding['ref'], {}).get('sha256') != binding['sha256']):
+                    raise corrective.CorrectiveError('evidence_mutated')
+            summary = record['preview']
+            if (file_hash(bounce._safe_path(root, summary['summary_ref'])) != summary['summary_sha256']
+                    or self.state['artifacts'].get(summary['summary_ref'], {}).get('sha256') != summary['summary_sha256']):
+                raise corrective.CorrectiveError('evidence_mutated')
+            for name in ('task-journal.jsonl', 'tasks-state.json'):
+                backup_ref = f'bounce-txn/{txn_id}/pre-invalidation/{name}'
+                backup = bounce._safe_path(root, backup_ref)
+                if self.state['artifacts'].get(backup_ref, {}).get('sha256') != file_hash(backup):
+                    raise corrective.CorrectiveError('evidence_mutated')
+        def verify():
+            evidence()
+            walk = corrective.verify_lineage(scheduler.journal.path, anchor(), record['closure'],
+                                             record['repair_roots'], record['limits'])
+            snapshot = walk['snapshot']
+            index = walk['closure_index']
+            tid = record['closure'][index] if index < len(record['closure']) else None
+            last = walk.get('last_event') or {}
+            active = snapshot['tasks'].get(tid, {})
+            if last.get('event') in ('TASK_COMPLETED', 'REVALIDATION_TASK_PASSED'):
+                active = snapshot['tasks'][record['closure'][index - 1]]
+            obs = dict(expected_head=snapshot['expected_head'], head=git(self.worktree_dir, 'rev-parse', 'HEAD'),
+                tree=git(self.worktree_dir, 'rev-parse', 'HEAD^{tree}'),
+                parents=git(self.worktree_dir, 'show', '-s', '--format=%P', 'HEAD').split(),
+                message=git(self.worktree_dir, 'log', '-1', '--format=%B'),
+                index_tree=git(self.worktree_dir, 'write-tree'),
+                unstaged=git(self.worktree_dir, 'diff', '--name-only'),
+                clean=not scheduler._changed(), changed_files=scheduler._changed(),
+                target_files=next((t['target_files'] for t in ordered if t['task_id'] == tid), []))
+            sub = corrective.derive_substate(walk, snapshot if walk['state'].startswith('F_') else active, obs)
+            mutation = walk['state'] in ('F_OPEN', 'F_BLOCKED') and snapshot['preflights'][-1].get('mutation_observed')
+            if scheduler._ignored() != snapshot['ignored_paths'] and not (mutation or sub == 'PREFLIGHT_FAILED' and snapshot['preflights'][-1]['status'] == 'MUTATED'):
+                raise corrective.CorrectiveError('txn_record_conflict')
+            if (git(self.repo_root, 'rev-parse', 'HEAD') != self.state['base_commit']
+                    or git(self.repo_root, 'status', '--porcelain')):
+                raise corrective.CorrectiveError('txn_record_conflict')
+            commits = [g['to_head'] for g in snapshot.get('generations', []) if g['txn_id'] == txn_id]
+            chain = git(self.worktree_dir, 'rev-list', '--first-parent', '--reverse',
+                        record['reviewed_commit'] + '..' + snapshot['expected_head']).splitlines()
+            if chain != commits:
+                raise corrective.CorrectiveError('txn_record_conflict')
+            live_state = scheduler.state
+            scheduler.state = snapshot
+            problems = scheduler._inventory_problems_active(
+                tid if sub in ('RUNNING', 'VERIFYING', 'RESERVED') else None,
+                tid if sub == 'DEPENDENT_REVALIDATING' else None,
+                tid if walk['state'] == 'R_FAILED' else None)
+            scheduler.state = live_state
+            if problems:
+                raise corrective.CorrectiveError('evidence_mutated')
+            return walk, sub, tid
+        def append(kind, **info):
+            nonlocal state
+            verify()
+            status = {'INVALIDATION_APPLIED': 'INVALIDATED', 'REPAIR_RESERVED': 'REPAIRING',
+                'REPAIR_COMMITTED': 'REPAIRED', 'DEPENDENT_VERIFIED': 'REVALIDATING',
+                'REVALIDATION_RUN_FINISHED': 'REVALIDATING', 'FINAL_PREFLIGHT_PASSED': 'REVALIDATED',
+                'FAILED': 'FAILED'}.get(kind, state['status'])
+            state = dict(state, **info)
+            state['status'] = status
+            state.pop('code', None)
+            state.pop('resume_status', None)
+            journal.append(kind, state)
+            _corrective_fault('txn.after_' + kind.lower())
+        def fail(code):
+            nonlocal state
+            state = dict(state, status='FAILED', code=code)
+            journal.append('FAILED', state)
+            _corrective_fault('txn.after_failed')
+            raise corrective.CorrectiveError(code)
+        def step(kind, info):
+            reserved = kind == 'REPAIR_RESERVED' and any(
+                e['event'] == kind and e['state'].get('root') == info['root'] for e in entries())
+            if not reserved:
+                append(kind, **info)
+            self._corrective_stage('repair_dispatched' if kind == 'REPAIR_RESERVED' else 'revalidated',
+                                   preview={'revision': record['preview']['revision']}, txn_id=txn_id, tasks=record['closure'])
+            if kind == 'REPAIR_RESERVED':
+                _corrective_fault('repair.after_reserved_before_dispatch')
+        def boundary(event):
+            walk, sub, tid = verify()
+            _corrective_fault('task.after_' + event.lower())
+            points = {
+                'REVALIDATION_STARTED': 'revalidate.after_run_started',
+                'TASK_STARTED': 'repair.after_task_started',
+                'VERIFYING': 'repair.after_verifying',
+                'COMMIT_INTENT': 'repair.after_commit_intent_before_git_commit',
+                'TASK_COMPLETED': 'repair.after_commit_before_ack',
+                'REVALIDATION_TASK_STARTED': 'revalidate.after_task_started',
+                'REVALIDATION_CHECK_STARTED': 'revalidate.after_check_started',
+                'REVALIDATION_CHECK_FINISHED': 'revalidate.after_check_finished',
+                'REVALIDATION_TASK_PASSED': 'revalidate.after_task_passed_before_ack',
+                'REVALIDATION_FINISHED': 'revalidate.after_finished_before_preflight',
+                'PREFLIGHT_STARTED': 'final.after_preflight_started',
+                'PREFLIGHT_PASSED': 'final.after_preflight_passed_before_ack'}
+            if event in points:
+                _corrective_fault(points[event])
+            rec = scheduler.state['tasks'].get(tid, {})
+            if event == 'CHECK_FINISHED':
+                if walk['state'] == 'F_OPEN':
+                    _corrective_fault('final.after_preflight_check')
+                else:
+                    _corrective_fault('repair.after_check_' + str(len(rec['checks'])))
+            if event in ('ATTEMPT_FAILED', 'ATTEMPT_RESTORED'):
+                blocker = rec.get('failed_attempts', [{}])[-1].get('category') != 'CHECK_FAILURE'
+                _corrective_fault(('repair.after_blocker_attempt_failed_before_rollback' if blocker else 'repair.after_attempt_failed_before_rollback')
+                                  if event == 'ATTEMPT_FAILED' else
+                                  ('repair.after_blocker_rollback_before_terminal' if blocker else 'repair.after_rollback_before_next'))
+            if event == 'PREFLIGHT_BLOCKED':
+                _corrective_fault('final.after_preflight_' + ('mutated' if scheduler.state['preflights'][-1]['status'] == 'MUTATED' else 'blocked') + '_before_record')
+            if event == 'REVALIDATION_TASK_PASSED' and walk['state'] == 'DONE':
+                _corrective_fault('revalidate.after_last_passed_before_finished')
+            if event == 'TASK_STARTED' and rec.get('attempts', 0) > rec.get('repairs', [{}])[-1].get('attempt', rec.get('attempts', 0)):
+                _corrective_fault('repair.after_second_attempt_started')
+        scheduler.corrective_boundary = boundary
+        scheduler.corrective_fault = _corrective_fault
+        # The scheduler guard verifies evidence before every check and dispatch.
+        original_guard = scheduler.guard
+        def guard():
+            original_guard()
+            verify()
+        scheduler.guard = guard
+        try:
+            self.check_budget_circuit_breaker()
+            walk, sub, tid = verify()
+            if state['status'] == 'INTERRUPTED' and state.get('resume_status') == 'COMPLETED':
+                if (file_hash(root / '03-dev/implementation.diff') != state['diff_sha256']
+                        or self.state['artifacts']['03-dev/implementation.diff']['sha256'] != state['diff_sha256']
+                        or self.state['task_verified_head'] != state['new_head']):
+                    raise corrective.CorrectiveError('txn_record_conflict')
+                state = dict(state, status='COMPLETED')
+                state.pop('code', None)
+                state.pop('resume_status', None)
+                journal.append('TXN_COMPLETED', state)
+                return state
+            if walk['state'] == 'G':
+                if state['status'] not in ('INVALIDATING', 'INTERRUPTED'):
+                    append('INVALIDATION_INTENT')
+                self.check_budget_circuit_breaker()
+                scheduler.invalidate(record['repair_roots'], reason='corrective:' + txn_id)
+                _corrective_fault('invalidate.after_call_before_ack')
+            # Recover positional acknowledgments individually, without repeating their work.
+            while True:
+                walk, sub, tid = verify()
+                last = walk.get('last_event') or {}
+                action = corrective.plan_next(state, walk, dict(substate=sub,
+                    attempts=scheduler.state['tasks'].get(tid, {}).get('attempts', 0),
+                    max_attempts=limits['max_attempts'], is_root=tid in record['repair_roots']))
+                # Interrupted is an envelope; the durable anchor controls recovery.
+                if sub in ('RUNNING', 'VERIFYING'):
+                    state = dict(state, status='INTERRUPTED', code='uncertain_dispatch', resume_status='REPAIRING')
+                    if journal.peek() != state:
+                        journal.append('INTERRUPTED', state)
+                    raise corrective.CorrectiveError('uncertain_dispatch', 'reconcile required; work will not be re-dispatched')
+                if action == 'complete_intent':
+                    scheduler.journal.load()
+                    scheduler._complete_intent(next(t for t in ordered if t['task_id'] == tid), scheduler.state['tasks'][tid])
+                    continue
+                if action == 'rollback_failed_attempt':
+                    scheduler.journal.load()
+                    rec = scheduler.state['tasks'][tid]
+                    scheduler._rollback_attempt(rec, rec['changed_files'])
+                    continue
+                if action == 'fail_repair_blocked':
+                    append('REPAIR_BLOCKED', root=tid, category=scheduler.state['tasks'][tid]['failed_attempts'][-1]['category'])
+                    fail('repair_failed')
+                if walk['state'] == 'F_OPEN' and scheduler.state['preflights'][-1].get('mutation_observed'):
+                    scheduler.journal.load()
+                    scheduler.state['preflights'][-1]['status'] = 'MUTATED'
+                    scheduler._save('PREFLIGHT_BLOCKED')
+                    continue
+                if action == 'fail_final_preflight':
+                    append('PREFLIGHT_FAILED_RECORDED', preflight_status=scheduler.state['preflights'][-1]['status'])
+                    fail('final_checkpoint_failed')
+                if sub == 'DEPENDENT_FAILED':
+                    fail('dependent_revalidation_failed')
+                if sub == 'FAILED_ROLLED' and scheduler.state['tasks'][tid]['attempts'] >= limits['max_attempts']:
+                    fail('attempts_exhausted')
+                if last.get('event') in ('TASKS_INVALIDATED', 'TASK_COMPLETED', 'REVALIDATION_TASK_PASSED', 'REVALIDATION_FINISHED', 'PREFLIGHT_PASSED'):
+                    kind = {'TASKS_INVALIDATED': 'INVALIDATION_APPLIED', 'TASK_COMPLETED': 'REPAIR_COMMITTED',
+                        'REVALIDATION_TASK_PASSED': 'DEPENDENT_VERIFIED', 'REVALIDATION_FINISHED': 'REVALIDATION_RUN_FINISHED',
+                        'PREFLIGHT_PASSED': 'FINAL_PREFLIGHT_PASSED'}[last['event']]
+                    info = dict(event={k: last[k] for k in ('sequence', 'sha256')})
+                    if kind in ('REPAIR_COMMITTED', 'DEPENDENT_VERIFIED'):
+                        info['closure_index'] = walk['closure_index'] - 1
+                    append(kind, **info)
+                    continue
+                break
+            if walk['state'] != 'F_PASSED':
+                preview = json.loads(bounce._safe_path(root, record['preview']['ref']).read_text())
+                registered, proof = dict(manifest), []
+                for input_ref in sorted(manifest):
+                    if not input_ref.endswith('/input.json'):
+                        continue
+                    metadata = json.loads(bounce._safe_path(root, input_ref).read_text())
+                    for entry in metadata.get('evidence', []):
+                        source_ref = str(bounce._safe_path(root, entry['source']).relative_to(root))
+                        if manifest.get(source_ref) != entry['sha256']:
+                            continue
+                        registered[entry['ref']] = entry['sha256']
+                        if not entry['ref'].startswith('ev/candidate/'):
+                            continue
+                        candidate = json.loads(bounce._safe_path(root, entry['captured']).read_text())
+                        log = candidate['log']
+                        if manifest.get(log['ref']) == log['sha256']:
+                            proof.append(dict(check_id=candidate['check']['check_id'],
+                                record_ref=source_ref, record_sha256=entry['sha256'],
+                                log_ref=log['ref'], log_sha256=log['sha256']))
+                context = dict(txn_id=txn_id, phase=bounce.PHASES[record['phase']], reviewed_commit=record['reviewed_commit'],
+                    findings=[f['finding'] for f in preview.get('findings', [])], registered_evidence=registered,
+                    candidate_proof=proof)
+                scheduler.repair(ordered, record['repair_roots'], context, txn_id=txn_id, on_step=step)
+            verify()
+            outcome = self._publish_corrective(record, journal, scheduler.state, verify)
+            self._corrective_stage('completed', preview={'revision': record['preview']['revision']}, txn_id=txn_id, tasks=record['closure'])
+            _corrective_fault('gates.after_completed_before_rerun')
+            return outcome
+        except corrective.CorrectiveError as exc:
+            if exc.code in ('cancelled', 'budget_interrupted', 'uncertain_dispatch'):
+                self._mark_open_txn_interrupted(exc.code)
+            raise
+        except TaskError as exc:
+            if getattr(exc, 'category', None) in ('LIMIT_REACHED', 'OUTCOME_UNCERTAIN', 'GIT_LOCK_UNOWNED'):
+                self._mark_open_txn_interrupted('budget_interrupted' if exc.category == 'LIMIT_REACHED' else 'uncertain_dispatch')
+                raise
+            code = str(exc) if str(exc) in corrective.CODES else None
+            if code:
+                fail(code)
+            if self.state.get('status') == 'HALTED_BUDGET_EXCEEDED':
+                self._mark_open_txn_interrupted('budget_interrupted')
+                raise
+            fail('repair_failed')
+
+    def _approve_corrective_candidate(self, attempt):
+        self.check_budget_circuit_breaker()
+        for record in self._open_or_any_txns():
+            journal = corrective.TransactionJournal(self.ssdlc_root / 'bounce-txn' / record['txn_id'])
+            state = journal.peek()
+            if state and state['status'] == 'COMPLETED' and record['next_gate_attempt'] == attempt:
+                journal.load()
+                journal.append('APPROVED_ON_CANDIDATE', dict(state, status='APPROVED',
+                    head=self.state['task_verified_head'], attempt=attempt))
+                _corrective_fault('gates.after_approved')
+
+    def _open_or_any_txns(self):
+        """Read registered records afresh, so creation cannot leave a stale cache."""
+        records = []
+        for ref, meta in self.state.get('artifacts', {}).items():
+            if ref.startswith('bounce-txn/') and ref.endswith('/transaction.json'):
+                try:
+                    path = bounce._safe_path(self.ssdlc_root, ref)
+                    if file_hash(path) != meta['sha256']:
+                        raise ValueError()
+                    record = json.loads(path.read_text())
+                    corrective.verify_record(record)
+                    records.append(record)
+                except (OSError, ValueError, bounce.BounceError):
+                    raise corrective.CorrectiveError('txn_record_conflict') from None
+        return records
+
+    def _corrective_accounted_spend(self):
+        store = getattr(_dispatch_local, 'limits', None)
+        if store is not None:
+            envelope, counters = store._load(repair=False)
+            return store.accounted_total(counters, envelope['policy'])
+        # The historical legacy ledger cannot turn an unknown observation into
+        # a measured charge. Native bounded execution uses its reserved view.
+        return sum(row['cost_usd'] for row in self.state.get('ledger', [])
+                   if row.get('cost_usd') is not None)
+
+    def _corrective_limits(self, transactions=None):
+        store = getattr(_dispatch_local, 'limits', None)
+        policy, combined_cap = None, None
+        if store is not None:
+            envelope, usage = store._load(repair=False)
+            policy = envelope['policy']
+            combined_cap = usage.get('combined_reported_usd_cap')
+        return corrective.effective_limits(
+            dict(os.environ, risk_tier=self.state.get('risk_tier') or 'M'),
+            self._open_or_any_txns() if transactions is None else transactions,
+            policy=policy, combined_cap=combined_cap)
+
+    def _cancel_requested(self):
+        if not os.environ.get('SSDLC_SUPERVISED_RUN_ID'):
+            return False
+        import ssdlc_supervisor as sup
+        env = os.environ
+        data = sup.RunStore(env['SSDLC_SUPERVISED_REPO'], env['SSDLC_SUPERVISED_TICKET'],
+                            env['SSDLC_SUPERVISED_RUN_ID']).read()
+        return bool(data['cancel'] or data['launch_revoked'])
+
+    def _mark_open_txn_interrupted(self, code):
+        try:
+            records = self._open_or_any_txns()
+        except (TaskError, OSError, ValueError):
+            logging.getLogger('ssdlc_corrective').warning('corrective interruption records unavailable')
+            return
+        for record in records:
+            try:
+                path = bounce._safe_path(self.ssdlc_root, 'bounce-txn/' + record['txn_id'])
+                journal = corrective.TransactionJournal(path)
+                state = journal.load()
+                if state and state['status'] not in ('APPROVED', 'FAILED', 'INTERRUPTED') and (
+                        state['status'] != 'COMPLETED' or state.get('new_head') == self.state.get('task_verified_head')):
+                    journal.append('INTERRUPTED', dict(state, status='INTERRUPTED',
+                        code=code, resume_status=state['status']))
+                    self._corrective_stage('interrupted', preview={'revision': record.get('preview', {}).get('revision', '-')}, txn_id=record['txn_id'], tasks=record.get('closure', ()), reason=code)
+                    _corrective_fault('txn.after_interrupted')
+            except (TaskError, OSError, ValueError):
+                logging.getLogger('ssdlc_corrective').warning('corrective interruption record unavailable')
+
+    def _supersede_artifact(self, ref, path, old_sha, new_sha):
+        with self._registry_lock:
+            if file_hash(path) != new_sha or self.state['artifacts'][ref]['sha256'] != old_sha:
+                raise corrective.CorrectiveError('txn_record_conflict')
+            self.record_artifact(ref, path)
+
+    def _publish_corrective(self, record, journal, checkpoint, verify):
+        """Publish the verified checkpoint under ticket_lock.
+
+        Recovery uses observed bytes, registry and head rather than a step counter.
+        """
+        self.check_budget_circuit_breaker()
+        verify()
+        state = journal.load()
+        if state['status'] in ('COMPLETED', 'APPROVED'):
+            return state
+        if not state.get('publish_intent') and state.get('status') != 'REVALIDATED':
+            raise corrective.CorrectiveError('txn_record_conflict')
+        def safe(ref):
+            try:
+                return bounce._safe_path(self.ssdlc_root, ref)
+            except (TaskError, bounce.BounceError):
+                raise corrective.CorrectiveError('txn_record_conflict') from None
+        ref = '03-dev/implementation.diff'
+        path = safe(ref)
+        new_head = checkpoint['expected_head']
+        new_data = (git(self.worktree_dir, 'diff', '--binary', self.state['base_commit'], new_head) + '\n').encode()
+        sha = lambda data: hashlib.sha256(data).hexdigest()
+        intent = state.get('publish_intent')
+        if intent is None:
+            old_data = path.read_bytes()
+            if sha(old_data) != self.state['artifacts'][ref]['sha256']:
+                raise corrective.CorrectiveError('txn_record_conflict')
+            intent = {}
+            for name, head, data in (('old', record['reviewed_commit'], old_data), ('new', new_head, new_data)):
+                if not re.fullmatch('[0-9a-f]{40,64}', head):
+                    raise corrective.CorrectiveError('txn_record_conflict')
+                archive_ref = '03-dev/archive/implementation-' + head[:12] + '.diff'
+                archive = safe(archive_ref)
+                try:
+                    write_or_verify(archive, data, root=self.ssdlc_root)
+                    self._register_new(archive_ref, archive)
+                except TaskError:
+                    raise corrective.CorrectiveError('txn_record_conflict') from None
+                intent[name] = dict(head=head, sha256=sha(data), archive_ref=archive_ref)
+                _corrective_fault('publish.after_archive_' + name)
+            _corrective_fault('publish.after_archive')
+            state = dict(state, status='PUBLISHING', publish_intent=intent)
+            journal.append('PUBLISH_INTENT', state)
+            _corrective_fault('publish.after_intent')
+        old, new = intent['old'], intent['new']
+        if new['head'] != new_head or new['sha256'] != sha(new_data):
+            raise corrective.CorrectiveError('txn_record_conflict')
+        for entry in (old, new):
+            archive = safe(entry['archive_ref'])
+            if (file_hash(archive) != entry['sha256'] or
+                    self.state['artifacts'].get(entry['archive_ref'], {}).get('sha256') != entry['sha256']):
+                raise corrective.CorrectiveError('txn_record_conflict')
+        disk = file_hash(path)
+        registry = self.state['artifacts'][ref]['sha256']
+        tvh = self.state['task_verified_head']
+        if (disk not in (old['sha256'], new['sha256']) or registry not in (old['sha256'], new['sha256'])
+                or tvh not in (old['head'], new['head'])
+                or (disk == old['sha256'] and disk != new['sha256'] and
+                    (registry != old['sha256'] or tvh != old['head']))
+                or (registry == old['sha256'] and registry != new['sha256'] and tvh != old['head'])):
+            raise corrective.CorrectiveError('txn_record_conflict')
+        if disk != new['sha256']:
+            verify()
+            corrective.replace_atomic(path, new_data)
+            _corrective_fault('publish.after_diff_replace')
+        if registry != new['sha256']:
+            verify()
+            self._supersede_artifact(ref, path, old['sha256'], new['sha256'])
+            _corrective_fault('publish.after_registry')
+        verify()
+        self.state.update(task_verified_head=new_head, tasks_status=checkpoint['tasks'])
+        changed = git(self.worktree_dir, 'diff', '--name-only', self.state['base_commit'], new_head).splitlines()
+        specialists = set()
+        for name in changed:
+            lower = name.lower()
+            for needles, specialist in (
+                (('migration', 'schema', 'prisma', 'alembic', '.sql', 'models.py'), 'DB_MIGRATION_AND_PRIVACY_SPECIALIST'),
+                (('package.json', 'lock', 'pyproject.toml', 'requirements', 'auth', 'crypto', 'jwt', 'oauth'), 'APPSEC_SUPPLY_CHAIN_REDTEAM'),
+                (('async', 'worker', 'queue', 'cache', 'pool', 'concurrent'), 'PERF_AND_CONCURRENCY_SRE')):
+                if any(x in lower for x in needles):
+                    specialists.add(specialist)
+        self.state['specialists_triggered'] = sorted(specialists)
+        for name in ('tasks-state.json', 'task-journal.jsonl'):
+            self.record_artifact('03-dev/' + name, safe('03-dev/tasks/' + name))
+        self._save_state()
+        _corrective_fault('publish.after_state')
+        if state['status'] != 'PUBLISHED':
+            state = dict(state, status='PUBLISHED', new_head=new_head, diff_sha256=new['sha256'])
+            journal.append('CHECKPOINT_PUBLISHED', state)
+            _corrective_fault('publish.after_checkpoint_event')
+        state = dict(state, status='COMPLETED', next_gate_attempt=record['next_gate_attempt'])
+        state.pop('code', None)
+        state.pop('resume_status', None)
+        journal.append('TXN_COMPLETED', state)
+        return state
 
     def _ensure_quality_contract(self) -> Dict[str, Any]:
         target = self.dir_recon / "quality-contract.json"
@@ -1993,8 +2992,8 @@ class SSDLCOrchestrator:
             return json.loads(target.read_text())
         if "00-recon/quality-contract.json" in self.state.get("artifacts", {}):
             raise PlanError("Registered quality contract disappeared; refusing regeneration")
-        if not self._task_mode():
-            raise PlanError("Task breakdown is disabled")
+        profile = bootstrap.load_profile(self.repo_root, run_id=getattr(self, 'ticket_id', '-'))
+        binding = bootstrap.decide(self.repo_root, self.state['base_commit'], profile, run_id=getattr(self, 'ticket_id', '-')) if profile is not None else None
         if (git(self.repo_root, "rev-parse", "HEAD") != self.state["base_commit"]
                 or git(self.repo_root, "status", "--porcelain")):
             raise PlanError("Create a clean, committed baseline before capturing the quality contract")
@@ -2015,31 +3014,30 @@ class SSDLCOrchestrator:
                 sources.append({"source_id": source_id, "path": relative, "sha256": sha256_file(path)})
                 standards.append({"standard_id": f"STD-{index + 1}", "description": path.read_text(),
                                   "source_refs": [source_id], "scope": ["*"]})
-            checks = []
-            test_files = list((self.repo_root / "tests").rglob("test_*.py"))
-            if test_files:
-                pytest_style = any(re.search(r"^def test_|^import pytest|^from pytest", p.read_text(), re.M) for p in test_files)
-                argv = ["python3", "-m", "pytest", "tests"] if pytest_style else ["python3", "-m", "unittest", "discover", "-s", "tests"]
-                checks.append({"check_id": "CHECK-TESTS", "argv": argv, "cwd": ".", "timeout_sec": 300, "kind": "test", "required": True})
-            package = self.repo_root / "package.json"
-            if package.exists():
-                scripts = json.loads(package.read_text()).get("scripts", {})
-                for script, kind in (("test", "test"), ("lint", "lint"), ("typecheck", "types")):
-                    if script in scripts:
-                        checks.append({"check_id": f"CHECK-NPM-{script.upper()}", "argv": ["npm", "run", script], "cwd": ".", "timeout_sec": 300, "kind": kind, "required": True})
-            pyproject = self._read_optional(self.repo_root / "pyproject.toml", "")
-            for marker, name, argv, kind in (
-                ("[tool.ruff", "RUFF", ["python3", "-m", "ruff", "check", "."], "lint"),
-                ("[tool.mypy", "MYPY", ["python3", "-m", "mypy", "."], "types"),
-            ):
-                if marker in pyproject:
-                    checks.append({"check_id": f"CHECK-{name}", "argv": argv, "cwd": ".", "timeout_sec": 300, "kind": kind, "required": True})
+            checks = _discover_checks(self.repo_root)
+            if binding:
+                checks = bootstrap.profile_checks(binding["profile_id"])
             if not checks:
-                raise PlanError("No project checks discovered. Configure .ssdlc/quality-contract.json before enabling task breakdown")
+                raise PlanError("No project checks discovered. Configure .ssdlc/quality-contract.json before starting task execution")
             contract = {"schema_version": "1.0", "contract_revision": 1, "base_commit": self.state["base_commit"],
                         "sources": sources, "standards": standards, "checks": checks, "baseline": [],
                         "limitations": ["Automatic discovery covers Python tests, configured Ruff/Mypy and npm test/lint/typecheck; provide an explicit contract for other tools."], "exceptions": []}
+        if binding:
+            contract['bootstrap'] = binding
+        contract['positive_test_count_required'] = True
+        for check in contract["checks"]:
+            if check.get("required"):
+                check["candidate_proof"] = True
+        if sum(c.get("required", False) and c.get("candidate_proof", False) for c in contract["checks"]) > candidate_reports.MAX_CANDIDATE_CHECKS:
+            raise PlanError("More than 32 candidate checks cannot be sealed")
+        contract.setdefault("limitations", []).append(
+            "QA shell commands are recorded separately and are not typed-check equivalents")
         validate_document("quality-contract", contract)
+        if binding:
+            atomic_json(target, contract)
+            self.record_artifact("00-recon/quality-contract.json", target)
+            self._bootstrap_contract_captured = True
+            return contract
         baseline_dir = self.dir_recon / "baseline"
         baseline_dir.mkdir(exist_ok=True)
         print(f"[baseline] Running {len(contract['checks'])} initial check(s) before 00-recon; "
@@ -2054,7 +3052,7 @@ class SSDLCOrchestrator:
             log.write_text(out + "\n" + err)
             contract["baseline"].append({"check_id": check["check_id"], "exit_code": rc,
                                          "log_ref": str(log.relative_to(self.ssdlc_root)), "sha256": sha256_file(log)})
-            empty_suite = test_suite_is_empty(out, err)
+            empty_suite = test_check_is_empty(check, contract, out, err)
             status = 'FAILED' if rc or empty_suite else 'PASSED'
             print(f"[baseline] {check['check_id']}: {status} in {time.monotonic() - started:.1f}s "
                   f"(exit {rc}{', empty test suite' if empty_suite else ''}); log: {log}", flush=True)
@@ -2129,6 +3127,7 @@ class SSDLCOrchestrator:
                   "and reference all required quality checks and applicable standards. Each requirement must map to executable checks. "
                   "Use kind=task and automated verification only: this bootstrap has no subgoal or review_only engine. "
                   "Preserve the supplied base_commit, ticket_id and quality_contract_ref. Do not reduce scope or security constraints.\n" + schema)
+        prompt += "\nTier S requires exactly one plan node covering all requirements."
         prompt += ("\nEvery implementation task must include its new behavior tests in target_files and run them locally. "
                    "Do not defer all new tests to a final task. Preparatory tasks may have empty AC/SEC references "
                    "with local regression checks, but must still obey all applicable safety invariants. "
@@ -2149,6 +3148,8 @@ class SSDLCOrchestrator:
             raise PlanError("Task plan needs an independent reviewer")
         def validate(plan):
             validator.validate(plan)
+            if self.state.get("risk_tier") == "S" and len(plan["tasks"]) != 1:
+                raise PlanError("Tier S requires exactly one plan node")
             if plan["ticket_id"] != self.ticket_id or plan["base_commit"] != self.state["base_commit"]:
                 raise PlanError("Planner changed ticket identity or base_commit")
         def generate(attempt, inputs, previous):
@@ -2473,7 +3474,7 @@ class SSDLCOrchestrator:
                 log_ref = f'candidate-evidence/logs/{nonce}.log'
                 raw = (out + '\n' + err).encode()
                 log = raw[-cr.LOG_STORE_MAX_BYTES:]
-                empty = test_suite_is_empty(out, err)
+                empty = test_check_is_empty(check, quality, out, err)
                 body = dict(expected, schema_version='1.0', kind='candidate_check_record', run_nonce=nonce,
                             result=dict(exit_code=rc, timed_out=rc == 124, empty_suite=empty,
                                         status='passed' if rc == 0 and not empty else 'failed'),
@@ -2541,7 +3542,7 @@ class SSDLCOrchestrator:
         """Resume only planning against sealed upstream artifacts; never execute code."""
         with ticket_lock(getattr(self, "ticket_lock_path", self.ssdlc_root / "ticket.lock")):
             self.state = self._load_or_init_state()
-            _resume_plan_refusal(self.repo_root, self.ssdlc_root, self.state, self._task_mode())
+            _resume_plan_refusal(self.repo_root, self.ssdlc_root, self.state)
             self.state.pop("failure", None)
             self.state.update(current_phase="02-design", current_step="task-plan", status="IN_PROGRESS")
             self._save_state()
@@ -2556,14 +3557,21 @@ class SSDLCOrchestrator:
             self._save_state()
             return self.dir_design / 'plan.json'
 
-    def _run_task_development(self, feedback: str = "", recover_protocol_task=None) -> Tuple[Path, List[str]]:
+    @_supervised_phase('03-dev')
+    def run_phase_dev(self, recover_protocol_task=None) -> Tuple[Path, List[str]]:
+        # Keep the native, bounded phase entrypoint while using one task engine.
+        return self._run_task_development(recover_protocol_task)
+
+    def _make_task_scheduler(self, *, corrective_run=False):
+        first = bool(getattr(self, '_bootstrap_invocation_active', False)
+                     and getattr(self, '_bootstrap_contract_captured', False))
+        bootstrap.require_unproven_run_is_current(self.ssdlc_root, first_invocation=first)
         plan = self._ensure_task_plan()
         controller = self._ensure_controller_contract()
         quality = json.loads((self.dir_recon / "quality-contract.json").read_text())
+        bootstrap.require_unproven_run_is_current(self.ssdlc_root, quality, first_invocation=first)
         wt = self._ensure_worktree()
-        context = {name: self._read_optional(self.ssdlc_root / name) for name in (
-            "01-po/requirements.md", "02-design/adr.md", "02-design/threat-model.md",
-        )}
+        context = build_task_context(self.ssdlc_root)
         validator = TaskPlanValidator(self.repo_root, context["01-po/requirements.md"], quality, self.ssdlc_root)
         ordered = validator.validate(plan)
         runtime_environment = self._verification_environment(quality['checks'][0]['argv'])
@@ -2578,7 +3586,8 @@ class SSDLCOrchestrator:
                 path = self.ssdlc_root / meta["path"]
                 if not path.is_file() or sha256_file(path) != meta["sha256"]:
                     raise TaskError(f"Protected artifact changed or disappeared: {name}")
-        def develop(task, attempt, prompt, workspace):
+        def develop(task, attempt, prompt, workspace=None):
+            workspace = workspace or wt
             if not EngineRunner._should_spawn_role_container():
                 from ssdlc_recovery import NotDispatched
                 raise NotDispatched('ENVIRONMENT_BLOCKED', 'Candidate isolation requires Docker role execution')
@@ -2613,7 +3622,8 @@ class SSDLCOrchestrator:
             ))
             return {"output": out, "exit_code": rc, "engine": engine, "model": model,
                     "effort": effort, "reason": reason, "quiescent": True}
-        def verify(argv, cwd, timeout, workspace):
+        def verify(argv, cwd, timeout, workspace=None):
+            workspace = workspace or wt
             if not EngineRunner._should_spawn_role_container():
                 raise DevelopmentBlocked('ENVIRONMENT_BLOCKED', 'Candidate verification requires Docker role execution')
             return EngineRunner.run_sandboxed_cmd(argv, cwd, timeout, verification_worktree=workspace)
@@ -2621,13 +3631,16 @@ class SSDLCOrchestrator:
         def verification_budget():
             if limits is None:
                 return self.check_budget_circuit_breaker()
+            self.check_budget_circuit_breaker()
             envelope, counters = limits._load(repair=False)
             limits.check(counters, envelope['policy'], for_dispatch=False)
         def dispatch_budget():
             if limits is None:
                 return self.check_budget_circuit_breaker()
+            self.check_budget_circuit_breaker()
             limits.require_capacity('03-dev', '03-dev')
         history_authority = limits._load(repair=False)[0]['binding'].get('historical_capture_bindings_sha256') if limits is not None else None
+        saved_scheduler = TaskJournal(self.dir_dev / 'tasks').peek()
         scheduler = TaskScheduler(
             wt, self.dir_dev / "tasks", plan, quality, context, develop,
             verify, guard, verification_budget, dispatch_budget=dispatch_budget,
@@ -2635,19 +3648,30 @@ class SSDLCOrchestrator:
             historical_capture_authority=history_authority,
             scope_reconciliations=(limits._load(repair=False)[0]['binding'].get('scope_reconciliations', {}) if limits else {}),
             feedback_enabled=bool(limits and limits._load(repair=False)[0]['policy'].get('feedback_workflow')),
-            max_attempts=(getattr(_dispatch_local, "limits")._load(repair=False)[0]["policy"]["development_attempts"]
-                          if getattr(_dispatch_local, "limits", None) is not None else int(os.environ.get("SSDLC_MAX_DEV_RETRIES", "3"))),
-            isolate_candidates=True,
+            max_attempts=min(self._corrective_limits()["max_attempts"],
+                limits._load(repair=False)[0]["policy"]["development_attempts"] if limits else self._corrective_limits()["max_attempts"]),
+            bootstrap=quality.get("bootstrap"),
+            # A new run gets isolation. An admitted sealed run retains its
+            # recorded format, including pre-isolation journals with no marker.
+            # The scheduler still verifies bounded mode and runtime identity.
+            isolate_candidates=(bool(saved_scheduler.get('candidate_isolation', 0))
+                                if saved_scheduler is not None else True),
             recover_timeouts=getattr(_dispatch_local, 'limits', None) is not None,
             runtime_identity={'controller_sha256': digest(controller),
                               'environment': runtime_environment},
         )
+        return scheduler, ordered
+
+    def _run_task_development(self, recover_protocol_task=None) -> Tuple[Path, List[str]]:
+        scheduler, ordered = self._make_task_scheduler()
+        wt = self.worktree_dir
+        limits = getattr(_dispatch_local, "limits", None)
         self.state["current_phase"] = "03-dev"
         self.state["current_step"] = "task-development"
         self.state["status"] = "IN_PROGRESS"
         self._save_state()
         try:
-            result = scheduler.run(ordered, feedback, recover_protocol_task=recover_protocol_task)
+            result = scheduler.run(ordered, recover_protocol_task=recover_protocol_task)
         except DevelopmentBlocked as exc:
             if (exc.category != 'SCOPE_REQUIRED' or limits is None
                     or not limits._load(repair=False)[0]['policy'].get('feedback_workflow')):
@@ -2661,7 +3685,7 @@ class SSDLCOrchestrator:
                 raise DevelopmentBlocked('INTEGRITY', 'Automatic feedback requires canonical execution ownership')
             try:
                 response = run_feedback(self.ticket_lock_path.parent, self.repo_root, Path(__file__).resolve().parent,
-                    controller['snapshot'], scheduler.runtime_identity, held_locks=(owner,))
+                    self._ensure_controller_contract()['snapshot'], scheduler.runtime_identity, held_locks=(owner,))
             except TaskError as failure:
                 if (self.ticket_lock_path.parent / 'execution/pending.json').exists():
                     failure.feedback_source_preserved = True
@@ -2683,7 +3707,9 @@ class SSDLCOrchestrator:
                 failure.feedback_source_preserved = True
                 raise
             self._publish_feedback()
-            return self._run_task_development(feedback)
+            return self._run_task_development()
+        if result.get("bootstrap", {}).get("status") == "PROVEN":
+            self.state["bootstrap"] = {"status": "post-bootstrap", "proven_head": result["bootstrap"]["proven_head"]}
         self.state["tasks_status"] = result["tasks"]
         self.state["task_verified_head"] = result["expected_head"]
         diff = self.dir_dev / "implementation.diff"
@@ -2710,6 +3736,7 @@ class SSDLCOrchestrator:
         if self.state_file.exists():
             return json.loads(self.state_file.read_text(encoding="utf-8"))
         state = {
+            "task_engine_v1": True,
             "project_id": self.project_id,
             "ticket_id": self.ticket_id,
             "created_at": utc_now(),
@@ -3017,7 +4044,8 @@ class SSDLCOrchestrator:
         """Repair/validate recorded PO syntax only; never call a provider."""
         with ticket_lock(getattr(self, 'ticket_lock_path', self.ssdlc_root / 'ticket.lock')):
             self.state = self._load_or_init_state()
-            if (not self._task_mode() or self.state.get('current_phase') not in ('01-po', '02-design')
+            if (self.state.get('task_engine_v1') is not True
+                    or self.state.get('current_phase') not in ('01-po', '02-design')
                     or self.worktree_dir.exists() or (self.dir_design / 'plan.json').exists()
                     or (self.dir_design / 'design-session/session.json').exists()
                     or (self.dir_dev / 'tasks/task-journal.jsonl').exists()
@@ -3053,16 +4081,6 @@ class SSDLCOrchestrator:
         recon_text = (self.dir_recon / "context-and-blast-radius.md").read_text(encoding="utf-8")
 
         ui_nfr_prompt = ""
-        if dev_profile == "FRONTEND_UI" and not self._task_mode():
-            ui_nfr_prompt = (
-                "\n\n### MANDATORY FRONTEND / MOBILE NON-FUNCTIONAL REQUIREMENTS:\n"
-                "- NFR-DESIGN-SYSTEM: Every UI element MUST strictly use the living design tokens from DESIGN_SYSTEM.md (space.*, shape.*, type.*, useTheme()). Zero hardcoded hex colors or arbitrary spacing numbers permitted.\n"
-                "- NFR-REUSE-FIRST: Explicitly mandate reusing existing primitives from COMPONENT_CATALOG.md (<Button>, <Card>, <Loading>, <SecureImage>) instead of inventing bespoke widgets.\n"
-                "- NFR-SAFE-AREA: Explicit handling of notch, Dynamic Island, status bar, and home indicator insets (useSafeAreaInsets or container).\n"
-                "- NFR-4-STATES: Every interactive component or screen must define 4 states: Loading (skeleton/spinner with max 5s timeout), Empty, Error (with retry trigger), and Success/Active.\n"
-                "- NFR-OFFLINE-AUTH: Behavior when guest or network is offline.\n"
-                "- NFR-ASSETS: Explicit requirement for vector/SVG icons (e.g. @expo/vector-icons or SVG component); raw Unicode glyphs or emoji as icons are STRICTLY PROHIBITED.\n"
-            )
 
         sys_prompt = (
             "You are the Product Owner (PO) in a strict Secure Software Development Lifecycle (SSDLC).\n"
@@ -3075,11 +4093,10 @@ class SSDLCOrchestrator:
             f"{ui_nfr_prompt}"
             "Be concrete, testable, and unambiguous."
         )
-        if self._task_mode():
-            sys_prompt += ("\nRequirement IDs must match (AC|SEC)-[A-Za-z0-9]+(-[A-Za-z0-9]+)*. "
-                           "Use AC-1-1 or AC-1a for explicit child definitions, never AC-1.1. "
-                           "Declare each ID exactly once. Prose mentions are not definitions. "
-                           "Keep ordinary subcases as prose if they are not separate named obligations.")
+        sys_prompt += ("\nRequirement IDs must match (AC|SEC)-[A-Za-z0-9]+(-[A-Za-z0-9]+)*. "
+                       "Use AC-1-1 or AC-1a for explicit child definitions, never AC-1.1. "
+                       "Declare each ID exactly once. Prose mentions are not definitions. "
+                       "Keep ordinary subcases as prose if they are not separate named obligations.")
         user_prompt = f"CODEBASE RECON & BLAST RADIUS:\n{recon_text}\n\nUSER GOAL:\n{goal}"
 
         t0 = time.time()
@@ -3105,7 +4122,7 @@ class SSDLCOrchestrator:
                 "Product Owner",
                 engine,
                 model,
-                "GENERATED" if self._task_mode() else "PASS",
+                "GENERATED",
                 dur,
                 cost,
                 tin,
@@ -3115,16 +4132,8 @@ class SSDLCOrchestrator:
             )
         )
 
-        if self._task_mode():
-            self._validate_po_requirements()
-            out = req_file.read_text(encoding='utf-8')
-        else:
-            has_ac = bool(re.search(r"AC-\d+", out))
-            has_sec = bool(re.search(r"SEC-\d+", out))
-            if not (has_ac and has_sec):
-                self.record_gate("PO_SPEC_GATE", False, "Missing numbered AC-x or SEC-x items")
-                raise RuntimeError("PO Gate Failed: requirements.md must define AC-1..N and SEC-1..N.")
-            self.record_gate("PO_SPEC_GATE", True, "Verified numbered ACs and Security Abuse Cases.")
+        self._validate_po_requirements()
+        out = req_file.read_text(encoding='utf-8')
         print(f"    [OK] Wrote {req_file.relative_to(self.repo_root)}")
 
         if self.remote_sync.enabled:
@@ -3212,11 +4221,6 @@ class SSDLCOrchestrator:
             'approved integrity requirement covers. Enumerate persistence boundaries and precise fault injection points. '
             'Respect the documented threat model and scope; do not invent stronger external-writer guarantees. '
             'Return the ADR as Markdown. History contains prior reviews; the previous ADR is the repair starting point.')
-        if profile == 'FRONTEND_UI' and not self._task_mode():
-            arch_prompt += (' Specify exact Design System tokens (import { space, shape, type, useTheme } from "@/theme/tokens"). '
-                            'Check COMPONENT_CATALOG.md and reuse existing primitives (<Button>, <Card>, <Loading>, <SecureImage>). '
-                            'Ensure Safe Area Insets via useSafeAreaInsets. Use vector/SVG icons (@expo/vector-icons or custom SVG), '
-                            'never raw Unicode glyphs. Do not invent a parallel design system.')
         schema = (Path(__file__).parent / 'schemas/design-review.schema.json').read_text()
         review_prompt = (
             'Review the entire ADR comprehensively using STRIDE, the approved requirements, quality contract, '
@@ -3280,30 +4284,8 @@ class SSDLCOrchestrator:
                                 progress_policy=limits is not None, diagnose=diagnose if limits is not None else None,
                                 verify_evidence=verify_progress_evidence)
         if import_legacy:
-            legacy = confined(self.dir_design, import_legacy, protect=False)
-            if not legacy.is_dir():
-                raise PlanError('Legacy round directory does not exist')
-            numbered = []
-            for path in legacy.glob('adr-round-*.md'):
-                match = re.fullmatch(r'adr-round-(\d+)\.md', path.name)
-                if match:
-                    numbered.append((int(match[1]), path))
-            numbered.sort()
-            if not numbered or [n for n, _ in numbered] != list(range(1, len(numbered) + 1)):
-                raise PlanError('Legacy round sequence is missing or ambiguous')
-            rounds = []
-            for index, adr in numbered:
-                row = {}
-                for field, path in [('adr', adr), ('review', legacy / f'security-review-round-{index}.md')]:
-                    path = confined(legacy, path.name, protect=False)
-                    if not path.exists() and field == 'review' and index == len(numbered):
-                        continue
-                    name = str(path.relative_to(self.ssdlc_root))
-                    meta = self.state.get('artifacts', {}).get(name)
-                    if not meta or not path.is_file() or file_hash(path) != meta['sha256']:
-                        raise PlanError(f'Legacy design evidence is missing, unregistered or changed: {name}')
-                    row[field] = path.read_text()
-                rounds.append(row)
+            from ssdlc_design import read_history_rounds
+            rounds = read_history_rounds(self.repo_root, self.ticket_id, import_legacy)
             session.import_legacy(rounds)
         elif not session.path.exists() and any(name in ('02-design/adr.md', '02-design/pair-dialogue.md') or name.startswith('02-design/rounds/')
                                                for name in self.state.get('artifacts', {})):
@@ -3333,7 +4315,7 @@ class SSDLCOrchestrator:
         """Resume design only against sealed upstream artifacts; never execute code."""
         with ticket_lock(getattr(self, 'ticket_lock_path', self.ssdlc_root / 'ticket.lock')):
             self.state = self._load_or_init_state()
-            _resume_design_refusal(self.repo_root, self.ssdlc_root, self.state, self._task_mode(), read_git=git)
+            _resume_design_refusal(self.repo_root, self.ssdlc_root, self.state, read_git=git)
             self.state.update(status='IN_PROGRESS', current_phase='02-design', current_step='pair-design')
             self.state.pop('failure', None)
             self._save_state()
@@ -3378,7 +4360,7 @@ class SSDLCOrchestrator:
         self.isolation.ensure_trusted_path(self.worktree_dir)
         return self.worktree_dir
 
-    def _read_optional(self, path: Path, fallback: str = "(Skipped in Tier S)") -> str:
+    def _read_optional(self, path: Path, fallback: str = OPTIONAL_FALLBACK) -> str:
         return path.read_text(encoding="utf-8") if path.exists() else fallback
 
     def _adopt_feedback_runtime(self, root):
@@ -3409,171 +4391,6 @@ class SSDLCOrchestrator:
         except (RemoteUncertain, OSError, ValueError):
             print('[feedback] GitHub publication unconfirmed; reconcile the host outbox before publishing again.', flush=True)
 
-    @_supervised_phase('03-dev')
-    def run_phase_dev(self, feedback: str = "", attempt: int = 1) -> Tuple[Path, List[str]]:
-        if self._task_mode():
-            return self._run_task_development(feedback)
-        return self._run_phase_dev_legacy(feedback, attempt)
-
-    def _run_phase_dev_legacy(self, feedback: str = "", attempt: int = 1) -> Tuple[Path, List[str]]:
-        risk_tier = self.state.get("risk_tier", "M")
-        dev_profile = self.state.get("dev_profile", "ALGORITHMIC")
-        dev_engine, dev_model, dev_effort, dev_reason = SquadDispatcher.dispatch_role(
-            "03-dev", risk_tier, dev_profile, attempt=attempt
-        )
-        print(
-            f"\n==> [{self.project_id} | Phase 3: 03-dev] Developer ({dev_engine}:{dev_model or 'default'}, "
-            f"reasoning={dev_effort}, profile={dev_profile}) in isolated worktree (Attempt {attempt})..."
-        )
-        print(f"    [Squad Dispatcher] 03-dev allocated — {dev_reason}")
-        self.state["current_phase"] = "03-dev"
-        self._save_state()
-
-        wt = self._ensure_worktree()
-        recon_text = self._read_optional(self.dir_recon / "context-and-blast-radius.md")
-        req_text = self._read_optional(self.dir_po / "requirements.md")
-        adr_text = self._read_optional(self.dir_design / "adr.md")
-        tm_text = self._read_optional(self.dir_design / "threat-model.md")
-
-        use_or = os.environ.get("SSDLC_DEV_USE_OPENROUTER", "false").lower() == "true"
-
-        ui_dev_rules = ""
-        if dev_profile == "FRONTEND_UI":
-            ui_dev_rules = (
-                "\n\nMANDATORY FRONTEND / UI/UX IMPLEMENTATION RULES:\n"
-                "- ZERO TOKEN DRIFT: Import space, shape, type, useTheme from `@/theme/tokens`. Never use hardcoded hex colors or arbitrary spacing numbers.\n"
-                "- REUSE COMPONENT CATALOG: Reuse primitives from `@/components/Primitives` (<Button>, <Card>, <Loading>) before inventing custom widgets.\n"
-                "- Do NOT use raw Unicode characters or emojis (e.g. '♥', '★', arrows) as icons. Always use vector icons (e.g. from `@expo/vector-icons` or SVG).\n"
-                "- Always use `useSafeAreaInsets` or safe area containers for top/bottom boundaries to prevent notch and status bar collisions.\n"
-                "- Implement all 4 component states: Loading (skeleton/spinner with max 5s timeout), Empty, Error (with retry trigger), and Success.\n"
-            )
-
-        prompt = (
-            "You are the Developer in an SSDLC pipeline working inside an isolated Git worktree.\n"
-            "Implement the code and unit tests required by the PO Requirements and the approved ADR + Threat Model.\n"
-            "STRICT RULES:\n"
-            "- Do NOT modify any files inside `.ssdlc/` or `.agents/`.\n"
-            "- Write clean, production-grade code and unit tests.\n\n"
-            f"CODEBASE RECON:\n{recon_text}\n\n"
-            f"PO REQUIREMENTS:\n{req_text}\n\n"
-            f"APPROVED ARCHITECTURE (ADR):\n{adr_text}\n\n"
-            f"THREAT MODEL MITIGATIONS REQUIRED:\n{tm_text}\n"
-            f"{ui_dev_rules}"
-        )
-        if feedback:
-            prompt += f"\n\nCRITICAL FEEDBACK FROM PREVIOUS REVIEW/QA/APPSEC GATE (MUST FIX):\n{feedback}\n"
-
-        t0 = time.time()
-        in_container = Path("/.dockerenv").exists() or os.environ.get("SSDLC_EXECUTION_MODE", "docker") == "docker"
-        dev_sandbox = "danger-full-access" if in_container else "workspace-write"
-        tier_dev_budgets = {"S": 1.0, "M": 2.5, "L": 8.0}
-        dev_budget_env = os.environ.get("SSDLC_DEV_BUDGET_USD", "").strip()
-        dev_budget = float(dev_budget_env) if dev_budget_env else tier_dev_budgets.get(risk_tier, 2.5)
-        if dev_engine == "claude":
-            out, rc, dev_cost, dev_tin, dev_tout = EngineRunner.run_claude(
-                prompt,
-                cwd=wt,
-                read_only=False,
-                use_openrouter=use_or,
-                writable_worktree=wt,
-                model=dev_model,
-                reasoning_effort=dev_effort,
-                max_budget_usd=dev_budget,
-            )
-        else:
-            out, rc = EngineRunner.run_codex(
-                prompt,
-                cwd=wt,
-                sandbox=dev_sandbox,
-                model=dev_model,
-                reasoning_effort=dev_effort,
-                use_openrouter=use_or,
-                writable_worktree=wt,
-            )
-            dev_cost, dev_tin, dev_tout = 0.0, 0, 0
-        dur = time.time() - t0
-
-        # Cryptographic SHA-256 integrity check on upstream .ssdlc/ specs & threat model
-        for protected_rel in ("01-po/requirements.md", "02-design/adr.md", "02-design/threat-model.md"):
-            meta = self.state.get("artifacts", {}).get(protected_rel)
-            if meta:
-                protected_file = self.ssdlc_root / meta["path"]
-                if protected_file.exists() and sha256_file(protected_file) != meta["sha256"]:
-                    self.record_gate("DEV_TAMPER_CHECK", False, f"SHA-256 mismatch on {protected_rel}")
-                    raise RuntimeError(
-                        f"Security Violation: Upstream SSDLC artifact {protected_rel} was modified during Phase 3 Dev!"
-                    )
-
-        log_path = self.dir_dev / f"dev-attempt-{attempt}.log"
-        log_path.write_text(out, encoding="utf-8")
-        self.record_artifact(f"03-dev/dev-attempt-{attempt}.log", log_path)
-
-        subprocess.run(["git", "add", "-A"], cwd=str(wt), capture_output=True)
-        tamper_chk = subprocess.run(
-            ["git", "diff", "--cached", "--name-only"],
-            cwd=str(wt),
-            capture_output=True,
-            text=True,
-        )
-        changed_files = [
-            f.strip() for f in tamper_chk.stdout.splitlines() if f.strip()
-        ]
-        for cf in changed_files:
-            if cf.startswith(".ssdlc/") or cf.startswith(".agents/"):
-                subprocess.run(["git", "reset", "HEAD", cf], cwd=str(wt), capture_output=True)
-                subprocess.run(["git", "checkout", "--", cf], cwd=str(wt), capture_output=True)
-                self.record_gate("DEV_TAMPER_CHECK", False, f"Dev attempted to touch {cf}")
-                raise RuntimeError(f"Security Violation: Dev agent attempted to modify {cf}")
-
-        diff_proc = subprocess.run(
-            ["git", "diff", "--cached"],
-            cwd=str(wt),
-            capture_output=True,
-            text=True,
-        )
-        diff_text = diff_proc.stdout
-        diff_path = self.dir_dev / "implementation.diff"
-        diff_path.write_text(diff_text, encoding="utf-8")
-        self.record_artifact("03-dev/implementation.diff", diff_path)
-
-        specialists = set(self.state.get("specialists_triggered", []))
-        for cf in changed_files:
-            lower_cf = cf.lower()
-            if any(k in lower_cf for k in ("migration", "schema", "prisma", "alembic", ".sql", "models.py")):
-                specialists.add("DB_MIGRATION_AND_PRIVACY_SPECIALIST")
-            if any(k in lower_cf for k in ("package.json", "package-lock.json", "pyproject.toml", "requirements", "cargo.toml", "go.mod", "auth", "crypto", "jwt", "oauth")):
-                specialists.add("APPSEC_SUPPLY_CHAIN_REDTEAM")
-            if any(k in lower_cf for k in ("async", "worker", "queue", "cache", "pool", "concurrent")):
-                specialists.add("PERF_AND_CONCURRENCY_SRE")
-        self.state["specialists_triggered"] = sorted(specialists)
-        self._save_state()
-
-        self.record_ledger(
-            CostAndTelemetryEntry(
-                f"03-dev-a{attempt}",
-                "Developer",
-                dev_engine,
-                dev_model or "default",
-                "COMPLETED" if rc == 0 else f"RC_{rc}",
-                dur,
-                cost_usd=dev_cost,
-                tokens_in=dev_tin,
-                tokens_out=dev_tout,
-                trace_user=f"{self.project_id}:{self.ticket_id}:03-dev-a{attempt}",
-                reasoning_effort=dev_effort,
-            )
-        )
-        self.record_gate(
-            f"DEV_IMPLEMENTATION_A{attempt}",
-            bool(diff_text.strip()),
-            f"Changed {len(changed_files)} file(s); engine={dev_engine}, reasoning={dev_effort}; specialists={self.state['specialists_triggered']}",
-        )
-        print(f"    [OK] Captured diff ({len(changed_files)} files) -> {diff_path.relative_to(self.repo_root)}")
-        return diff_path, changed_files
-
-    # ------------------------------------------------------------------
-    # PHASE 4: Code Reviewer (+ Conditional DB & Perf/SRE Specialist Lenses)
-    # ------------------------------------------------------------------
     def _verified_task_review_input(self, diff_text: str) -> Tuple[Path, int]:
         try:
             diff_limit = int(os.environ.get('SSDLC_REVIEW_MAX_DIFF_CHARS', '200000'))
@@ -3623,6 +4440,8 @@ class SSDLCOrchestrator:
                 self.record_artifact(ref, path)
         except (TaskError, OSError) as exc:
             raise GateTerminalError('integrity_blocked', diagnosis='Phase roster already used with different inputs; use a new gate attempt') from exc
+        if self._open_or_any_txns():
+            _corrective_fault('gates.after_roster')
         return roster
 
     def _phase_completion(self, roster):
@@ -3813,13 +4632,12 @@ class SSDLCOrchestrator:
                 "- Component States: Verify Loading, Empty, and Error states are implemented.\n"
             )
 
-        if self._task_mode():
-            _, diff_limit = self._verified_task_review_input(diff_text)
-            ui_review_rules = (
-                "\nPROJECT QUALITY CONTRACT (apply the actual project rules, including test/config changes):\n"
-                + (self.dir_recon / "quality-contract.json").read_text()
-                + "\nCheck missing scenarios and task interactions before delivery.\n"
-            )
+        _, diff_limit = self._verified_task_review_input(diff_text)
+        ui_review_rules = (
+            "\nPROJECT QUALITY CONTRACT (apply the actual project rules, including test/config changes):\n"
+            + (self.dir_recon / "quality-contract.json").read_text()
+            + "\nCheck missing scenarios and task interactions before delivery.\n"
+        )
         review_engine = os.environ.get("SSDLC_REVIEW_ENGINE", "openrouter")
 
         sys_prompt = (
@@ -3853,93 +4671,12 @@ class SSDLCOrchestrator:
             f"PO REQUIREMENTS:\n{req_text}\n\n"
             f"ADR:\n{adr_text}\n\n"
             f"THREAT MODEL:\n{tm_text}\n\n"
-            f"GIT DIFF TO REVIEW:\n```diff\n{diff_text if self._task_mode() else diff_text[:60000]}\n```"
+            f"GIT DIFF TO REVIEW:\n```diff\n{diff_text}\n```"
         )
 
-        if self._task_mode():
-            return self._task_review_gate(attempt, review_models, rev_effort, review_engine,
-                                          sys_prompt, user_prompt, diff_text)
+        return self._task_review_gate(attempt, review_models, rev_effort, review_engine,
+                                      sys_prompt, user_prompt, diff_text)
 
-        review_cwd = self.worktree_dir if self._task_mode() else self.repo_root
-        review_run = self.dir_review / 'runs' / uuid.uuid4().hex
-        review_run.mkdir(parents=True)
-        inputs_path = review_run / 'inputs.json'
-        atomic_json(inputs_path, {'verified_head': self.state.get('task_verified_head'), 'review_cwd': str(review_cwd),
-                                 'diff_chars': len(diff_text), 'diff_char_budget': diff_limit if self._task_mode() else 60000,
-                                 'system_prompt': sys_prompt, 'user_prompt': user_prompt, 'review_models': review_models})
-        self.record_artifact(str(inputs_path.relative_to(self.ssdlc_root)), inputs_path)
-
-        combined_reviews: List[str] = [f"# Multi-Model Code Review Report (Attempt {attempt}, reasoning={rev_effort})\n"]
-        all_approved = True
-
-        for reviewer_index, mdl in enumerate(review_models, 1):
-            self.check_budget_circuit_breaker()
-            effective_engine, effective_model = resolve_review_entry(mdl, review_engine)
-            print(f"    -> Running Reviewer: {effective_engine}:{effective_model} (reasoning={rev_effort})...")
-            t0 = time.time()
-            rev_out, cost, tin, tout, trace_user = EngineRunner.invoke_role(
-                effective_engine,
-                effective_model,
-                sys_prompt,
-                user_prompt,
-                review_cwd,
-                self.project_id,
-                self.ticket_id,
-                f"04-review-a{attempt}",
-                sandbox="read-only",
-                reasoning_effort=rev_effort,
-            )
-            dur = time.time() - t0
-            verdict = parse_review_verdict(rev_out)
-            raw_review = review_run / f'reviewer-{reviewer_index}.md'
-            raw_review.write_text(rev_out)
-            self.record_artifact(str(raw_review.relative_to(self.ssdlc_root)), raw_review)
-            input_changed = self._task_mode() and (git(review_cwd, 'rev-parse', 'HEAD') != self.state['task_verified_head']
-                                                   or bool(git(review_cwd, 'status', '--porcelain')))
-            passed = verdict == "APPROVED" and not input_changed
-            if not passed:
-                all_approved = False
-            self.record_ledger(
-                CostAndTelemetryEntry(
-                    f"04-review-a{attempt}",
-                    "Code Reviewer",
-                    effective_engine,
-                    effective_model,
-                    'INPUT_CHANGED' if input_changed else verdict or "INVALID_VERDICT",
-                    dur,
-                    cost,
-                    tin,
-                    tout,
-                    trace_user,
-                    reasoning_effort=rev_effort,
-                )
-            )
-            self.check_budget_circuit_breaker()
-            if input_changed:
-                self.record_gate(f'CODE_REVIEW_A{attempt}', False, 'Verified checkpoint changed during review')
-                raise TaskError('Verified checkpoint changed during review; approval withheld')
-            verdict_note = "Invalid or ambiguous final verdict; approval withheld.\n\n" if verdict is None else ""
-            combined_reviews.append(f"## Reviewer: `{effective_engine}:{effective_model}` ({verdict or 'INVALID_VERDICT'}, reasoning={rev_effort})\n\n{verdict_note}{rev_out}\n\n---\n")
-
-        report_text = "\n".join(combined_reviews)
-        rev_path = self.dir_review / f"review-report-a{attempt}.md"
-        rev_path.write_text(report_text, encoding="utf-8")
-        canon_path = self.dir_review / "review-report.md"
-        canon_path.write_text(report_text, encoding="utf-8")
-
-        self.record_artifact(f"04-review/review-report-a{attempt}.md", rev_path)
-        self.record_artifact("04-review/review-report.md", canon_path)
-        self.record_gate(
-            f"CODE_REVIEW_A{attempt}",
-            all_approved,
-            f"Reviewed by {len(review_models)} model(s); approved={all_approved}",
-        )
-        print(f"    [{'OK' if all_approved else 'BOUNCE'}] Code Review status: {'APPROVED' if all_approved else 'CHANGES_REQUESTED'}")
-        return all_approved, report_text
-
-    # ------------------------------------------------------------------
-    # PHASE 5: QA & Security Verification
-    # ------------------------------------------------------------------
     def _run_deterministic_scanners(self, wt: Path, test_cmd: Optional[str]) -> Tuple[bool, str]:
         logs: List[str] = ["# Deterministic QA & Security Execution Logs\n"]
         overall_ok = True
@@ -3994,7 +4731,7 @@ class SSDLCOrchestrator:
             if not test_passed:
                 overall_ok = False
             logs.append(
-                f"## [{'PASS' if test_passed else 'FAIL'}] Test Suite (`{effective_test_cmd}` — exit code {t_rc})\n"
+                f"## [{'PASS' if test_passed else 'FAIL'}] shell_command (`{effective_test_cmd}` — exit code {t_rc})\n"
                 f"```text\n{t_out + t_err}\n```\n"
             )
         else:
@@ -4170,11 +4907,10 @@ class SSDLCOrchestrator:
         self._save_state()
 
         wt = self._ensure_worktree()
-        if self._task_mode():
-            wt, _ = self._verified_task_review_input(self._read_optional(self.dir_dev / 'implementation.diff', ''))
+        wt, _ = self._verified_task_review_input(self._read_optional(self.dir_dev / 'implementation.diff', ''))
         det_ok, det_logs = self._run_deterministic_scanners(wt, test_cmd)
         det_log_path = self.dir_qa / f"deterministic-checks-a{attempt}.md"
-        det_log_path.write_text(det_logs, encoding="utf-8")
+        det_log_path.write_text("# QA deterministic reports (shell_command)\n\n" + det_logs, encoding="utf-8")
         self.record_artifact(f"05-qa/deterministic-checks-a{attempt}.md", det_log_path)
 
         req_text = self._read_optional(self.dir_po / "requirements.md")
@@ -4183,8 +4919,7 @@ class SSDLCOrchestrator:
 
         ui_qa_rules = ""
         qa_cwd = self.repo_root
-        if self._task_mode():
-            qa_cwd = wt
+        qa_cwd = wt
         if dev_profile == "FRONTEND_UI":
             ui_qa_rules = (
                 "\n\nMANDATORY UI/UX ACCEPTANCE VERIFICATION:\n"
@@ -4213,75 +4948,12 @@ class SSDLCOrchestrator:
             f"PO REQUIREMENTS:\n{req_text}\n\n"
             f"THREAT MODEL:\n{tm_text}\n\n"
             f"DETERMINISTIC TEST & SCAN LOGS:\n{det_logs}\n\n"
-            f"IMPLEMENTATION DIFF:\n```diff\n{diff_text if self._task_mode() else diff_text[:60000]}\n```"
+            f"IMPLEMENTATION DIFF:\n```diff\n{diff_text}\n```"
         )
 
-        if self._task_mode():
-            return self._task_verification_gate('qa', attempt, qa_engine, qa_model, qa_effort,
-                diff_text, sys_prompt, user_prompt, {'det_ok': det_ok}, [('ev/qa-deterministic', det_log_path)])
+        return self._task_verification_gate('qa', attempt, qa_engine, qa_model, qa_effort,
+            diff_text, sys_prompt, user_prompt, {'det_ok': det_ok}, [('ev/qa-deterministic', det_log_path)])
 
-        qa_run = self.dir_qa / 'runs' / uuid.uuid4().hex
-        qa_run.mkdir(parents=True)
-        input_path = qa_run / 'inputs.json'
-        atomic_json(input_path, {'verified_head': self.state.get('task_verified_head'), 'qa_cwd': str(qa_cwd),
-                                 'system_prompt': sys_prompt, 'user_prompt': user_prompt})
-        self.record_artifact(str(input_path.relative_to(self.ssdlc_root)), input_path)
-
-        t0 = time.time()
-        qa_out, cost, tin, tout, trace_user = EngineRunner.invoke_role(
-            qa_engine,
-            qa_model,
-            sys_prompt,
-            user_prompt,
-            qa_cwd,
-            self.project_id,
-            self.ticket_id,
-            f"05-qa-a{attempt}",
-            sandbox="read-only",
-            reasoning_effort=qa_effort,
-        )
-        dur = time.time() - t0
-
-        qa_verdict = parse_qa_verdict(qa_out)
-        llm_qa_ok = qa_verdict == 'PASSED'
-        input_changed = self._task_mode() and (git(qa_cwd, 'rev-parse', 'HEAD') != self.state['task_verified_head']
-                                               or bool(git(qa_cwd, 'status', '--porcelain')))
-        if input_changed:
-            self._gate_terminal = ("05-qa", "integrity_blocked")
-        final_qa_ok = det_ok and llm_qa_ok and not input_changed
-        raw_path = qa_run / 'response.md'
-        raw_path.write_text(qa_out)
-        self.record_artifact(str(raw_path.relative_to(self.ssdlc_root)), raw_path)
-
-        qa_path = self.dir_qa / "qa-traceability-matrix.md"
-        qa_path.write_text(qa_out, encoding="utf-8")
-        self.record_artifact("05-qa/qa-traceability-matrix.md", qa_path)
-        self.record_ledger(
-            CostAndTelemetryEntry(
-                f"05-qa-a{attempt}",
-                "QA & Security Verifier",
-                qa_engine,
-                qa_model,
-                'INPUT_CHANGED' if input_changed else 'INVALID_VERDICT' if qa_verdict is None else "PASSED" if final_qa_ok else "FAILED",
-                dur,
-                cost,
-                tin,
-                tout,
-                trace_user,
-                reasoning_effort=qa_effort,
-            )
-        )
-        self.record_gate(
-            f"QA_VERIFICATION_A{attempt}",
-            final_qa_ok,
-            f"deterministic_ok={det_ok}, ac_matrix_ok={llm_qa_ok}, input_changed={input_changed}, reasoning={qa_effort}",
-        )
-        print(f"    [{'OK' if final_qa_ok else 'BOUNCE'}] QA Gate status: {'PASSED' if final_qa_ok else 'FAILED'}")
-        return final_qa_ok, f"{det_logs}\n\n{qa_out}"
-
-    # ------------------------------------------------------------------
-    # PHASE 5b: AppSec Red-Teamer & Supply-Chain / SCA Auditor
-    # ------------------------------------------------------------------
     @_supervised_phase('05b-appsec')
     def run_phase_appsec(self, attempt: int = 1) -> Tuple[bool, str]:
         self._gate_terminal = None
@@ -4300,112 +4972,30 @@ class SSDLCOrchestrator:
         tm_text = self._read_optional(self.dir_design / "threat-model.md")
         diff_text = self._read_optional(self.dir_dev / "implementation.diff", "")
 
-        if self._task_mode():
-            wt, limit = self._verified_task_review_input(diff_text)
-            scanners = self._run_appsec_scans(wt)
-            text = '\n'.join(f'## {r.id}: {r.status}\n{r.reason}\n{r.log}' for r in scanners)
-            evidence = []
-            for index, result in enumerate(scanners):
-                path = self.dir_appsec / f'scanner-{index}-a{attempt}.log'
-                path.write_text(result.log + '\n' + result.reason)
-                self.record_artifact(str(path.relative_to(self.ssdlc_root)), path)
-                evidence.append((f'ev/sca-{result.id}', path))
-            for name in (f'supply-chain-sca-a{attempt}.md', 'supply-chain-sca.md'):
-                path = self.dir_appsec / name
-                path.write_text(text)
-                self.record_artifact(str(path.relative_to(self.ssdlc_root)), path)
-            status = self.dir_appsec / 'scanner-status.json'
-            status.write_text(scanner_status_json(scanners))
-            self.record_artifact('05b-appsec/scanner-status.json', status)
-            evidence.append(('ev/sca-status', status))
-            excerpt = text if len(text) <= limit else text[:limit // 2] + '\n[excerpt; full logs: ev/sca-status and scanner evidence]\n' + text[-limit // 2:]
-            return self._task_verification_gate('appsec', attempt, appsec_engine, appsec_model, appsec_effort,
-                diff_text, 'You are the AppSec auditor. Analyze security and dependencies. End with exactly one final '
-                'APPSEC_STATUS: SECURE or APPSEC_STATUS: VULNERABLE line.',
-                f'REQUIREMENTS:\n{req_text}\nTHREAT MODEL:\n{tm_text}\nSCA:\n{excerpt}\nCOMPLETE DIFF:\n{diff_text}',
-                {'scanners': all(r.status in ('passed', 'not_applicable') for r in scanners)}, evidence, scanners)
+        wt, limit = self._verified_task_review_input(diff_text)
+        scanners = self._run_appsec_scans(wt)
+        text = '\n'.join(f'## {r.id}: {r.status}\n{r.reason}\n{r.log}' for r in scanners)
+        evidence = []
+        for index, result in enumerate(scanners):
+            path = self.dir_appsec / f'scanner-{index}-a{attempt}.log'
+            path.write_text(result.log + '\n' + result.reason)
+            self.record_artifact(str(path.relative_to(self.ssdlc_root)), path)
+            evidence.append((f'ev/sca-{result.id}', path))
+        for name in (f'supply-chain-sca-a{attempt}.md', 'supply-chain-sca.md'):
+            path = self.dir_appsec / name
+            path.write_text(text)
+            self.record_artifact(str(path.relative_to(self.ssdlc_root)), path)
+        status = self.dir_appsec / 'scanner-status.json'
+        status.write_text(scanner_status_json(scanners))
+        self.record_artifact('05b-appsec/scanner-status.json', status)
+        evidence.append(('ev/sca-status', status))
+        excerpt = text if len(text) <= limit else text[:limit // 2] + '\n[excerpt; full logs: ev/sca-status and scanner evidence]\n' + text[-limit // 2:]
+        return self._task_verification_gate('appsec', attempt, appsec_engine, appsec_model, appsec_effort,
+            diff_text, 'You are the AppSec auditor. Analyze security and dependencies. End with exactly one final '
+            'APPSEC_STATUS: SECURE or APPSEC_STATUS: VULNERABLE line.',
+            f'REQUIREMENTS:\n{req_text}\nTHREAT MODEL:\n{tm_text}\nSCA:\n{excerpt}\nCOMPLETE DIFF:\n{diff_text}',
+            {'scanners': all(r.status in ('passed', 'not_applicable') for r in scanners)}, evidence, scanners)
 
-        sca_logs = ["# Supply-Chain & Dependency Audit (SCA)\n"]
-        if (wt / "package-lock.json").exists() and (shutil.which("npm") or EngineRunner._should_spawn_role_container()):
-            npma_out, npma_err, npma_rc = EngineRunner.run_sandboxed_cmd(
-                ["npm", "audit", "--audit-level=high"],
-                cwd=wt,
-                timeout=120,
-            )
-            sca_logs.append(f"## npm audit (exit {npma_rc})\n```\n{(npma_out + npma_err)[:8000]}\n```\n")
-        if ((wt / "requirements.txt").exists() or (wt / "pyproject.toml").exists()) and (shutil.which("pip-audit") or EngineRunner._should_spawn_role_container()):
-            pa_out, pa_err, pa_rc = EngineRunner.run_sandboxed_cmd(
-                ["pip-audit"],
-                cwd=wt,
-                timeout=120,
-            )
-            sca_logs.append(f"## pip-audit (exit {pa_rc})\n```\n{(pa_out + pa_err)[:8000]}\n```\n")
-
-        sca_text = "\n".join(sca_logs)
-        sca_path = self.dir_appsec / "supply-chain-sca.md"
-        sca_path.write_text(sca_text, encoding="utf-8")
-        self.record_artifact("05b-appsec/supply-chain-sca.md", sca_path)
-
-        sys_prompt = (
-            "You are the Principal AppSec Red-Teamer & Supply-Chain Security Auditor.\n"
-            "Attempt to break the implementation diff and audit any new dependencies:\n"
-            "1. ## Offensive Security & Exploit Analysis (Injection, Auth Bypass, IDOR, SSRF, Path Traversal, Deserialization, DoS)\n"
-            "2. ## Supply-Chain & Dependency Review (new packages, typosquatting, CVEs, license risks)\n"
-            "3. ## Secrets, Crypto & Data Exposure Check\n"
-            "At the very end, output EXACTLY one of:\n"
-            "APPSEC_STATUS: SECURE (if no exploitable vulnerabilities or high-severity supply-chain risks exist)\n"
-            "or\n"
-            "APPSEC_STATUS: VULNERABLE (if any exploitable flaw or unmitigated security risk exists)"
-        )
-        user_prompt = (
-            f"PO SECURITY REQUIREMENTS:\n{req_text}\n\n"
-            f"THREAT MODEL:\n{tm_text}\n\n"
-            f"SCA SCANNER LOGS:\n{sca_text}\n\n"
-            f"IMPLEMENTATION DIFF:\n```diff\n{diff_text[:60000]}\n```"
-        )
-
-        t0 = time.time()
-        appsec_out, cost, tin, tout, trace_user = EngineRunner.invoke_role(
-            appsec_engine,
-            appsec_model,
-            sys_prompt,
-            user_prompt,
-            self.repo_root,
-            self.project_id,
-            self.ticket_id,
-            f"05b-appsec-a{attempt}",
-            sandbox="read-only",
-            reasoning_effort=appsec_effort,
-        )
-        dur = time.time() - t0
-
-        secure = "APPSEC_STATUS: SECURE" in appsec_out
-        redteam_path = self.dir_appsec / "redteam-audit.md"
-        redteam_path.write_text(appsec_out, encoding="utf-8")
-        self.record_artifact("05b-appsec/redteam-audit.md", redteam_path)
-
-        self.record_ledger(
-            CostAndTelemetryEntry(
-                f"05b-appsec-a{attempt}",
-                "AppSec Red-Teamer",
-                appsec_engine,
-                appsec_model,
-                "SECURE" if secure else "VULNERABLE",
-                dur,
-                cost,
-                tin,
-                tout,
-                trace_user,
-                reasoning_effort=appsec_effort,
-            )
-        )
-        self.record_gate(f"APPSEC_REDTEAM_A{attempt}", secure, f"AppSec verdict: {'SECURE' if secure else 'VULNERABLE'} (reasoning={appsec_effort})")
-        print(f"    [{'OK' if secure else 'BOUNCE'}] AppSec Gate status: {'SECURE' if secure else 'VULNERABLE'}")
-        return secure, appsec_out
-
-    # ------------------------------------------------------------------
-    # PHASE 6: DevSecOps Release, Rollback & Observability Engineer
-    # ------------------------------------------------------------------
     def _ops_docs_context(self, phase, diff_text, texts):
         wt, _ = self._verified_task_review_input(diff_text)
         disclosure = dict(schema_version='1.0', phase=phase,
@@ -4430,7 +5020,7 @@ class SSDLCOrchestrator:
         return wt, block, disclosure
 
     def _ops_docs_enabled(self):
-        return self._task_mode() and candidate_reports.convergence_enabled(self._ensure_quality_contract())
+        return candidate_reports.convergence_enabled(self._ensure_quality_contract())
 
     def _verify_ops_docs_after(self, diff_text):
         fresh = git(self.worktree_dir, 'diff', '--binary', self.state['base_commit'], 'HEAD') + '\n'
@@ -4609,12 +5199,13 @@ class SSDLCOrchestrator:
             atomic_json(path, summary); self.record_artifact('feedback-summary.json', path)
             completion_disclosures += '\nFeedback provenance and counters: [feedback-summary.json](./feedback-summary.json).\n'
 
+        # QA shell_command reports remain separate from typed contract checks.
         artifact_rows = []
         for name, meta in sorted(self.state["artifacts"].items()):
             if name == "EVIDENCE_PACK.md":
                 continue  # The pack cannot contain its own current digest.
             artifact_rows.append(
-                f"| [`{name}`](./{meta['path']}) | `{meta['sha256'][:16]}...` | {meta.get('size_bytes', 'not recorded')} B | {meta.get('recorded_at', 'not recorded')} |"
+                f"| [`{'shell_command ' if name.startswith('05-qa/deterministic-checks-') else ''}{name}`](./{meta['path']}) | `{meta['sha256'][:16]}...` | {meta.get('size_bytes', 'not recorded')} B | {meta.get('recorded_at', 'not recorded')} |"
             )
 
         gate_rows = []
@@ -4693,7 +5284,7 @@ To **APPROVE** and merge the verified branch into your project repository (and p
 ./ssdlc approve {self.ticket_id}
 ```
 
-To **REJECT** and send feedback back to the team:
+To **REJECT** and record feedback (free text authorizes no repair):
 ```bash
 ./ssdlc reject {self.ticket_id} --reason "Describe required adjustment"
 ```
@@ -4703,7 +5294,7 @@ To **REJECT** and send feedback back to the team:
         self.record_artifact("EVIDENCE_PACK.md", pack_path)
         print(f"    [OK] Evidence Pack ready at: {pack_path.relative_to(self.repo_root)}")
 
-        if self.remote_sync.enabled and (not self._task_mode() or ready_for_signoff):
+        if self.remote_sync.enabled and (ready_for_signoff):
             wt = self.worktree_dir
             branch = self.state.get("dev_branch", f"ssdlc/{self.ticket_id}")
             base_branch = "main"
@@ -4719,23 +5310,8 @@ To **REJECT** and send feedback back to the team:
             except Exception:
                 pass
 
-            if self._task_mode() and (git(wt, "status", "--porcelain") or self._get_head_sha(wt) != self.state.get("task_verified_head")):
+            if (git(wt, "status", "--porcelain") or self._get_head_sha(wt) != self.state.get("task_verified_head")):
                 raise TaskError("Refusing to publish changes outside verified checkpoints")
-            if wt.exists() and not self._task_mode():
-                subprocess.run(["git", "add", "-A"], cwd=str(wt), capture_output=True)
-                status_chk = subprocess.run(
-                    ["git", "status", "--porcelain"],
-                    cwd=str(wt),
-                    capture_output=True,
-                    text=True,
-                )
-                if status_chk.stdout.strip():
-                    subprocess.run(
-                        ["git", "commit", "-m", f"feat({self.ticket_id}): implementation checkpoint"],
-                        cwd=str(wt),
-                        capture_output=True,
-                        text=True,
-                    )
 
             if not self.state.get("issue_id"):
                 req_text = self._read_optional(self.dir_po / "requirements.md")
@@ -4785,24 +5361,22 @@ To **REJECT** and send feedback back to the team:
     ]
 
     def check_budget_circuit_breaker(self) -> None:
+        transactions = self._open_or_any_txns()
+        if transactions and self._cancel_requested():
+            raise corrective.CorrectiveError('cancelled')
         limits = getattr(_dispatch_local, 'limits', None)
         if limits is not None:
             envelope, state = limits._load(repair=False)
             limits.check(state, envelope['policy'])
+            if not transactions:
+                return
+        budget_cap = self._corrective_limits(transactions)['budget_cap_usd']
+        if budget_cap is None:
             return
-        env_cap = os.environ.get("SSDLC_BUDGET_CAP_USD", "").strip()
-        if env_cap:
-            budget_cap = float(env_cap)
-        else:
-            tier = (self.state.get("risk_tier") or "M").upper()
-            tier_caps = {"S": 3.0, "M": 6.0, "L": 20.0}
-            budget_cap = tier_caps.get(tier, 6.0)
-
-        if budget_cap <= 0:
-            return
-        total_spent = sum(item.get("cost_usd", 0.0) for item in self.state.get("ledger", []))
+        total_spent = self._corrective_accounted_spend()
         if total_spent >= budget_cap:
-            msg = f"Circuit Breaker: Total spend (${total_spent:.2f}) reached or exceeded budget cap (${budget_cap:.2f})!"
+            label = "Accounted usage including reserves" if limits is not None else "Total reported spend"
+            msg = f"Circuit Breaker: {label} (${total_spent:.2f}) reached or exceeded budget cap (${budget_cap:.2f})!"
             print(f"\n[CIRCUIT-BREAKER] {msg}")
             self.record_gate("BUDGET_CAP_GATE", False, msg)
             self.state["status"] = "HALTED_BUDGET_EXCEEDED"
@@ -4810,6 +5384,7 @@ To **REJECT** and send feedback back to the team:
             raise TaskError(msg)
 
     @_bounded_entrypoint
+    @_bootstrap_run_invocation
     def run_pipeline(
         self,
         goal: str,
@@ -4817,22 +5392,26 @@ To **REJECT** and send feedback back to the team:
         tier: str = "auto",
         from_phase: str = "00-recon",
     ) -> Path:
+        _warn_obsolete_task_flag(self.ticket_id)
         if self.ssdlc_root != self.repo_root / '.ssdlc' / self.ticket_id and from_phase != '03-dev':
             raise DevelopmentBlocked('SCOPE_REQUIRED', 'Reconciled execution must resume from 03-dev')
         with ticket_lock(getattr(self, "ticket_lock_path", self.ssdlc_root / "ticket.lock")):
+            # Another invocation may have sealed an unproven contract while
+            # this caller waited. Recheck before writing any run state.
+            bootstrap.require_unproven_run_is_current(self.ssdlc_root)
             # Reload state after acquiring the lock, not from a potentially stale constructor.
             self.state = self._load_or_init_state()
-            if self._task_mode():
-                self.state["task_breakdown"] = True
-                self._save_state()
-                if os.environ.get("SSDLC_EXECUTION_MODE", "docker") == "docker" and not EngineRunner._should_spawn_role_container():
-                    raise TaskError("Task mode in Docker requires role-container isolation. Run the controller on the host with the runner image available, or explicitly select local mode.")
-                self._ensure_quality_contract()
+            self.state["task_breakdown"] = True
+            self._save_state()
+            if os.environ.get("SSDLC_EXECUTION_MODE", "docker") == "docker" and not EngineRunner._should_spawn_role_container():
+                raise TaskError("Task mode in Docker requires role-container isolation. Run the controller on the host with the runner image available, or explicitly select local mode.")
+            self._ensure_quality_contract()
             try:
                 return self._run_pipeline(goal, test_cmd, tier, from_phase)
             except TaskError as exc:
                 if getattr(exc, 'feedback_source_preserved', False):
                     raise
+                self._mark_open_txn_interrupted(getattr(exc, 'code', 'budget_interrupted'))
                 _supervision_event('failure', category=getattr(exc, 'category', 'TASK_EXECUTION'), exc_type=type(exc).__name__)
                 failed_phase = self.state.get('current_phase')
                 failed_step = self.state.get('current_step')
@@ -4857,12 +5436,10 @@ To **REJECT** and send feedback back to the team:
         tier: str = "auto",
         from_phase: str = "00-recon",
     ) -> Path:
-        if self._task_mode() or os.environ.get('SSDLC_SUPERVISED_RUN_ID'):
-            # The read-only compatibility API checks whether baseline state exists.
-            # The existing foreground path retains its previous refusal contract.
-            _resume_run_refusal(self.ssdlc_root, self.state, self._task_mode(), from_phase)
+        recovered = self._reconcile_open_txn()
+        _resume_run_refusal(self.ssdlc_root, self.state, from_phase)
         quality_path = self.ssdlc_root / '00-recon' / 'quality-contract.json'
-        if self._task_mode() and quality_path.exists() and candidate_reports.convergence_enabled(json.loads(quality_path.read_text())):
+        if quality_path.exists() and candidate_reports.convergence_enabled(json.loads(quality_path.read_text())):
             candidate_reports.reconcile_candidate_store(self.ssdlc_root, self.state['artifacts'], self._register_new)
         start_idx = self.PHASE_ORDER.index(from_phase) if from_phase in self.PHASE_ORDER else 0
 
@@ -4888,56 +5465,79 @@ To **REJECT** and send feedback back to the team:
         else:
             print("    [RESUME] Skipping 02-design")
 
-        if self._task_mode():
-            self._ensure_task_plan()
+        self._ensure_task_plan()
 
         frozen = getattr(_dispatch_local, 'limits', None)
-        max_retries = (frozen._load(repair=False)[0]['policy']['development_attempts'] if frozen is not None
-                       else int(os.environ.get('SSDLC_MAX_DEV_RETRIES', '3')))
-        feedback = ""
+        max_retries = int(os.environ.get('SSDLC_MAX_DEV_RETRIES', '3'))
+        # Preserve historical gate setup until a registered transaction exists.
+        # In particular, this path must not resolve the budget cap early.
+        if any(ref.startswith('bounce-txn/') and ref.endswith('/transaction.json')
+               for ref in self.state.get('artifacts', {})):
+            max_retries = self._corrective_limits()['gate_round_ceiling']
+        if frozen is not None:
+            max_retries = min(self._corrective_limits()['gate_round_ceiling'],
+                frozen._load(repair=False)[0]['policy']['development_attempts'])
         passed_all = False
 
         if start_idx <= self.PHASE_ORDER.index("05b-appsec"):
-            for attempt in range(1, max_retries + 1):
-                if attempt > 1 or start_idx <= self.PHASE_ORDER.index("03-dev"):
-                    self.run_phase_dev(feedback=feedback, attempt=attempt)
+            first_attempt = recovered['next_gate_attempt'] if recovered else 1
+            for attempt in range(first_attempt, max_retries + 1):
+                if recovered and attempt > self._corrective_limits()['gate_round_ceiling']:
+                    raise corrective.CorrectiveError('gate_attempts_exhausted')
+                corrective_run = bool(recovered) or attempt > 1
+                if corrective_run:
+                    self.check_budget_circuit_breaker()
+                    transaction = next((record for record in self._open_or_any_txns()
+                                        if record['txn_id'] == recovered.get('txn_id')), None)
+                    if transaction is None:
+                        raise corrective.CorrectiveError('txn_record_conflict')
+                    self._corrective_stage('gates_rerun', preview={'revision': transaction['preview']['revision']},
+                        txn_id=transaction['txn_id'], tasks=transaction['closure'])
+                if not corrective_run and start_idx <= self.PHASE_ORDER.index("03-dev"):
+                    self.run_phase_dev()
                     self.check_budget_circuit_breaker()
                 else:
                     print("    [RESUME] Skipping initial 03-dev execution")
 
-                if attempt > 1 or start_idx <= self.PHASE_ORDER.index("04-review"):
+                if corrective_run or start_idx <= self.PHASE_ORDER.index("04-review"):
                     rev_ok, rev_report = self.run_phase_review(attempt=attempt)
                     self._stop_on_terminal_gate()
                     self.check_budget_circuit_breaker()
                     if not rev_ok:
-                        feedback = f"Code Reviewer rejected the diff (Attempt {attempt}):\n{rev_report}"
+                        if attempt >= max_retries:
+                            break
+                        recovered = self._corrective_round('04-review', attempt)
+                        max_retries = min(max_retries, self._corrective_limits()['gate_round_ceiling'])
                         continue
                 else:
                     print("    [RESUME] Skipping initial 04-review execution")
 
-                if attempt > 1 or start_idx <= self.PHASE_ORDER.index("05-qa"):
+                if corrective_run or start_idx <= self.PHASE_ORDER.index("05-qa"):
                     qa_ok, qa_report = self.run_phase_qa(test_cmd=test_cmd, attempt=attempt)
                     self._stop_on_terminal_gate()
                     self.check_budget_circuit_breaker()
                     if not qa_ok:
-                        feedback = f"QA Gate rejected the implementation (Attempt {attempt}):\n{qa_report}"
+                        if attempt >= max_retries:
+                            break
+                        recovered = self._corrective_round('05-qa', attempt)
+                        max_retries = min(max_retries, self._corrective_limits()['gate_round_ceiling'])
                         continue
                 else:
                     print("    [RESUME] Skipping initial 05-qa execution")
 
-                run_appsec = (
-                    active_tier == "L"
-                    or "APPSEC_SUPPLY_CHAIN_REDTEAM" in self.state.get("specialists_triggered", [])
-                    or from_phase == "05b-appsec"
-                )
-                if run_appsec:
-                    appsec_ok, appsec_report = self.run_phase_appsec(attempt=attempt)
-                    self._stop_on_terminal_gate()
-                    self.check_budget_circuit_breaker()
-                    if not appsec_ok:
-                        feedback = f"AppSec Red-Teamer rejected the implementation (Attempt {attempt}):\n{appsec_report}"
-                        continue
+                # Plan size and specialist selection never waive a global gate.
+                appsec_ok, appsec_report = self.run_phase_appsec(attempt=attempt)
+                self._stop_on_terminal_gate()
+                self.check_budget_circuit_breaker()
+                if not appsec_ok:
+                    if attempt >= max_retries:
+                        break
+                    recovered = self._corrective_round('05b-appsec', attempt)
+                    max_retries = min(max_retries, self._corrective_limits()['gate_round_ceiling'])
+                    continue
 
+                if corrective_run:
+                    self._approve_corrective_candidate(attempt)
                 passed_all = True
                 break
         else:
@@ -4958,7 +5558,7 @@ To **REJECT** and send feedback back to the team:
                 self.run_phase_docs()
                 self.check_budget_circuit_breaker()
 
-        if self._task_mode() and passed_all:
+        if passed_all:
             if (self._get_head_sha(self.worktree_dir) != self.state.get("task_verified_head")
                     or git(self.worktree_dir, "status", "--porcelain")):
                 raise TaskError("Code changed after task verification; global gates cannot authorize delivery")
@@ -4970,38 +5570,33 @@ To **REJECT** and send feedback back to the team:
             self._approve_and_merge()
 
     def _approve_and_merge(self) -> None:
-        if self._task_mode():
-            if self.state.get("status") != "AWAITING_SUPERVISOR_SIGNOFF":
-                raise TaskError("Task ticket has not passed the global gates")
-            if (self._get_head_sha(self.worktree_dir) != self.state.get("task_verified_head")
-                    or git(self.worktree_dir, "status", "--porcelain")):
-                raise TaskError("Task worktree no longer matches the verified checkpoint")
-            if (git(self.repo_root, "rev-parse", "HEAD") != self.state["base_commit"]
-                    or git(self.repo_root, "status", "--porcelain")):
-                raise TaskError("Bootstrap approval requires a clean unchanged target; advanced-target integration belongs to Step 3")
+        for path in (self.ssdlc_root / 'bounce-txn').glob('*/transaction.json'):
+            ref = str(path.relative_to(self.ssdlc_root))
+            if ref not in self.state.get('artifacts', {}):
+                raise corrective.CorrectiveError('txn_record_conflict', 'unregistered transaction requires reconciliation')
+        for record in self._open_or_any_txns():
+            journal = corrective.TransactionJournal(self.ssdlc_root / 'bounce-txn' / record['txn_id'])
+            outcome = journal.peek()
+            if not outcome or outcome['status'] not in ('COMPLETED', 'APPROVED'):
+                raise corrective.CorrectiveError('txn_record_conflict', 'transaction is not terminal')
+        if self.state.get("status") != "AWAITING_SUPERVISOR_SIGNOFF":
+            raise TaskError("Task ticket has not passed the global gates")
+        if (self._get_head_sha(self.worktree_dir) != self.state.get("task_verified_head")
+                or git(self.worktree_dir, "status", "--porcelain")):
+            raise TaskError("Task worktree no longer matches the verified checkpoint")
+        if (git(self.repo_root, "rev-parse", "HEAD") != self.state["base_commit"]
+                or git(self.repo_root, "status", "--porcelain")):
+            raise TaskError("Bootstrap approval requires a clean unchanged target; advanced-target integration belongs to Step 3")
         if self.state.get("status") not in ("AWAITING_SUPERVISOR_SIGNOFF", "ESCALATED_TO_SUPERVISOR"):
             raise RuntimeError(f"Ticket {self.ticket_id} is in status {self.state.get('status')}, cannot approve.")
+        verify_signoff_evidence(self.repo_root, self.ssdlc_root, self.state, self.worktree_dir)
         disclosures = self._completion_disclosures()
         if disclosures:
             print(disclosures, flush=True)
         wt = self.worktree_dir
         branch = self.state["dev_branch"]
-        if wt.exists() and not self._task_mode():
-            subprocess.run(["git", "add", "-A"], cwd=str(wt), check=True)
-            subprocess.run(
-                ["git", "commit", "-m", f"feat({self.ticket_id}): SSDLC verified implementation"],
-                cwd=str(wt),
-                capture_output=True,
-                text=True,
-            )
-            sha = self._get_head_sha(wt)
-            (self.dir_dev / "commit-sha.txt").write_text(sha + "\n", encoding="utf-8")
-            self.record_artifact("03-dev/commit-sha.txt", self.dir_dev / "commit-sha.txt")
 
-        if self._task_mode():
-            git(self.repo_root, "merge", "--ff-only", self.state["task_verified_head"])
-        else:
-            subprocess.run(["git", "merge", "--no-ff", branch, "-m", f"Merge SSDLC verified branch {branch}"], cwd=str(self.repo_root), check=True)
+        git(self.repo_root, "merge", "--ff-only", self.state["task_verified_head"])
 
         # Compound Knowledge: Auto-register any new components into .ssdlc/standards/COMPONENT_CATALOG.md
         standards_catalog = self.repo_root / ".ssdlc" / "standards" / "COMPONENT_CATALOG.md"
@@ -5120,12 +5715,12 @@ def _foreground_main(argv=None) -> int:
     p_doc = sub.add_parser("doctor", help="Check project isolation, CLI versions, and API key fingerprints")
     p_doc.add_argument("--repo", "-r", default=".", help="Path to project repository")
 
-    p_run = sub.add_parser("run", help="Run the risk-tiered SSDLC pipeline for a ticket")
+    p_run = sub.add_parser("run", help="Run the risk-tiered task engine for a ticket")
     p_run.add_argument("--ticket", "-t", required=True, help="Ticket ID (e.g., TKT-001-auth)")
     p_run.add_argument("--goal", "-g", required=True, help="High-level requirement or feature goal")
     p_run.add_argument("--tier", default=None, choices=["auto", "S", "M", "L"], help="Risk tier: auto, S, M, or L")
     p_run.add_argument("--repo", "-r", default=".", help="Path to Git repository (default: current dir)")
-    p_run.add_argument("--test-cmd", default=None, help="Deterministic test command for Phase 5 QA")
+    p_run.add_argument("--test-cmd", default=None, help="QA shell command (recorded separately from typed contract checks)")
     p_run.add_argument(
         "--from-phase",
         default="00-recon",
@@ -5209,6 +5804,7 @@ def _foreground_main(argv=None) -> int:
     p_design.add_argument('--repo', '-r', default='.')
     p_design.add_argument('--rounds', type=int, choices=range(1, 9), default=None,
                           help='Explicit total round limit (1-8), preserving consumed rounds')
+    p_design.add_argument('--import-from-ticket', default=None)
     p_design.add_argument('--import-legacy', default=None,
                           help='Import a verified legacy directory relative to 02-design, e.g. rounds/UUID')
 
@@ -5221,7 +5817,7 @@ def _foreground_main(argv=None) -> int:
     app_sync.add_argument("--no-sync-remote", dest="sync_remote", action="store_false",
                           help="Do not push merged branch")
 
-    p_rej = sub.add_parser("reject", help="Supervisor rejection: bounce back to Dev with feedback")
+    p_rej = sub.add_parser("reject", help="Supervisor rejection: record rejection; free text authorizes no repair")
     p_rej.add_argument("ticket", help="Ticket ID")
     p_rej.add_argument("--reason", required=True, help="Supervisor rejection feedback")
     p_rej.add_argument("--repo", "-r", default=".", help="Path to Git repository")
@@ -5242,6 +5838,23 @@ def _foreground_main(argv=None) -> int:
         p_limits.add_argument('--limits-profile', help='Explicit operator limits JSON for a fresh ticket; frozen on first launch')
 
     args = parser.parse_args(argv)
+    _warn_obsolete_task_flag(getattr(args, 'ticket', '-'))
+    if args.subcommand in {'run', 'start', 'resume', 'approve', 'reject', 'plan', 'design', 'po'}:
+        command = getattr(args, 'entrypoint', 'run') if args.subcommand == 'resume' else args.subcommand
+        importing = args.subcommand == 'design' and getattr(args, 'import_from_ticket', None)
+        check = startup_preflight(args.repo, args.ticket, 'run' if importing else command, args)
+        if importing and check['cls'] not in {'new_run', 'pre_execution'}:
+            check = dict(ok=False, code='legacy_not_executable')
+        if not check['ok']:
+            if check.get('reason') == 'invalid_ticket':
+                parser.error('invalid ticket ID')
+            if check['code'] == 'legacy_not_executable':
+                LEGACY_COUNTERS['legacy_refusals'] += 1
+                logging.getLogger(__name__).warning('legacy-refusal run=%s txn=- preview=- tasks=- command=%s', _stage_log_field(args.ticket), _stage_log_field(command))
+                print(legacy_message(args.ticket), file=sys.stderr)
+            else:
+                print(check['code'], file=sys.stderr)
+            return 24 if check['code'] == 'bootstrap_ineligible' else 23
     repo_path = Path(getattr(args, 'repo', '.')).resolve()
     if args.subcommand in {"run", "start", "plan", "design"} and getattr(args, "limits_profile", None):
         from ssdlc_recovery import LimitsStore
@@ -5297,6 +5910,15 @@ def _foreground_main(argv=None) -> int:
         print(orch.resume_task_planning(review_repairs=args.review_repairs, recover_review=args.recover_review))
         return 0
 
+    if args.subcommand == 'design' and args.import_from_ticket:
+        from ssdlc_design import read_history_rounds, DesignSession
+        rounds = read_history_rounds(repo_path, args.import_from_ticket, args.import_legacy)
+        orch = SSDLCOrchestrator(repo_path, args.ticket, sync_remote=False)
+        session = DesignSession(orch.dir_design, {'origin_ticket': args.import_from_ticket}, None, None,
+                                lambda: None, lambda path: orch.record_artifact(str(path.relative_to(orch.ssdlc_root)), path))
+        session.import_legacy(rounds)
+        return 0
+
     if args.subcommand == 'design':
         orch = SSDLCOrchestrator(repo_path, args.ticket, sync_remote=False)
         print(orch.resume_pair_design(round_limit=args.rounds, import_legacy=args.import_legacy))
@@ -5327,12 +5949,7 @@ def _foreground_main(argv=None) -> int:
         sync_remote = args.sync_remote
         orch = SSDLCOrchestrator(repo_path, args.ticket, sync_remote=sync_remote)
         orch.record_gate("SUPERVISOR_SIGNOFF", False, f"Rejected by supervisor: {args.reason}")
-        orch.run_phase_dev(feedback=f"SUPERVISOR REJECTION: {args.reason}", attempt=99)
-        orch.run_phase_review(attempt=99)
-        orch.run_phase_qa(test_cmd=args.test_cmd, attempt=99)
-        if orch.state.get("risk_tier") == "L" or "APPSEC_SUPPLY_CHAIN_REDTEAM" in orch.state.get("specialists_triggered", []):
-            orch.run_phase_appsec(attempt=99)
-        orch.compile_evidence_pack(ready_for_signoff=True)
+        print("Rejection recorded. Free text authorizes no repair or execution.")
         return 0
 
     return 0
@@ -5347,6 +5964,7 @@ def _supervised_exit_code(value) -> int:
 
 
 def main(argv=None) -> int:
+    _configure_stage_logging()
     words = sys.argv[1:] if argv is None else argv
     if words and words[0].startswith('feedback-repair-'):
         from ssdlc_feedback_return import main as repair_main
@@ -5369,6 +5987,21 @@ def main(argv=None) -> int:
     supervised = bool(os.environ.get('SSDLC_SUPERVISED_RUN_ID')) and bool(words) and words[0] in {'run', 'plan', 'design'}
     if not supervised:
         return _foreground_main(argv)
+    # Reject persisted legacy evidence before lifecycle logging can write events.
+    def word_value(flag, default=None):
+        aliases = {'--ticket': '-t', '--repo': '-r'}
+        for name in (flag, aliases.get(flag)):
+            if name in words and words.index(name) + 1 < len(words):
+                return words[words.index(name) + 1]
+        return default
+    check = startup_preflight(word_value('--repo', '.'), word_value('--ticket'), words[0],
+                              {'from_phase': word_value('--from-phase', '00-recon')})
+    if word_value('--ticket') is not None and not check['ok']:
+        if check['code'] == 'legacy_not_executable':
+            LEGACY_COUNTERS['legacy_refusals'] += 1
+            logging.getLogger(__name__).warning('legacy-refusal run=%s txn=- preview=- tasks=- command=%s', _stage_log_field(word_value('--ticket')), _stage_log_field(words[0]))
+            print(legacy_message(word_value('--ticket')), file=sys.stderr)
+        return 24 if check['code'] == 'bootstrap_ineligible' else 23
     code, exc_type = 1, None
     try:
         if not _supervised_preflight():

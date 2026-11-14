@@ -678,8 +678,14 @@ def controller_snapshot_digest():
 
 
 def compatibility(a, env=None):
-    from orchestrator import resume_compatibility
-    return resume_compatibility(a['repo'], a['ticket'], a['entrypoint'], a['from_phase'], env)
+    from orchestrator import resume_compatibility, LEGACY_COUNTERS, legacy_message
+    check = resume_compatibility(a['repo'], a['ticket'], a['entrypoint'], a['from_phase'], env)
+    if check['code'] == 'legacy_not_executable':
+        import logging
+        LEGACY_COUNTERS['legacy_refusals'] += 1
+        logging.getLogger(__name__).warning('legacy-refusal ticket=%s command=%s', a['ticket'], a['entrypoint'])
+        print(legacy_message(a['ticket']), file=sys.stderr)
+    return check
 
 
 def refusal(store, reason='unsupported_transition'):
@@ -732,7 +738,7 @@ def new_record(a, store):
                       review_repairs=a.get('review_repairs'), rounds=a.get('rounds'), compatibility_approved=True,
                       containers_possible=project_env.get('SSDLC_EXECUTION_MODE', 'docker') != 'native',
                       runtime_root=str(canonical_root(a['repo'], a['ticket']).relative_to(Path(a['repo']))),
-                      task_mode=bool(read_document(canonical_root(a['repo'], a['ticket']) / 'state.json').get('task_breakdown')) or project_env.get('SSDLC_ENABLE_TASK_BREAKDOWN', 'false').lower() == 'true')
+                      task_mode=True)
     return dict(schema_version=1, revision=0, worker_generation=1, run_id=store.run_id, nonce=uuid.uuid4().hex,
         resumes=a.get('_resumes'), project=dict(key=digest(a['repo'])[:16], name='project'), ticket=a['ticket'],
         created_at=float(store.clock.time()), authorized=authorized,
@@ -791,6 +797,10 @@ def public(d, status=None, reason=None):
 
 
 def exit_code(result):
+    if result.get('status_reason') == 'legacy_not_executable':
+        return 23
+    if result.get('status_reason') == 'bootstrap_ineligible':
+        return 24
     return {'operator_wait': 10, 'blocked': 11, 'reconcile': 11, 'failed': 12,
             'already_running': 13, 'locked': 13, 'unsupported': 14}.get(result['status'], 0)
 
@@ -965,7 +975,10 @@ def start(args, clock=None, fault=None):
         if existing is not None and view(existing)['status'] in {'running', 'starting'}:
             if any(identity_state(existing, role) == OWNED for role in ('worker', 'controller')):
                 return public(existing, 'already_running', 'already_running')
-    if not compatibility(a, build_project_env(a['repo'], os.environ))['ok']:
+    check = compatibility(a, build_project_env(a['repo'], os.environ))
+    if not check['ok']:
+        if check['code'] in {'legacy_not_executable', 'no_such_run', 'bootstrap_ineligible'}:
+            return public({}, 'unsupported', check['code'])
         return refusal(store)
     store.fault.hit('lock.before_acquire')
     store.prepare()
@@ -1073,6 +1086,11 @@ def resume(args, clock=None, fault=None):
         a['goal'] = Path(a['goal_file']).read_text()
     a = validate_args(a)
     build_argv('orchestrator.' + a['entrypoint'], a)
+    # Unsupported historical/bootstrap inputs must be refused before reading
+    # supervisor state, which need not exist for such tickets.
+    check = compatibility(a, build_project_env(a['repo'], os.environ))
+    if not check['ok'] and check['code'] in {'legacy_not_executable', 'no_such_run', 'bootstrap_ineligible'}:
+        return public({}, 'unsupported', check['code'])
     store = RunStore(a['repo'], a['ticket'], a.get('run_id'), clock, fault)
     old = store.read() if store.run_id else store.current()
     if (Path(a['repo']) / '.ssdlc' / a['ticket'] / 'execution/pending.json').exists():
@@ -1080,7 +1098,10 @@ def resume(args, clock=None, fault=None):
             return public(old, 'blocked', 'reconcile')
         from ssdlc_feedback_workflow import recover_preparation
         recover_preparation(a['repo'], a['ticket'])
-    if not compatibility(a, build_project_env(a['repo'], os.environ))['ok']:
+    check = compatibility(a, build_project_env(a['repo'], os.environ))
+    if not check['ok']:
+        if check['code'] in {'legacy_not_executable', 'no_such_run', 'bootstrap_ineligible'}:
+            return public({}, 'unsupported', check['code'])
         return refusal(store)
     candidate = new_record(a, store)
     changes = fingerprint_changes(old, candidate, native_advance(a['repo'], a['ticket'], old, candidate))
@@ -1093,6 +1114,23 @@ def resume(args, clock=None, fault=None):
     return start(a, clock, fault)
 
 
+
+def historical_status(repo, ticket):
+    """Expose a bounded public historical view without supervisor persistence."""
+    root = canonical_root(repo, ticket)
+    path = root / 'state.json'
+    if path.is_symlink() or any(parent.is_symlink() for parent in path.parents):
+        return None
+    if not path.is_file() or path.stat().st_size > 1048576:
+        return None
+    state = read_document(path)
+    if not state:
+        return None
+    result = public({}, 'historical', 'read_only_history')
+    result.update(phase=state.get('current_phase'), historical_status=state.get('status'),
+                  risk_tier=state.get('risk_tier'), next_action='inspect_history')
+    return result
+
 def status(repo, ticket, run_id=None, proc=None, env=None, clock=None):
     if not sys.platform.startswith('linux'):
         return public({}, 'unsupported', 'unsupported_platform')
@@ -1100,7 +1138,7 @@ def status(repo, ticket, run_id=None, proc=None, env=None, clock=None):
     try:
         return observed_status(store, store.read() if run_id else store.current(), proc, env, clock)
     except FileNotFoundError:
-        return public({}, 'blocked', 'run_not_found')
+        return (historical_status(repo, ticket) if run_id is None else None) or public({}, 'blocked', 'run_not_found')
 
 
 def boot(args):
@@ -1533,9 +1571,7 @@ def route_child(repo, entrypoint, tier, ticket=''):
     if ticket and (canonical_root(repo, ticket) / 'limits/policy.json').is_file():
         from ssdlc_recovery import LimitsStore
         allowed = LimitsStore(canonical_root(repo, ticket))._load(repair=False)[0]['binding'].get('allowed_phases')
-    profiles = sorted({t.get('profile', 'ALGORITHMIC') for t in plan.get('tasks', [])}) if plan.get('tasks') else (
-        PROFILES if state.get('task_breakdown') or os.environ.get('SSDLC_ENABLE_TASK_BREAKDOWN') == 'true'
-        else (state.get('dev_profile', 'ALGORITHMIC'),))
+    profiles = sorted({t.get('profile', 'ALGORITHMIC') for t in plan.get('tasks', [])}) if plan.get('tasks') else PROFILES
     routes, panel = {}, []
     for t in ('S', 'M', 'L') if tier == 'auto' else (tier,):
         for role in ROLE_KEYS_BY_ENTRYPOINT[entrypoint]:
@@ -1737,7 +1773,8 @@ def peek_journal(repo, ticket, record=None):
         return None, False
     from ssdlc_tasks import TaskJournal, TaskError
     try:
-        return TaskJournal(directory).peek(), False
+        data = (directory / 'task-journal.jsonl').read_bytes()
+        return TaskJournal._replay(data[:data.rfind(b'\n') + 1])[0], False
     except (TaskError, OSError, ValueError, KeyError, TypeError):
         return None, True
 
@@ -2005,11 +2042,6 @@ def completion(store, d, state):
     if kind == 'run':
         if state.get('status') != 'AWAITING_SUPERVISOR_SIGNOFF':
             return False
-        # Legacy pipelines have no task checkpoint. Bind the decision to the
-        # mode authorized at launch; old records without a mode remain strict.
-        task_mode = d['authorized'].get('task_mode', True) or bool(state.get('task_breakdown')) or bool(state.get('task_verified_head'))
-        if not task_mode:
-            return True
         worktree = pinned_root(repo, store.ticket, d, observe=True) / 'worktree'
         return (worktree.is_dir() and bool(state.get('task_verified_head')) and
                 git_read(worktree, 'rev-parse', 'HEAD') == state['task_verified_head'] and
@@ -2401,7 +2433,13 @@ def monitor(repo, ticket, run_id=None, timeout=30, interval=1, restart=False, go
     if not (0 <= timeout <= 86400 and 0 < interval <= 3600):
         raise ValueError('invalid_interval')
     store = RunStore(repo, ticket, run_id, clock)
-    d = store.read() if run_id else store.current()
+    try:
+        d = store.read() if run_id else store.current()
+    except FileNotFoundError:
+        historical = historical_status(repo, ticket)
+        if historical is not None and not restart:
+            return historical
+        raise
     if goal_file is not None:
         goal = Path(goal_file).read_text()
     env = dict(env) if env is not None else build_project_env(repo, os.environ)
@@ -2443,7 +2481,7 @@ def cli(args, parser):
     except OSError:
         result = public({}, 'blocked', 'filesystem_unavailable')
     print(json.dumps(result, sort_keys=True) if args.json else human_status(result))
-    return exit_code(result)
+    return 23 if result.get('reason') == 'legacy_not_executable' or result.get('status_reason') == 'legacy_not_executable' else exit_code(result)
 
 
 def _main():

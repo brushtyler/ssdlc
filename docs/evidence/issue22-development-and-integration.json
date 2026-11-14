@@ -1,0 +1,193 @@
+{
+  "schema_version": 1,
+  "scope": "Issue22 task-only execution, explicit bootstrap and corrective gate recovery; includes current-main integration",
+  "source_manifest": {
+    "sha256": "e7f0a845e5d5ff0671557870181067526cbb66f9d978f845b07e8e6e14e52106",
+    "definition": "SHA256 of canonical JSON mapping every tracked or nonignored source path to SHA256(file bytes), sorted by path; docs/evidence/ is excluded to avoid self-reference",
+    "files": 214
+  },
+  "native_development": {
+    "candidate_commit": "dc4a1c4312bdd08b8c20a9825185388e0eaadcdd",
+    "completed_tasks": 12,
+    "tasks": {
+      "T01": {
+        "status": "COMPLETED",
+        "attempts": 2,
+        "commit": "f0499ad5dd262343dd5354f5d2a3c7b2949ba258"
+      },
+      "T02": {
+        "status": "COMPLETED",
+        "attempts": 3,
+        "commit": "0b7852528f49f2dc70641e59611199654247a4e6"
+      },
+      "T04": {
+        "status": "COMPLETED",
+        "attempts": 2,
+        "commit": "038c23606ee62e18990f405a64113d6c8b889b03"
+      },
+      "T05": {
+        "status": "COMPLETED",
+        "attempts": 1,
+        "commit": "4912d732a4788619239143865f6f4649398891a2"
+      },
+      "T06": {
+        "status": "COMPLETED",
+        "attempts": 1,
+        "commit": "7b0bd75ee057931eceaac9008a0f66bc3871e008"
+      },
+      "T07": {
+        "status": "COMPLETED",
+        "attempts": 2,
+        "commit": "b1b892be1af3f1071e94944e3d811e34da876e64"
+      },
+      "T08": {
+        "status": "COMPLETED",
+        "attempts": 3,
+        "commit": "d27ec109bdb2fb7fbd39b51e12a9aaa5589516ee"
+      },
+      "T09": {
+        "status": "COMPLETED",
+        "attempts": 1,
+        "commit": "be4c60dd254087354ab26488903f4ce01b3181f1"
+      },
+      "T10": {
+        "status": "COMPLETED",
+        "attempts": 1,
+        "commit": "050ebafc9c2e0c8dbcd8952c5191504883390cda"
+      },
+      "T11": {
+        "status": "COMPLETED",
+        "attempts": 2,
+        "commit": "0986471a325a0f56851201f05870a8da9d7f655b"
+      },
+      "T12": {
+        "status": "COMPLETED",
+        "attempts": 5,
+        "commit": "f4aee998f9eada6a217be711ebdd836e0cd58cac"
+      },
+      "T13": {
+        "status": "COMPLETED",
+        "attempts": 2,
+        "commit": "dc4a1c4312bdd08b8c20a9825185388e0eaadcdd"
+      }
+    },
+    "final_task_integration_tests": 40,
+    "final_task_full_suite": 1186,
+    "historical_records_preserved": true,
+    "global_readiness": false
+  },
+  "integration": {
+    "base_main": "609bf27cc0f627248930cd8a1af621111d668318",
+    "ownership": "Explicit host integration; native development receipts above do not certify the integrated source",
+    "preserved": [
+      "Existing feedback admission and completed-owner verification",
+      "Task-only native entrypoint and single scheduler attempt loop",
+      "Existing timeout evidence and frozen limits",
+      "Current README/topic-guide structure and public documentation contracts"
+    ],
+    "additional_regressions": [
+      "Whole active I2 continuation through native admission, dispatch reservations, review rejection, isolated repair, dependent revalidation, fresh global gates and evidence pack; additive and exclusive reserve models",
+      "Every-append owner lineage, failure stop and successive corrected owner generations without rewriting historical attribution",
+      "Native reservation identity, runtime/scope authority and historical failure-prefix invariants",
+      "Default UTC stage logging, mode decision, preview bindings, fresh-gate traversal and bounded secret-free fields",
+      "Fresh positive-count test evidence at baseline, scheduler and candidate collection; no-op true refused, silent lint permitted, historical contracts unchanged"
+    ]
+  },
+  "focused_validation": [
+    {
+      "scope": "Stage/identity/I2/feedback/bootstrap regressions",
+      "tests": 29,
+      "seconds": 30.914,
+      "result": "PASS"
+    },
+    {
+      "scope": "Positive-test proof, bootstrap, unified execution, candidate evidence and interruption idempotency",
+      "tests": 63,
+      "seconds": 31.232,
+      "result": "PASS"
+    }
+  ],
+  "readiness_boundary": "This committed artifact records native development and focused offline evidence only. Fresh full integrated-source suite, independent Review/QA/AppSec outcomes and sanitized final attestations are linked from the PR description after execution. It grants no approval or execution authority.",
+  "provider_calls_for_offline_validation": 0,
+  "unknown_cost_observations": "remain unknown; reservations are allocations, not observed charges",
+  "no_auto_merge": true,
+  "final_corrective_guard_regression": {
+    "tests": 111,
+    "seconds": 441.279,
+    "result": "PASS",
+    "scope": "Frozen I2 policy, stage observability and crash recovery; includes missing-transaction refusal before fresh gates",
+    "full_integrated_suite_still_required": true
+  },
+  "all_skipped_proof_regression": {
+    "tests": 62,
+    "seconds": 5.817,
+    "result": "PASS",
+    "scope": "Real all-skipped unittest baseline, mixed and empty unittest/Jest/Vitest/TAP counts, bootstrap, candidate evidence and documentation contracts",
+    "historical_contract_capability_unchanged": true,
+    "final_full_integrated_suite_still_required": true
+  },
+  "independent_review_closure": {
+    "original_reviewed_commit": "c342fdebf3a02085f3fdd130d6d97a2939b0c4d4",
+    "findings": [
+      "ISSUE22-REVIEW-001",
+      "ISSUE22-REVIEW-002",
+      "ISSUE22-REVIEW-003"
+    ],
+    "focused_tests": 22,
+    "seconds": 25.773,
+    "result": "PASS",
+    "behavior": [
+      "Every tier runs AppSec without a specialist trigger; rejection withholds readiness",
+      "Console diagnostics redact secrets before truncation while preserving private evidence hashes",
+      "Admitted pre-isolation sealed journals retain their mode, attempts, contracts and journal prefix"
+    ],
+    "fresh_full_suite_and_independent_gates_required": true
+  },
+  "mandatory_appsec_sequence_regression": {
+    "tests": 18,
+    "seconds": 11.207,
+    "result": "PASS",
+    "scope": "All global gates remain in sequence; QA/AppSec reuse candidate proof; fault restart preserves snapshot; AppSec is skipped only after an earlier rejection",
+    "fresh_full_suite_and_independent_gates_required": true
+  },
+  "independent_review_followup": {
+    "reproduced_findings": 2,
+    "frozen_prior_commit": "f0aa2d678db2b2512bb1443465f67a5de41461fe",
+    "baseline_regressions_failed_as_expected": 2,
+    "fixed_focused_test_executions": 18,
+    "final_suite_and_gates": "PENDING_NEW_EXACT_SOURCE_VERIFICATION",
+    "approval_caller_fixtures": {
+      "test_executions": 6,
+      "result": "PASS",
+      "native_gate_receipts_required": true,
+      "overlaps_prior_focused_tests": true
+    }
+  },
+  "bootstrap_lifecycle_followup": {
+    "prior_source": "4c30582bb0c0c0e66dd36f1927fabc43e5b08b61",
+    "reproduced_baseline_regressions": 2,
+    "focused_groups": [
+      {
+        "tests": 34,
+        "result": "PASS"
+      },
+      {
+        "tests": 31,
+        "result": "PASS"
+      },
+      {
+        "tests": 20,
+        "result": "PASS"
+      }
+    ],
+    "counts_overlap": true,
+    "guards": [
+      "sealed unproven contract before journal creation",
+      "current foreground invocation only",
+      "same-instance failure cleanup",
+      "contract changed while waiting for ticket lock",
+      "retained evidence with missing state is never a fresh run"
+    ],
+    "final_suite_and_gates": "PENDING_NEW_EXACT_SOURCE_VERIFICATION"
+  }
+}

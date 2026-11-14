@@ -200,19 +200,23 @@ class LimitsStore:
             return sum((row.get('usage', {}).get(kind) or 0) + row.get('conservative_usage', {}).get(kind, 0)
                        for row in rows)
         combined = state.get('combined_reported_usd_cap')
-        combined_total = sum(consumed(kind) for kind in ('metered_usd', 'cli_estimate_usd'))
-        if policy.get('unknown_usage_reserve_model') == 'exclusive_cost_kind_v1':
-            # Each unobserved call can belong to either kind, but is one call.
-            # Both individual caps stay conservative; only the combined debit
-            # uses the maximum allocation once. Old frozen profiles stay additive.
-            combined_total = sum(value for row in rows for value in row.get('usage', {}).values() if value is not None)
-            combined_total += sum(max(row.get('conservative_usage', {}).values(), default=0) for row in rows)
+        combined_total = self.accounted_total(state, policy)
         if combined is not None and combined_total >= combined:
             raise RecoveryStop('LIMIT_REACHED', 'Legacy combined reported-cost cap exhausted')
         for kind, cap in [('metered_usd', 'metered_usd'), ('cli_estimate_usd', 'cli_estimate_usd')]:
             total = consumed(kind)
             if total >= policy[cap]:
                 raise RecoveryStop('LIMIT_REACHED', 'Frozen ' + kind + ' cap exhausted')
+
+    @staticmethod
+    def accounted_total(state, policy):
+        """Known usage plus the frozen reserve model; unknown observations stay null."""
+        rows = list(state['invocations'].values())
+        known = sum(value for row in rows for value in row.get('usage', {}).values() if value is not None)
+        reserves = (max(row.get('conservative_usage', {}).values(), default=0)
+                    if policy.get('unknown_usage_reserve_model') == 'exclusive_cost_kind_v1'
+                    else sum(row.get('conservative_usage', {}).values()) for row in rows)
+        return known + sum(reserves)
 
     def guard_entrypoint(self, name):
         envelope, _ = self._load(repair=False)

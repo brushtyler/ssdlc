@@ -102,6 +102,8 @@ class DocContractTests(unittest.TestCase):
         corpus = docs.user_facing_docs()
         self.assertIn('docs/supervision.md', corpus.names)
         self.assertIn('docs/bounce-preview.md', corpus.names)
+        self.assertIn('README.md', corpus.names)
+        self.assertIn('docs/native-gate-convergence.md', corpus.names)
         self.assertFalse(any(name.startswith('PLAN_') or name == 'AGENTS.md' for name in corpus.names))
 
 

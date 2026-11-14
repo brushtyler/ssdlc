@@ -342,29 +342,27 @@ class GraderProtectionTests(unittest.TestCase):
 
 class DeliveryDisclosureTests(unittest.TestCase):
     def test_evidence_pack_and_signoff_show_unconfirmed_producer_completion(self):
-        from orchestrator import SSDLCOrchestrator
-        from test_task_bootstrap import OrchestratorBootstrapTests
-        # Reuse the repository/controller fixture, not its test methods.
-        case = OrchestratorBootstrapTests('test_approve_keeps_evidence_and_does_not_commit_residual_changes')
+        import test_unified_integration as journeys
+        case = journeys.StartupJourneys()
+        self.addCleanup(case.doCleanups)
         case.setUp()
-        try:
-            with patch.dict('os.environ', {'SSDLC_ENABLE_TASK_BREAKDOWN': 'true'}):
-                owner = case.make_orchestrator()
-                wt = owner._ensure_worktree()
-                (wt / 'app.py').write_text('value = 1\n'); git(wt, 'add', 'app.py'); git(wt, 'commit', '-m', 'checked source')
-                head = git(wt, 'rev-parse', 'HEAD')
-                owner.state.update(task_verified_head=head, goal='offline',
-                    tasks_status={'T1': {'attempts': 1, 'status': 'COMPLETED', 'completion_confirmation': 'unconfirmed_completion'}})
-                TaskJournal(owner.dir_dev / 'tasks').append('OFFLINE_COMPLETION', {'tasks': owner.state['tasks_status']})
-                owner.state['tasks_status'] = {}  # stale state must not hide the journal disclosure
-                owner._save_state()
-                path = owner.compile_evidence_pack(True)
-                self.assertIn('unconfirmed_completion', path.read_text())
-                self.assertIn('independent checks, not producer confirmation', path.read_text())
-                with patch('sys.stdout', new_callable=io.StringIO) as output:
-                    owner.approve_and_merge()
-                self.assertIn('unconfirmed_completion', output.getvalue())
-        finally: case.doCleanups()
+        # Use real native approvals, then add a conservative disclosure-only
+        # annotation. Actual fenced-timeout production is covered above; this
+        # test verifies that a stale projection cannot hide its journal flag.
+        case.new_run()
+        owner = case.active_orch
+        journal = TaskJournal(owner.dir_dev / 'tasks')
+        state = journal.load()
+        state['tasks']['T1']['completion_confirmation'] = 'unconfirmed_completion'
+        journal.append('DISCLOSURE_FIXTURE', state)
+        owner.state['tasks_status'] = {}  # stale projection must not hide the journal disclosure
+        owner._save_state()
+        path = owner.compile_evidence_pack(True)
+        self.assertIn('unconfirmed_completion', path.read_text())
+        self.assertIn('independent checks, not producer confirmation', path.read_text())
+        with patch('sys.stdout', new_callable=io.StringIO) as output:
+            owner.approve_and_merge()
+        self.assertIn('unconfirmed_completion', output.getvalue())
 
     def test_outer_cycle_uses_frozen_policy_not_environment(self):
         from orchestrator import SSDLCOrchestrator, _dispatch_local
@@ -377,13 +375,30 @@ class DeliveryDisclosureTests(unittest.TestCase):
             previous = getattr(_dispatch_local, 'limits', None); _dispatch_local.limits = store
             try:
                 with patch.dict('os.environ', {'SSDLC_MAX_DEV_RETRIES': '9', 'SSDLC_SUPERVISED_RUN_ID': ''}), \
-                     patch.object(owner, '_task_mode', return_value=False), \
+                     patch.object(owner, '_ensure_task_plan'), \
                      patch.object(owner, 'run_phase_dev') as developer, \
                      patch.object(owner, 'run_phase_review', return_value=(False, 'rejected')), \
                      patch.object(owner, '_stop_on_terminal_gate'), patch.object(owner, 'check_budget_circuit_breaker'), \
-                     patch.object(owner, 'compile_evidence_pack', return_value=root / 'evidence.md'):
+                     patch.object(owner, '_corrective_round', return_value={'next_gate_attempt': 2, 'txn_id': 'offline-txn'}) as repair, \
+                     patch.object(owner, '_open_or_any_txns', return_value=[{'txn_id': 'offline-txn',
+                         'preview': {'revision': 'a' * 64}, 'closure': ['T1']}]), \
+                     patch.object(owner, '_corrective_limits', return_value={'gate_round_ceiling': 9}), \
+                     patch.object(owner, 'compile_evidence_pack', return_value=root / 'evidence.md') as pack:
                     owner._run_pipeline('offline', from_phase='03-dev')
-                self.assertEqual(developer.call_count, 2)
+                # Frozen policy bounds the outer cycle even if local limits are broader.
+                self.assertEqual(developer.call_count, 1)
+                repair.assert_called_once_with('04-review', 1)
+                pack.assert_called_once_with(ready_for_signoff=False)
+                envelope['policy']['development_attempts'] = 1
+                developer.reset_mock()
+                with patch.dict('os.environ', {'SSDLC_MAX_DEV_RETRIES': '9'}), \
+                     patch.object(owner, '_ensure_task_plan'), patch.object(owner, 'run_phase_dev', developer), \
+                     patch.object(owner, 'run_phase_review', return_value=(False, 'rejected')), \
+                     patch.object(owner, '_stop_on_terminal_gate'), patch.object(owner, 'check_budget_circuit_breaker'), \
+                     patch.object(owner, 'compile_evidence_pack', return_value=root / 'evidence.md') as pack:
+                    owner._run_pipeline('offline', from_phase='03-dev')
+                developer.assert_called_once_with()
+                pack.assert_called_once_with(ready_for_signoff=False)
             finally: _dispatch_local.limits = previous
 
 

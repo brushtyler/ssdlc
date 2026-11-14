@@ -950,7 +950,7 @@ class TestCompletionModeAndForegroundRegressions(CoreCase):
         before = canonical.read_bytes()
         with patch.object(sup, 'git_read', return_value='base'):
             out = sup.status(self.repo, 'T-1', proc=proc)
-        self.assertEqual((out['status'], out['completion_kind']), ('completed', 'run'))
+        self.assertEqual(out['status_reason'], 'completion_mismatch')
         self.assertEqual(canonical.read_bytes(), before)
 
     def test_task_completion_still_requires_verified_clean_worktree(self):
@@ -971,8 +971,9 @@ class TestCompletionModeAndForegroundRegressions(CoreCase):
         import types
         import orchestrator as o
         root = self.repo / '.ssdlc/T-1'
-        fake = types.SimpleNamespace(ssdlc_root=root, state={}, _task_mode=lambda: True,
+        fake = types.SimpleNamespace(ssdlc_root=root, state={},
             PHASE_ORDER=o.SSDLCOrchestrator.PHASE_ORDER, _ensure_task_plan=lambda: None,
+            _reconcile_open_txn=lambda: None,
             run_phase_dev=lambda **kwargs: (_ for _ in ()).throw(RuntimeError('reached_dev')))
         with self.assertRaisesRegex(RuntimeError, 'reached_dev'), contextlib.redirect_stdout(io.StringIO()):
             o.SSDLCOrchestrator._run_pipeline(fake, 'goal', from_phase='03-dev')

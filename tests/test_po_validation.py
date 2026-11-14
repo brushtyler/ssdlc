@@ -166,6 +166,34 @@ class POTests(bootstrap.RepositoryTests):
             self.assertEqual(orchestrator.main(['po', '--repo', str(self.repo), '--ticket', 'TKT-1']), 0)
         self.orch.state.update(task_breakdown=False, po_validation_ref=None)
         with patch.dict('os.environ', {'SSDLC_ENABLE_TASK_BREAKDOWN': 'false'}):
-            _, engine = self.generate('Prose AC-1 and SEC-1 only, legacy acceptance.')
+            _, engine = self.generate('AC-1: Required behavior\nSEC-1: Required security')
         self.assertEqual(engine.call_count, 1)
         self.assertTrue(self.orch.state['gate_history'][-1]['passed'])
+
+    def test_legacy_po_refused_before_mutation_and_constructor(self):
+        self.seed()
+        self.orch.state.pop('task_engine_v1', None)
+        self.orch.state['task_breakdown'] = False
+        self.orch._save_state()
+        before = {p: p.read_bytes() for p in (self.repo / '.ssdlc/TKT-1').rglob('*') if p.is_file()}
+        before_inventory = set((self.repo / '.ssdlc/TKT-1').rglob('*'))
+        with patch.object(orchestrator, 'SSDLCOrchestrator', side_effect=AssertionError('constructor')), \
+             contextlib.redirect_stderr(io.StringIO()) as stderr:
+            code = orchestrator._foreground_main(['po', '--ticket', 'TKT-1', '--repo', str(self.repo)])
+        self.assertEqual(code, 23)
+        self.assertIn('legacy run and is not executable', stderr.getvalue())
+        after = {p: p.read_bytes() for p in (self.repo / '.ssdlc/TKT-1').rglob('*') if p.is_file()}
+        after_inventory = set((self.repo / '.ssdlc/TKT-1').rglob('*'))
+        self.assertEqual(before_inventory, after_inventory)
+        self.assertEqual(before, after)
+        self.assertFalse((self.repo / '.ssdlc/TKT-1/ticket.lock').exists())
+
+    def test_task_po_resume_succeeds_without_constructor_failure(self):
+        self.seed()
+        self.assertEqual(orchestrator.execution_compatibility(self.repo, 'TKT-1', 'po')['code'], 'compatible')
+        with patch('orchestrator.EngineRunner.invoke_role', side_effect=AssertionError('AI call')), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(orchestrator._foreground_main(['po', '--ticket', 'TKT-1', '--repo', str(self.repo)]), 0)
+        state = json.loads((self.repo / '.ssdlc/TKT-1/state.json').read_text())
+        self.assertEqual(state['status'], 'PO_READY')
+        self.assertEqual(state['current_phase'], '01-po')

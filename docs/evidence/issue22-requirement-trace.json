@@ -1,0 +1,524 @@
+{
+  "schema_version": 1,
+  "requirements_count": 58,
+  "scope": "Original 39 AC, 12 SEC and 7 NFR; no requirement removed",
+  "note": "Reference existence is not completion proof; read the fresh final attestations linked from the PR description. Some focused commands overlap, so their test counts are not additive.",
+  "requirements": [
+    {
+      "id": "AC-1",
+      "test_references": [
+        "test_unified_execution.UnifiedExecutionTests.test_default_new_run_uses_scheduler_and_all_gates"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-10",
+      "test_references": [
+        "test_unified_execution.UnifiedExecutionTests.test_registered_historical_contract_bytes_are_unchanged",
+        "test_unified_execution.UnifiedExecutionTests.test_default_new_run_uses_scheduler_and_all_gates"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-11",
+      "test_references": [
+        "test_unified_integration.StartupJourneys.test_documented_default_cli_and_tier_s"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-12",
+      "test_references": [
+        "test_legacy_compat.CompatibilityTests.test_refusals_before_every_constructor",
+        "test_legacy_compat.CompatibilityTests.test_new_and_pre_execution"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-13",
+      "test_references": [
+        "test_bootstrap.BootstrapTests.test_binding_and_contract",
+        "test_unified_integration.StartupJourneys.test_documented_bootstrap_profile"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-14",
+      "test_references": [
+        "test_bootstrap.BootstrapTests.test_no_profile_strict"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-15",
+      "test_references": [
+        "test_bootstrap.BootstrapTests.test_existing_tests",
+        "test_bootstrap.BootstrapTests.test_discovered_checks"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-16",
+      "test_references": [
+        "test_bootstrap.BootstrapTests.test_dirty",
+        "test_bootstrap.BootstrapTests.test_two_commits",
+        "test_bootstrap.BootstrapTests.test_tree_mismatch"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-17",
+      "test_references": [
+        "test_bootstrap.CheckpointTests.test_checkpoint_failures",
+        "test_unified_integration.StartupJourneys.test_bootstrap_empty_checkpoint_and_restart",
+        "test_unified_integration.StartupJourneys.test_bootstrap_failing_checkpoint_and_restart"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-18",
+      "test_references": [
+        "test_bootstrap.CheckpointTests.test_positive_proof_spends_exemption_and_preserves_contract"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-19",
+      "test_references": [
+        "test_bootstrap.CheckpointTests.test_crash_before_proof_refuses_resume",
+        "test_bootstrap.BootstrapTests.test_pre_execution_resume_refuses_before_writes",
+        "test_bootstrap.CheckpointTests.test_unproven_initialized_bootstrap_refuses_resume_before_dispatch",
+        "test_bootstrap.BootstrapTests.test_registered_contract_without_journal_refuses_clean_cli_and_supervisor",
+        "test_bootstrap.BootstrapTests.test_unregistered_contract_and_forged_ready_status_do_not_renew_exemption",
+        "test_bootstrap.BootstrapTests.test_direct_pipeline_refuses_persisted_unproven_contract_before_writes",
+        "test_bootstrap.BootstrapTests.test_direct_scheduler_factory_refuses_unproven_contract_before_planning",
+        "test_bootstrap.BootstrapTests.test_first_invocation_claim_is_cleared_after_interruption",
+        "test_bootstrap.BootstrapTests.test_contract_sealed_while_waiting_for_lock_refuses_before_state_write"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-2",
+      "test_references": [
+        "test_unified_execution.UnifiedExecutionTests.test_obsolete_values_have_identical_journals_and_one_bounded_warning"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-20",
+      "test_references": [
+        "test_bootstrap.CheckpointTests.test_protected_task_rejected_with_or_without_bootstrap"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-21",
+      "test_references": [
+        "test_bootstrap.BootstrapTests.test_invalid_profiles",
+        "test_bootstrap.BootstrapTests.test_policy_conflict"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-22",
+      "test_references": [
+        "test_corrective_executor.ExecutorTests.test_review_rejection",
+        "test_corrective_executor.ExecutorTests.test_qa_rejection",
+        "test_corrective_executor.ExecutorTests.test_appsec_rejection"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-23",
+      "test_references": [
+        "test_unified_integration.CorrectiveJourneys.test_documented_bounce_preview_cli",
+        "test_corrective_creation.CreationTests.test_hand_edit_or_feedback_authorizes_nothing"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-24",
+      "test_references": [
+        "test_corrective_creation.CreationTests.test_untouched_preview_durable_creation_and_exact_roots",
+        "test_corrective_creation.CreationTests.test_evidence_checked_again_before_invalidation"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-25",
+      "test_references": [
+        "test_unified_integration.CorrectiveJourneys.test_review_root_repair_dependent_revalidation_and_fresh_gates",
+        "test_corrective_executor.ExecutorTests.test_tier_s_always_reruns_appsec_after_repair"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-26",
+      "test_references": [
+        "test_corrective_creation.CreationTests.test_hand_edit_or_feedback_authorizes_nothing",
+        "test_unified_execution.UnifiedExecutionTests.test_reject_records_no_execution_authority"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-27",
+      "test_references": [
+        "test_corrective_creation.CreationTests.test_diagnostic_replan_ambiguous_and_tool_failure",
+        "test_corrective_creation.CreationTests.test_frozen_report_response_input_and_captured_proof_mutations",
+        "test_corrective_creation.CreationTests.test_changed_journal_head"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-28",
+      "test_references": [
+        "test_corrective_creation.CreationTests.test_real_scanner_control_failure_refuses_without_repair"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-29",
+      "test_references": [
+        "test_task_repair.RepairTests.test_exact_roots_interleave_verification_and_keep_history",
+        "test_corrective_executor.ExecutorTests.test_repeated_rejection_reenters_corrective_with_preserved_attempts"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-3",
+      "test_references": [
+        "test_unified_integration.StartupJourneys.test_documented_default_cli_and_tier_s",
+        "test_unified_execution.UnifiedExecutionTests.test_tier_s_two_nodes_are_repaired_before_dispatch",
+        "test_review_closure.ReviewClosureTests.test_every_tier_requires_appsec_without_a_specialist_trigger"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-30",
+      "test_references": [
+        "test_unified_integration.CorrectiveJourneys.test_cli_recovery_after_invalidation",
+        "test_unified_integration.CorrectiveJourneys.test_cli_recovery_after_repair",
+        "test_corrective_recovery.RecoveryTests.test_two_concurrent_resumes_have_one_invalidation_and_repair"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-31",
+      "test_references": [
+        "test_corrective_executor.ExecutorTests.test_completed_and_approved_replay_are_zero_write"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-32",
+      "test_references": [
+        "test_unified_integration.CorrectiveJourneys.test_attempts_exhausted_through_pipeline",
+        "test_corrective_executor.ExecutorTests.test_attempt_exhaustion_precedes_invalidation"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-33",
+      "test_references": [
+        "test_unified_integration.CorrectiveJourneys.test_source_mutation_refused_through_pipeline",
+        "test_corrective_creation.CreationTests.test_moved_head_dirty_tree_and_protected_path"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-34",
+      "test_references": [
+        "test_corrective_recovery.RecoveryTests.test_cancel_boundaries_preserve_frozen_limits",
+        "test_corrective_publication.PublicationTests.test_every_nested_dispatch_uses_frozen_guard"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-35",
+      "test_references": [
+        "test_corrective_executor.ExecutorTests.test_scope_controller_gate_and_contract_changes_fail_closed",
+        "test_task_repair.RepairTests.test_scope_and_protected_edits_rolled_back"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-36",
+      "test_references": [
+        "test_corrective_executor.ExecutorTests.test_repeated_rejection_reenters_corrective_with_preserved_attempts"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-37",
+      "test_references": [
+        "test_repair_prompt.RepairPromptTests.test_registered_reference_suppresses_log_read_and_excerpt",
+        "test_repair_prompt.RepairPromptTests.test_full_retry_prompt_projection_and_scrubbing",
+        "test_repair_prompt.RepairPromptTests.test_oversize_refused_before_provider_and_dispatch_assertion"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-38",
+      "test_references": [
+        "test_unified_integration.StartupJourneys.test_documented_default_cli_and_tier_s",
+        "test_unified_integration.StartupJourneys.test_existing_task_cli_resume_preserves_seals_attempts_and_budget",
+        "test_unified_integration.CorrectiveJourneys.test_review_root_repair_dependent_revalidation_and_fresh_gates",
+        "test_unified_integration.CorrectiveJourneys.test_qa_rejection",
+        "test_unified_integration.CorrectiveJourneys.test_appsec_rejection",
+        "test_unified_integration.CorrectiveJourneys.test_stale_evidence_refused_through_pipeline",
+        "test_unified_integration.CorrectiveJourneys.test_source_mutation_refused_through_pipeline",
+        "test_bootstrap.BootstrapTests.test_registered_contract_without_journal_refuses_clean_cli_and_supervisor",
+        "test_bootstrap.BootstrapTests.test_unregistered_contract_and_forged_ready_status_do_not_renew_exemption",
+        "test_bootstrap.BootstrapTests.test_direct_pipeline_refuses_persisted_unproven_contract_before_writes",
+        "test_bootstrap.BootstrapTests.test_direct_scheduler_factory_refuses_unproven_contract_before_planning",
+        "test_bootstrap.BootstrapTests.test_first_invocation_claim_is_cleared_after_interruption",
+        "test_bootstrap.BootstrapTests.test_contract_sealed_while_waiting_for_lock_refuses_before_state_write"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION",
+      "subcases": [
+        "new default and obsolete flag",
+        "Tier S single task",
+        "legacy read-only refusal with unchanged records",
+        "existing task-run compatibility",
+        "bootstrap valid, empty suite, failing suite, restart, and ineligible repository",
+        "approved new candidate",
+        "Review rejection, root repair, dependent revalidation and new gates",
+        "QA rejection and AppSec rejection",
+        "stale evidence",
+        "replay after invalidation and after repair",
+        "attempts exhausted",
+        "source mutation",
+        "budget and cancellation boundaries"
+      ]
+    },
+    {
+      "id": "AC-39",
+      "test_references": [
+        "test_bounce_preview.PreviewTests.test_docs_required_facts_and_limits",
+        "test_doc_contracts.DocContractTests.test_repository_documentation_is_reachable"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-4",
+      "test_references": [
+        "test_unified_execution.UnifiedExecutionTests.test_no_mode_switch_or_legacy_executor_remains"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-5",
+      "test_references": [
+        "test_unified_execution.SetupSmokeTests.test_supported_setup_creates_usable_local_configuration"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-6",
+      "test_references": [
+        "test_legacy_compat.CompatibilityTests.test_refusals_before_every_constructor"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-7",
+      "test_references": [
+        "test_legacy_compat.CompatibilityTests.test_read_only_status_and_monitor_without_supervisor_records",
+        "test_legacy_compat.CompatibilityTests.test_history_import_confined_and_read_only"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-8",
+      "test_references": [
+        "test_legacy_compat.CompatibilityTests.test_schema_invalid_registered_inputs_are_refused_before_mutation",
+        "test_legacy_compat.CompatibilityTests.test_journal_matrix_and_approval",
+        "test_signoff_provenance.SignoffProvenanceTests.test_ready_status_without_gate_receipts_is_refused_before_constructor",
+        "test_signoff_provenance.SignoffProvenanceTests.test_full_native_provenance_admits_approval",
+        "test_signoff_provenance.SignoffProvenanceTests.test_tampered_or_incomplete_phase_never_falls_back_to_old_approval",
+        "test_legacy_compat.CompatibilityTests.test_missing_state_with_old_execution_evidence_is_not_a_new_run"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "AC-9",
+      "test_references": [
+        "test_unified_integration.StartupJourneys.test_existing_task_cli_resume_preserves_seals_attempts_and_budget",
+        "test_unified_execution.UnifiedExecutionTests.test_historical_scheduler_resume_preserves_contract_and_journal_prefix",
+        "test_review_closure.ReviewClosureTests.test_pre_isolation_sealed_history_keeps_its_execution_mode"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "SEC-1",
+      "test_references": [
+        "test_corrective_creation.CreationTests.test_hand_edit_or_feedback_authorizes_nothing"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "SEC-10",
+      "test_references": [
+        "test_unified_execution.UnifiedExecutionTests.test_registered_historical_contract_bytes_are_unchanged",
+        "test_unified_execution.UnifiedExecutionTests.test_historical_scheduler_resume_preserves_contract_and_journal_prefix"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "SEC-11",
+      "test_references": [
+        "test_repair_prompt.RepairPromptTests.test_credentials_in_approved_context_are_scrubbed_from_full_prompt",
+        "test_repair_prompt.RepairPromptTests.test_scrubber_covers_keys_identifiers_and_pem",
+        "test_corrective_publication.PublicationTests.test_archive_symlink_escape",
+        "test_corrective_publication.PublicationTests.test_archive_traversal_in_intent",
+        "test_review_closure.ReviewClosureTests.test_corrective_failed_check_console_redacts_but_keeps_private_evidence",
+        "test_review_closure.ReviewClosureTests.test_corrective_developer_blocker_console_is_redacted"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "SEC-12",
+      "test_references": [
+        "test_corrective_executor.ExecutorTests.test_tier_s_always_reruns_appsec_after_repair",
+        "test_unified_integration.CorrectiveJourneys.test_review_root_repair_dependent_revalidation_and_fresh_gates",
+        "test_review_closure.ReviewClosureTests.test_every_tier_requires_appsec_without_a_specialist_trigger",
+        "test_signoff_provenance.SignoffProvenanceTests.test_ready_status_without_gate_receipts_is_refused_before_constructor",
+        "test_signoff_provenance.SignoffProvenanceTests.test_full_native_provenance_admits_approval",
+        "test_signoff_provenance.SignoffProvenanceTests.test_tampered_or_incomplete_phase_never_falls_back_to_old_approval"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "SEC-2",
+      "test_references": [
+        "test_corrective_creation.CreationTests.test_evidence_checked_again_before_invalidation",
+        "test_corrective_creation.CreationTests.test_swapped_plan_contract_roster_completion_and_missing",
+        "test_corrective_executor.ExecutorTests.test_every_append_is_verified_from_each_acknowledgment_anchor"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "SEC-3",
+      "test_references": [
+        "test_legacy_compat.CompatibilityTests.test_refusals_before_every_constructor",
+        "test_legacy_compat.CompatibilityTests.test_journal_matrix_and_approval",
+        "test_signoff_provenance.SignoffProvenanceTests.test_ready_status_without_gate_receipts_is_refused_before_constructor",
+        "test_signoff_provenance.SignoffProvenanceTests.test_full_native_provenance_admits_approval",
+        "test_signoff_provenance.SignoffProvenanceTests.test_tampered_or_incomplete_phase_never_falls_back_to_old_approval",
+        "test_legacy_compat.CompatibilityTests.test_missing_state_with_old_execution_evidence_is_not_a_new_run"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "SEC-4",
+      "test_references": [
+        "test_unified_execution.UnifiedExecutionTests.test_obsolete_values_have_identical_journals_and_one_bounded_warning"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "SEC-5",
+      "test_references": [
+        "test_bootstrap.BootstrapTests.test_existing_tests",
+        "test_bootstrap.BootstrapTests.test_dirty",
+        "test_bootstrap.BootstrapTests.test_execution_boundary_rechecks_eligibility",
+        "test_bootstrap.CheckpointTests.test_crash_before_proof_refuses_resume",
+        "test_bootstrap.CheckpointTests.test_unproven_initialized_bootstrap_refuses_resume_before_dispatch",
+        "test_bootstrap.BootstrapTests.test_registered_contract_without_journal_refuses_clean_cli_and_supervisor",
+        "test_bootstrap.BootstrapTests.test_unregistered_contract_and_forged_ready_status_do_not_renew_exemption",
+        "test_bootstrap.BootstrapTests.test_direct_pipeline_refuses_persisted_unproven_contract_before_writes",
+        "test_bootstrap.BootstrapTests.test_direct_scheduler_factory_refuses_unproven_contract_before_planning",
+        "test_bootstrap.BootstrapTests.test_first_invocation_claim_is_cleared_after_interruption",
+        "test_bootstrap.BootstrapTests.test_contract_sealed_while_waiting_for_lock_refuses_before_state_write"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "SEC-6",
+      "test_references": [
+        "test_bootstrap.CheckpointTests.test_checkpoint_failures",
+        "test_positive_test_proof.PositiveTestProofTests"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "SEC-7",
+      "test_references": [
+        "test_task_repair.RepairTests.test_scope_and_protected_edits_rolled_back",
+        "test_corrective_executor.ExecutorTests.test_scope_controller_gate_and_contract_changes_fail_closed"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "SEC-8",
+      "test_references": [
+        "test_corrective_creation.CreationTests.test_real_diagnostic_and_scanner_failure"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "SEC-9",
+      "test_references": [
+        "test_corrective_recovery.RecoveryTests.test_two_concurrent_resumes_have_one_invalidation_and_repair",
+        "test_corrective_executor.ExecutorTests.test_completed_and_approved_replay_are_zero_write"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "NFR-1",
+      "test_references": [
+        "test_stage_observability.StageObservabilityTests",
+        "test_i2_corrective_integration.NativeI2CorrectiveIntegrationTests",
+        "test_review_closure.ReviewClosureTests.test_console_redaction_precedes_excerpt_truncation"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "NFR-2",
+      "test_references": [
+        "test_corrective_creation.CreationTests.test_untouched_preview_durable_creation_and_exact_roots"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "NFR-3",
+      "test_references": [
+        "test_corrective_executor.ExecutorTests.test_every_append_is_verified_from_each_acknowledgment_anchor",
+        "test_corrective_recovery.RecoveryTests.test_two_concurrent_resumes_have_one_invalidation_and_repair"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "NFR-4",
+      "test_references": [
+        "test_task_bootstrap.RevalidateTests.test_old_loaders_tolerate_events",
+        "test_corrective_recovery.RecoveryTests.test_native_candidate_isolation_is_preserved"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION",
+      "qualification": "Code-only rollback preserves readable history. Contracts with new bootstrap/test-proof capabilities and invalidated transactions must not be executed by an older unsupported validator; see native gate convergence rollback notes."
+    },
+    {
+      "id": "NFR-5",
+      "test_references": [
+        "test_legacy_compat.CompatibilityTests.test_refusals_before_every_constructor",
+        "test_legacy_compat.CompatibilityTests.test_read_only_status_and_monitor_without_supervisor_records"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "NFR-6",
+      "test_references": [
+        "Fresh full integrated-source Docker suite; final log and exact tested head linked from PR"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    },
+    {
+      "id": "NFR-7",
+      "test_references": [
+        "test_unified_execution.UnifiedExecutionTests.test_no_mode_switch_or_legacy_executor_remains",
+        "test_scheduler_extractions.SchedulerExtractionTests.test_ordinary_run_trace_and_noop_resume"
+      ],
+      "status": "FINAL_ATTESTATION_LINKED_FROM_PR_AFTER_FRESH_VERIFICATION"
+    }
+  ]
+}
