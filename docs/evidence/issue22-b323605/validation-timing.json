@@ -1,0 +1,24 @@
+{
+  "source": "b3236051d98a4af1655fd3803843de283e11ab60",
+  "final_full_suite_seconds": 1468.85,
+  "final_model_invocations": [
+    {
+      "assessment": "review-codex",
+      "provider_invocation_seconds": 164.93199188821018
+    },
+    {
+      "assessment": "review-claude",
+      "provider_invocation_seconds": 21.55730640469119
+    },
+    {
+      "assessment": "qa-claude",
+      "provider_invocation_seconds": 52.01103845098987
+    },
+    {
+      "assessment": "appsec-claude",
+      "provider_invocation_seconds": 26.913708537817
+    }
+  ],
+  "final_provider_invocation_seconds": 265.41404528170824,
+  "note": "Invocation durations do not include preparation, host checks or operator authorization waits; this is not a total historical development-time measurement."
+}

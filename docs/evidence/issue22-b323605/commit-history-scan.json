@@ -1,0 +1,29 @@
+{
+  "tested_head": "b3236051d98a4af1655fd3803843de283e11ab60",
+  "base": "609bf27cc0f627248930cd8a1af621111d668318",
+  "exit_code": 1,
+  "seconds": 0.7540828697383404,
+  "provider_calls": 0,
+  "findings": [
+    {
+      "RuleID": "aws-access-token",
+      "File": "tests/test_repair_prompt.py",
+      "StartLine": 92,
+      "Commit": "d27ec109bdb2fb7fbd39b51e12a9aaa5589516ee",
+      "Fingerprint": "d27ec109bdb2fb7fbd39b51e12a9aaa5589516ee:tests/test_repair_prompt.py:aws-access-token:92",
+      "fixture_line_sha256": "bc3d24206fa8cb7d9416c4c7173a8ad661e323383aee88e8e357fa16661eb081"
+    },
+    {
+      "RuleID": "private-key",
+      "File": "tests/test_repair_prompt.py",
+      "StartLine": 93,
+      "Commit": "d27ec109bdb2fb7fbd39b51e12a9aaa5589516ee",
+      "Fingerprint": "d27ec109bdb2fb7fbd39b51e12a9aaa5589516ee:tests/test_repair_prompt.py:private-key:93",
+      "fixture_line_sha256": "17aba50132dc48e7205121d0df0da7186ad5180fbbb192e29e58b34c1c6f0cc9"
+    }
+  ],
+  "commit_count": 22,
+  "classification": "Two synthetic redaction fixtures, independently confirmed by AppSec on the current source; raw scanner exit1 retained",
+  "raw_private_report_sha256": "6a44dab01e75a5f56a678e0f6ca4afaec157511110522eba5b8751be552f91c3",
+  "independent_assessment": "appsec-claude.md"
+}

@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "tested_head": "b3236051d98a4af1655fd3803843de283e11ab60",
+  "status": "PASS",
+  "test_executions": 1497,
+  "unittest_seconds": 1468.85,
+  "sandbox_seconds": 1471.21111527225,
+  "exit_code": 0,
+  "command": [
+    "python3",
+    "-m",
+    "unittest",
+    "discover",
+    "-s",
+    "tests",
+    "-v"
+  ],
+  "controller_head": "609bf27cc0f627248930cd8a1af621111d668318",
+  "controller_files_sha256": "5e23719d0e6a82c87f02d2da27e6a630671a55aee8ace32ff7236227baf5e637",
+  "source_clean_before_and_after": true,
+  "source_mounted_read_only": true,
+  "verification_timeout_seconds": 2400,
+  "environment": {
+    "schema_version": 1,
+    "tested_head": "b3236051d98a4af1655fd3803843de283e11ab60",
+    "image_id": "sha256:1cb9e6661cd621df2f4c883742fa1d9a7675fe228bf3cde440ce4b96307c4997",
+    "image_name": "ssdlc-runner:latest",
+    "pids_limit": 1024,
+    "memory_bytes": 4294967296,
+    "nano_cpus": 2000000000,
+    "controller_head": "609bf27cc0f627248930cd8a1af621111d668318",
+    "provider_calls": 0
+  },
+  "raw_private_log_sha256": "1bf40ee54e5e33932a5a3f9cb31fb0441d52b4d377c1f0557247a4311a829fdc",
+  "provider_calls": 0,
+  "independent_final_gates_status": "APPROVED_SEE_FINAL_GATES_AND_DISCLOSED_PROTOCOL_REPAIR"
+}

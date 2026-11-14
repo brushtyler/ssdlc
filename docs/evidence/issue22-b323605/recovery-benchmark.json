@@ -1,0 +1,194 @@
+{
+  "tested_head": "b3236051d98a4af1655fd3803843de283e11ab60",
+  "exit_code": 0,
+  "failed_cases": 0,
+  "cases": 12,
+  "report": {
+    "schema_version": 1,
+    "corpus": "i2-recovery-v2",
+    "baseline_id": "i2-fixtures-v4",
+    "cases": [
+      {
+        "case": "timeout_checkpoint",
+        "passed": true,
+        "observed": {
+          "outcome": "COMPLETED",
+          "logical_invocations": 1,
+          "attempts": 1,
+          "checkpoint": true
+        },
+        "elapsed_seconds": 0.551365,
+        "total_interventions_required": 0,
+        "avoidable_interventions": 0,
+        "escaped_seeded_defects": 0,
+        "seeded_defect_checked": false
+      },
+      {
+        "case": "timeout_repair",
+        "passed": true,
+        "observed": {
+          "outcome": "COMPLETED",
+          "logical_invocations": 2,
+          "attempts": 2,
+          "checkpoint": true
+        },
+        "elapsed_seconds": 0.79187,
+        "total_interventions_required": 0,
+        "avoidable_interventions": 0,
+        "escaped_seeded_defects": 0,
+        "seeded_defect_checked": true
+      },
+      {
+        "case": "uncertain_timeout",
+        "passed": true,
+        "observed": {
+          "outcome": "OUTCOME_UNCERTAIN",
+          "logical_invocations": 1,
+          "attempts": 1,
+          "checkpoint": false
+        },
+        "elapsed_seconds": 0.18433,
+        "total_interventions_required": 1,
+        "avoidable_interventions": 0,
+        "escaped_seeded_defects": 0,
+        "seeded_defect_checked": false
+      },
+      {
+        "case": "unowned_git_lock",
+        "passed": true,
+        "observed": {
+          "outcome": "GIT_LOCK_UNOWNED",
+          "logical_invocations": 0,
+          "attempts": 0,
+          "checkpoint": false
+        },
+        "elapsed_seconds": 0.055892,
+        "total_interventions_required": 1,
+        "avoidable_interventions": 0,
+        "escaped_seeded_defects": 0,
+        "seeded_defect_checked": false
+      },
+      {
+        "case": "out_of_scope_timeout",
+        "passed": true,
+        "observed": {
+          "outcome": "SCOPE_REQUIRED",
+          "logical_invocations": 1,
+          "attempts": 1,
+          "checkpoint": false
+        },
+        "elapsed_seconds": 0.235479,
+        "total_interventions_required": 1,
+        "avoidable_interventions": 0,
+        "escaped_seeded_defects": 0,
+        "seeded_defect_checked": false
+      },
+      {
+        "case": "cost_limit",
+        "passed": true,
+        "observed": {
+          "outcome": "LIMIT_REACHED",
+          "logical_invocations": 1,
+          "checkpoint": false
+        },
+        "elapsed_seconds": 0.015492,
+        "total_interventions_required": 1,
+        "avoidable_interventions": 0,
+        "escaped_seeded_defects": 0,
+        "seeded_defect_checked": false
+      },
+      {
+        "case": "uncertain_transport",
+        "passed": true,
+        "observed": {
+          "outcome": "OUTCOME_UNCERTAIN",
+          "logical_invocations": 1,
+          "checkpoint": false
+        },
+        "elapsed_seconds": 0.05572,
+        "total_interventions_required": 1,
+        "avoidable_interventions": 0,
+        "escaped_seeded_defects": 0,
+        "seeded_defect_checked": false
+      },
+      {
+        "case": "design_repair",
+        "passed": true,
+        "observed": {
+          "outcome": "APPROVED",
+          "logical_invocations": 9,
+          "diagnoses": 1,
+          "checkpoint": false
+        },
+        "elapsed_seconds": 0.02884,
+        "total_interventions_required": 0,
+        "avoidable_interventions": 0,
+        "escaped_seeded_defects": 0,
+        "seeded_defect_checked": false
+      },
+      {
+        "case": "design_stall",
+        "passed": true,
+        "observed": {
+          "outcome": "DESIGN_STALLED",
+          "logical_invocations": 9,
+          "diagnoses": 1,
+          "checkpoint": false
+        },
+        "elapsed_seconds": 0.023031,
+        "total_interventions_required": 1,
+        "avoidable_interventions": 0,
+        "escaped_seeded_defects": 0,
+        "seeded_defect_checked": false
+      },
+      {
+        "case": "design_oscillation",
+        "passed": true,
+        "observed": {
+          "outcome": "DESIGN_STALLED",
+          "logical_invocations": 11,
+          "diagnoses": 1,
+          "checkpoint": false
+        },
+        "elapsed_seconds": 0.035812,
+        "total_interventions_required": 1,
+        "avoidable_interventions": 0,
+        "escaped_seeded_defects": 0,
+        "seeded_defect_checked": false
+      },
+      {
+        "case": "design_diagnosis_citation",
+        "passed": true,
+        "observed": {
+          "outcome": "DESIGN_STALLED",
+          "logical_invocations": 9,
+          "diagnoses": 1,
+          "checkpoint": false
+        },
+        "elapsed_seconds": 0.023999,
+        "total_interventions_required": 1,
+        "avoidable_interventions": 0,
+        "escaped_seeded_defects": 0,
+        "seeded_defect_checked": false
+      },
+      {
+        "case": "design_empty_after_diagnosis",
+        "passed": true,
+        "observed": {
+          "outcome": "DESIGN_STALLED",
+          "logical_invocations": 8,
+          "diagnoses": 1,
+          "checkpoint": false
+        },
+        "elapsed_seconds": 0.018875,
+        "total_interventions_required": 1,
+        "avoidable_interventions": 0,
+        "escaped_seeded_defects": 0,
+        "seeded_defect_checked": false
+      }
+    ],
+    "failed_cases": 0,
+    "note": "Semantic engine/checkpoint and expected-stop benchmark, not ready-PR delivery or the ten-defect C oracle. Expected stops still count required operator interventions. No callbacks were executed; waits were not simulated."
+  },
+  "provider_calls": 0
+}

@@ -1,0 +1,42 @@
+{
+  "result": "PASS",
+  "source": "b3236051d98a4af1655fd3803843de283e11ab60",
+  "provider_calls": 0,
+  "source_mutation": false,
+  "old_outcomes_unchanged": true,
+  "outcomes": [
+    {
+      "gate": "review",
+      "engine": "codex",
+      "model": "gpt-6.1-sol",
+      "approved": true,
+      "outcome_class": "approved",
+      "mode": "preserved-native-approval",
+      "original_native_approved": true,
+      "original_outcome_sha256": "772ff8904e2fba4a76ab482280ce99662ec27be9f9adfdc15a2d250c51e9e7e1",
+      "raw_sha256": "57b5ee051a835d5fda4db43880999a2a313af41748e5a4a8e8f0de53410db19d",
+      "native_invocation": "cf7b80441c394a2db6015542fd97a634",
+      "new_provider_calls": 0,
+      "reviewed_commit": "b3236051d98a4af1655fd3803843de283e11ab60",
+      "explicit_report_unchanged": true,
+      "explicit_verdict": "REVIEW_STATUS: APPROVED"
+    },
+    {
+      "gate": "review",
+      "engine": "claude",
+      "model": "sonnet",
+      "approved": true,
+      "outcome_class": "approved",
+      "mode": "host-protocol-repair-of-explicit-saved-verdict",
+      "original_native_approved": false,
+      "original_outcome_sha256": "5baaeca46b17a9c12070c1b6cd16598350f2c590b59206d42c4e9d9d284796a3",
+      "raw_sha256": "abc411f5dc8d65d8aa6f04b601b9d86f13dc57d84467c2392c5fa03021e19366",
+      "native_invocation": "58bc91f97a0f47b2956b17d65ab20146",
+      "new_provider_calls": 0,
+      "reviewed_commit": "b3236051d98a4af1655fd3803843de283e11ab60",
+      "explicit_report_unchanged": true,
+      "explicit_verdict": "REVIEW_STATUS: APPROVED"
+    }
+  ],
+  "contradictory_or_additional_verdict_rejected": true
+}

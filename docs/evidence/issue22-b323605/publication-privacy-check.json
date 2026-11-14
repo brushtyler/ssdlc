@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "result": "PASS",
+  "gitleaks_exit_code": 0,
+  "network_enabled": false,
+  "public_folders_scanned": [
+    "issue22-c342fde",
+    "issue22-f0aa2d6",
+    "issue22-4c30582",
+    "issue22-b323605"
+  ],
+  "secret_findings": 0,
+  "private_root_or_temporary_paths": 0,
+  "raw_private_diagnostic_sha256": "c5294211e6c9fae4f40040778f703988b12302ae64e0e285777fdf0aadfd729e",
+  "note": "Scan covers the exact exported assessment documents and validation code; original private transcripts and account data are excluded."
+}

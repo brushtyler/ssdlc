@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "reviewed_commit": "b3236051d98a4af1655fd3803843de283e11ab60",
+  "result": "PASS",
+  "original_obligations": 58,
+  "qa_explicit_pass_rows": 58,
+  "ac38_scenario_groups": 13,
+  "full_suite_executions": 1497,
+  "recovery_cases_passed": 12,
+  "unmatched_test_references": 0,
+  "ambiguous_test_log_blocks": 0,
+  "source_and_controller_unchanged": true,
+  "native_parent_unchanged": true,
+  "native_parent_counters_preserved": true,
+  "validation_calls_consumed": 11,
+  "validation_call_cap": 11,
+  "independent_appsec_false_positive_confirmations": 4,
+  "historical_synthetic_matches_confirmed": 2,
+  "no_unresolved_reported_mandatory_findings": true,
+  "inspection_method": "Verified native outcome manifests, source snapshots, all58 explicit QA rows, original requirements, executed test references and 13 grouped AC38 journeys; targeted source/test inspection of startup, bootstrap, native signoff provenance, durable corrective authorization, repairs, fresh gates, replay and cancellation.",
+  "limitations": [
+    "Provider QA declares most PASS rows are test-trace verification rather than independent per-control source reinspection.",
+    "Review and AppSec are targeted assessments, not exhaustive line-by-line audits.",
+    "External host validation does not advance the frozen historical native run.",
+    "Claude explicit review verdict required a separately authorized deterministic host rendering repair; its original native failure is preserved."
+  ],
+  "validation_ready_for_human_pr_review": true
+}

@@ -1,0 +1,16 @@
+{
+  "source": "b3236051d98a4af1655fd3803843de283e11ab60",
+  "provider_calls": 0,
+  "typed_transport_checks_passed": 80,
+  "actual_saved_claude_json_revalidated": true,
+  "contradictory_or_additional_verdict_rejected": true,
+  "disposable_accounting_simulation": {
+    "prior_calls": 9,
+    "new_fake_calls": 2,
+    "final_calls": 11,
+    "prior_rows_preserved": true,
+    "original_store_unchanged": true,
+    "replay_calls": 0
+  },
+  "exact_real_source_and_environment_verify_only_passed": true
+}

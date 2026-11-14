@@ -1,0 +1,296 @@
+{
+  "reviewed_commit": "b3236051d98a4af1655fd3803843de283e11ab60",
+  "results": [
+    {
+      "id": "AC-1",
+      "status": "PASS",
+      "evidence": "test_unified_execution.test_default_new_run_uses_scheduler_and_all_gates; full suite OK (ev/full-suite.log, 1497 tests, 0 failures)"
+    },
+    {
+      "id": "AC-2",
+      "status": "PASS",
+      "evidence": "Obsolete-flag tests in trace; full suite OK"
+    },
+    {
+      "id": "AC-3",
+      "status": "PASS",
+      "evidence": "Tier S one-node tests in trace (test_unified_integration); full suite OK"
+    },
+    {
+      "id": "AC-4",
+      "status": "PASS",
+      "evidence": "Static/coverage legacy-path tests in trace; full suite OK"
+    },
+    {
+      "id": "AC-5",
+      "status": "PASS",
+      "evidence": "Doc/setup contract tests (tests/doc_contracts.py, test_doc_contracts); full suite OK"
+    },
+    {
+      "id": "AC-6",
+      "status": "PASS",
+      "evidence": "tests/test_legacy_compat.py refusals before constructor; full suite OK"
+    },
+    {
+      "id": "AC-7",
+      "status": "PASS",
+      "evidence": "Read-only legacy command tests in test_legacy_compat; full suite OK"
+    },
+    {
+      "id": "AC-8",
+      "status": "PASS",
+      "evidence": "Legacy flag/forged approval refusal tests in test_legacy_compat and test_signoff_provenance; full suite OK"
+    },
+    {
+      "id": "AC-9",
+      "status": "PASS",
+      "evidence": "Historical task-run resume tests in test_legacy_compat; full suite OK"
+    },
+    {
+      "id": "AC-10",
+      "status": "PASS",
+      "evidence": "test_unified_execution.test_registered_historical_contract_bytes_are_unchanged; full suite OK"
+    },
+    {
+      "id": "AC-11",
+      "status": "PASS",
+      "evidence": "test_unified_integration.StartupJourneys.test_documented_default_cli_and_tier_s; full suite OK"
+    },
+    {
+      "id": "AC-12",
+      "status": "PASS",
+      "evidence": "test_legacy_compat.test_refusals_before_every_constructor and test_new_and_pre_execution; full suite OK"
+    },
+    {
+      "id": "AC-13",
+      "status": "PASS",
+      "evidence": "test_bootstrap.test_binding_and_contract; test_unified_integration.test_documented_bootstrap_profile; full suite OK"
+    },
+    {
+      "id": "AC-14",
+      "status": "PASS",
+      "evidence": "Strict-baseline-without-profile test in test_bootstrap per trace; full suite OK"
+    },
+    {
+      "id": "AC-15",
+      "status": "PASS",
+      "evidence": "Ineligible-with-tests test in test_bootstrap per trace; full suite OK"
+    },
+    {
+      "id": "AC-16",
+      "status": "PASS",
+      "evidence": "Dirty/non-initial-commit ineligibility tests in test_bootstrap per trace; full suite OK"
+    },
+    {
+      "id": "AC-17",
+      "status": "PASS",
+      "evidence": "Checkpoint empty/failing/timeout tests in test_bootstrap and test_task_bootstrap per trace; full suite OK"
+    },
+    {
+      "id": "AC-18",
+      "status": "PASS",
+      "evidence": "Post-bootstrap conversion tests in test_task_bootstrap per trace; full suite OK"
+    },
+    {
+      "id": "AC-19",
+      "status": "PASS",
+      "evidence": "Inspected orchestrator.py:481-502, 3566-3572, 5400; tests/test_bootstrap.py:163,190,199,330; ev/review-closure.json before-fail/after-pass"
+    },
+    {
+      "id": "AC-20",
+      "status": "PASS",
+      "evidence": "Protected-path-in-bootstrap tests per trace; full suite OK"
+    },
+    {
+      "id": "AC-21",
+      "status": "PASS",
+      "evidence": "Profile schema/policy rejection tests (test_bootstrap, schemas/bootstrap-profile.schema.json); full suite OK"
+    },
+    {
+      "id": "AC-22",
+      "status": "PASS",
+      "evidence": "Pipeline gate-to-corrective tests (test_corrective_*, test_i2_corrective_integration); full suite OK"
+    },
+    {
+      "id": "AC-23",
+      "status": "PASS",
+      "evidence": "Immutable preview execution_authorized=false tests (test_bounce_preview, test_corrective_creation); full suite OK"
+    },
+    {
+      "id": "AC-24",
+      "status": "PASS",
+      "evidence": "test_corrective_creation / test_corrective_executor binding tests; full suite OK"
+    },
+    {
+      "id": "AC-25",
+      "status": "PASS",
+      "evidence": "test_corrective_executor and test_corrective_owner_integration; full suite OK"
+    },
+    {
+      "id": "AC-26",
+      "status": "PASS",
+      "evidence": "Free-text/forged authorization tests per trace; full suite OK"
+    },
+    {
+      "id": "AC-27",
+      "status": "PASS",
+      "evidence": "Stale/mutated evidence refusal tests per trace; full suite OK"
+    },
+    {
+      "id": "AC-28",
+      "status": "PASS",
+      "evidence": "Scanner-failure classification tests (test_gate_diagnosis, test_corrective_*); full suite OK"
+    },
+    {
+      "id": "AC-29",
+      "status": "PASS",
+      "evidence": "test_corrective_bounded_accounting; full suite OK"
+    },
+    {
+      "id": "AC-30",
+      "status": "PASS",
+      "evidence": "test_corrective_recovery crash-boundary tests; full suite OK"
+    },
+    {
+      "id": "AC-31",
+      "status": "PASS",
+      "evidence": "Replay no-op tests in test_corrective_recovery/executor per trace; full suite OK"
+    },
+    {
+      "id": "AC-32",
+      "status": "PASS",
+      "evidence": "Attempts-exhausted tests per trace; full suite OK"
+    },
+    {
+      "id": "AC-33",
+      "status": "PASS",
+      "evidence": "Source-mutation refusal tests per trace; full suite OK"
+    },
+    {
+      "id": "AC-34",
+      "status": "PASS",
+      "evidence": "Budget/cancel boundary tests per trace; full suite OK"
+    },
+    {
+      "id": "AC-35",
+      "status": "PASS",
+      "evidence": "Replanning-required tests (test_corrective_*, test_scope_amendments); full suite OK"
+    },
+    {
+      "id": "AC-36",
+      "status": "PASS",
+      "evidence": "Candidate-bound gate rerun tests (test_corrective_publication, test_candidate_evidence); full suite OK"
+    },
+    {
+      "id": "AC-37",
+      "status": "PASS",
+      "evidence": "tests/test_repair_prompt.py bounded prompt tests; full suite OK"
+    },
+    {
+      "id": "AC-38",
+      "status": "PASS",
+      "evidence": "Full suite 1497 tests OK via real entry points (test_unified_integration, test_bootstrap, test_corrective_*); bootstrap restart regressions inspected"
+    },
+    {
+      "id": "AC-39",
+      "status": "PASS",
+      "evidence": "Doc contract tests tests/test_doc_contracts.py with doc_contracts.py; full suite OK"
+    },
+    {
+      "id": "SEC-1",
+      "status": "PASS",
+      "evidence": "Engine-owned transaction authority tests (test_corrective_creation); full suite OK"
+    },
+    {
+      "id": "SEC-2",
+      "status": "PASS",
+      "evidence": "Hash re-verification tests (test_corrective_executor, test_gate_convergence_integrity); full suite OK"
+    },
+    {
+      "id": "SEC-3",
+      "status": "PASS",
+      "evidence": "test_legacy_compat refusal-before-write tests; full suite OK"
+    },
+    {
+      "id": "SEC-4",
+      "status": "PASS",
+      "evidence": "Obsolete-flag inertness tests; full suite OK"
+    },
+    {
+      "id": "SEC-5",
+      "status": "PASS",
+      "evidence": "Bootstrap exemption bound to first invocation, cleared on exit (orchestrator.py:481-502); tests/test_bootstrap.py:163-330; review-closure evidence"
+    },
+    {
+      "id": "SEC-6",
+      "status": "PASS",
+      "evidence": "Fail-closed proof tests in test_task_bootstrap per trace; full suite OK"
+    },
+    {
+      "id": "SEC-7",
+      "status": "PASS",
+      "evidence": "Protected-path and cache safety tests in repair paths per trace; full suite OK"
+    },
+    {
+      "id": "SEC-8",
+      "status": "PASS",
+      "evidence": "Scanner failure never authorizes repair tests (test_gate_diagnosis, test_corrective_*); full suite OK"
+    },
+    {
+      "id": "SEC-9",
+      "status": "PASS",
+      "evidence": "ticket_lock/replay tests (test_lock_leases, test_corrective_recovery); full suite OK"
+    },
+    {
+      "id": "SEC-10",
+      "status": "PASS",
+      "evidence": "Sealed contract bytes unchanged test; full suite OK"
+    },
+    {
+      "id": "SEC-11",
+      "status": "PASS",
+      "evidence": "Confinement/redaction tests (test_repair_prompt, test_retry_logging); gitleaks hits are test fixtures per host triage (not independently confirmed)"
+    },
+    {
+      "id": "SEC-12",
+      "status": "PASS",
+      "evidence": "requirements.txt unchanged deps; SCA ev/sca.json no vulns; full suite OK"
+    },
+    {
+      "id": "NFR-1",
+      "status": "PASS",
+      "evidence": "Structured logging tests (test_stage_observability, test_retry_logging); full suite OK"
+    },
+    {
+      "id": "NFR-2",
+      "status": "PASS",
+      "evidence": "Metrics counter tests per trace; full suite OK"
+    },
+    {
+      "id": "NFR-3",
+      "status": "PASS",
+      "evidence": "Boundary recovery tests (test_corrective_recovery, test_transitions); ev/recovery-benchmark.json; full suite OK"
+    },
+    {
+      "id": "NFR-4",
+      "status": "PASS",
+      "evidence": "Refused/interrupted consistency tests per trace; additive records; full suite OK"
+    },
+    {
+      "id": "NFR-5",
+      "status": "PASS",
+      "evidence": "Legacy refusal exit-code/message tests in test_legacy_compat; full suite OK"
+    },
+    {
+      "id": "NFR-6",
+      "status": "PASS",
+      "evidence": "ev/full-suite.log: Ran 1497 tests OK exit 0; ev/full-suite.json"
+    },
+    {
+      "id": "NFR-7",
+      "status": "PASS",
+      "evidence": "No second state machine; targeted edits per diff summary and plan; limited inspection, trace-based"
+    }
+  ],
+  "coverage_limit": "Most QA rows are test-trace PASS, supported by the independently executed full suite; see qa-claude.md for the explicitly limited source inspection"
+}

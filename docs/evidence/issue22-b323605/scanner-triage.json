@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "scanner": "gitleaks",
+  "raw_exit_code": 1,
+  "status": "INDEPENDENT_APPSEC_CONFIRMED_FALSE_POSITIVES",
+  "findings": [
+    {
+      "rule_id": "generic-api-key",
+      "file": "ssdlc_scope_amendments.py",
+      "line": 407,
+      "file_sha256": "87d6a8ee13b2c1db1fd259ea59fb66c43ec8e8a3304eb70863bdbfb43108b771",
+      "classification": "synthetic_or_protocol_false_positive",
+      "rationale": "Fixed protocol identifier scope-amendment-v1, not a credential."
+    },
+    {
+      "rule_id": "private-key",
+      "file": "tests/test_repair_prompt.py",
+      "line": 93,
+      "file_sha256": "6026e2702bd0c2cbb50454e65521fa2dfc8684c6587d0d4931764c0c33583f6f",
+      "classification": "synthetic_or_protocol_false_positive",
+      "rationale": "Synthetic PEM block with fixed fake body testing secret redaction; not an operational private key."
+    },
+    {
+      "rule_id": "aws-access-token",
+      "file": "tests/test_repair_prompt.py",
+      "line": 92,
+      "file_sha256": "6026e2702bd0c2cbb50454e65521fa2dfc8684c6587d0d4931764c0c33583f6f",
+      "classification": "synthetic_or_protocol_false_positive",
+      "rationale": "Synthetic AWS identifier testing secret redaction; not an operational credential."
+    },
+    {
+      "rule_id": "generic-api-key",
+      "file": "tests/test_transitions.py",
+      "line": 95,
+      "file_sha256": "a11d73c62aebecf9d9cfd4d1a9dbcc8282dd29dc907d290efdd092ef406c9130",
+      "classification": "synthetic_or_protocol_false_positive",
+      "rationale": "Same fixed protocol identifier in a transition test fixture."
+    }
+  ],
+  "allowlist_changed": false,
+  "unexpected_findings_accepted": false,
+  "prior_scan_raw_log_sha256": "cc575160c15a5a75f4f3456025f604de9d0db96879e060c21b633797cc89b466",
+  "tested_head": "b3236051d98a4af1655fd3803843de283e11ab60",
+  "raw_report_sha256": "65c68b792137e85404c61733ac23e5550ddd8120377836a4f087c5a076124010",
+  "new_findings_since_prior_scan": 0,
+  "independent_assessment": "appsec-claude.md",
+  "historical_synthetic_matches_confirmed": 2
+}

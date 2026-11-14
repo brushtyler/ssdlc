@@ -1,0 +1,1375 @@
+{
+  "schema_version": 1,
+  "tested_head": "b3236051d98a4af1655fd3803843de283e11ab60",
+  "kind": "structural_execution_trace_not_semantic_completion_proof",
+  "test_executions": 1497,
+  "observed_test_start_records": 1455,
+  "unique_passed_test_ids": 1432,
+  "ambiguous_log_blocks": [],
+  "requirements": [
+    {
+      "id": "AC-1",
+      "references": [
+        {
+          "reference": "test_unified_execution.UnifiedExecutionTests.test_default_new_run_uses_scheduler_and_all_gates",
+          "passed_test_ids": [
+            "test_unified_execution.UnifiedExecutionTests.test_default_new_run_uses_scheduler_and_all_gates"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-10",
+      "references": [
+        {
+          "reference": "test_unified_execution.UnifiedExecutionTests.test_registered_historical_contract_bytes_are_unchanged",
+          "passed_test_ids": [
+            "test_unified_execution.UnifiedExecutionTests.test_registered_historical_contract_bytes_are_unchanged"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_unified_execution.UnifiedExecutionTests.test_default_new_run_uses_scheduler_and_all_gates",
+          "passed_test_ids": [
+            "test_unified_execution.UnifiedExecutionTests.test_default_new_run_uses_scheduler_and_all_gates"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-11",
+      "references": [
+        {
+          "reference": "test_unified_integration.StartupJourneys.test_documented_default_cli_and_tier_s",
+          "passed_test_ids": [
+            "test_unified_integration.StartupJourneys.test_documented_default_cli_and_tier_s"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-12",
+      "references": [
+        {
+          "reference": "test_legacy_compat.CompatibilityTests.test_refusals_before_every_constructor",
+          "passed_test_ids": [
+            "test_legacy_compat.CompatibilityTests.test_refusals_before_every_constructor"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_legacy_compat.CompatibilityTests.test_new_and_pre_execution",
+          "passed_test_ids": [
+            "test_legacy_compat.CompatibilityTests.test_new_and_pre_execution"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-13",
+      "references": [
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_binding_and_contract",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_binding_and_contract"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_unified_integration.StartupJourneys.test_documented_bootstrap_profile",
+          "passed_test_ids": [
+            "test_unified_integration.StartupJourneys.test_documented_bootstrap_profile"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-14",
+      "references": [
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_no_profile_strict",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_no_profile_strict"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-15",
+      "references": [
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_existing_tests",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_existing_tests"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_discovered_checks",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_discovered_checks"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-16",
+      "references": [
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_dirty",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_dirty"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_two_commits",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_two_commits"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_tree_mismatch",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_tree_mismatch"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-17",
+      "references": [
+        {
+          "reference": "test_bootstrap.CheckpointTests.test_checkpoint_failures",
+          "passed_test_ids": [
+            "test_bootstrap.CheckpointTests.test_checkpoint_failures"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_unified_integration.StartupJourneys.test_bootstrap_empty_checkpoint_and_restart",
+          "passed_test_ids": [
+            "test_unified_integration.StartupJourneys.test_bootstrap_empty_checkpoint_and_restart"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_unified_integration.StartupJourneys.test_bootstrap_failing_checkpoint_and_restart",
+          "passed_test_ids": [
+            "test_unified_integration.StartupJourneys.test_bootstrap_failing_checkpoint_and_restart"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-18",
+      "references": [
+        {
+          "reference": "test_bootstrap.CheckpointTests.test_positive_proof_spends_exemption_and_preserves_contract",
+          "passed_test_ids": [
+            "test_bootstrap.CheckpointTests.test_positive_proof_spends_exemption_and_preserves_contract"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-19",
+      "references": [
+        {
+          "reference": "test_bootstrap.CheckpointTests.test_crash_before_proof_refuses_resume",
+          "passed_test_ids": [
+            "test_bootstrap.CheckpointTests.test_crash_before_proof_refuses_resume"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_pre_execution_resume_refuses_before_writes",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_pre_execution_resume_refuses_before_writes"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_bootstrap.CheckpointTests.test_unproven_initialized_bootstrap_refuses_resume_before_dispatch",
+          "passed_test_ids": [
+            "test_bootstrap.CheckpointTests.test_unproven_initialized_bootstrap_refuses_resume_before_dispatch"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_registered_contract_without_journal_refuses_clean_cli_and_supervisor",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_registered_contract_without_journal_refuses_clean_cli_and_supervisor"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_unregistered_contract_and_forged_ready_status_do_not_renew_exemption",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_unregistered_contract_and_forged_ready_status_do_not_renew_exemption"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_direct_pipeline_refuses_persisted_unproven_contract_before_writes",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_direct_pipeline_refuses_persisted_unproven_contract_before_writes"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_direct_scheduler_factory_refuses_unproven_contract_before_planning",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_direct_scheduler_factory_refuses_unproven_contract_before_planning"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_first_invocation_claim_is_cleared_after_interruption",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_first_invocation_claim_is_cleared_after_interruption"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_contract_sealed_while_waiting_for_lock_refuses_before_state_write",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_contract_sealed_while_waiting_for_lock_refuses_before_state_write"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-2",
+      "references": [
+        {
+          "reference": "test_unified_execution.UnifiedExecutionTests.test_obsolete_values_have_identical_journals_and_one_bounded_warning",
+          "passed_test_ids": [
+            "test_unified_execution.UnifiedExecutionTests.test_obsolete_values_have_identical_journals_and_one_bounded_warning"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-20",
+      "references": [
+        {
+          "reference": "test_bootstrap.CheckpointTests.test_protected_task_rejected_with_or_without_bootstrap",
+          "passed_test_ids": [
+            "test_bootstrap.CheckpointTests.test_protected_task_rejected_with_or_without_bootstrap"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-21",
+      "references": [
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_invalid_profiles",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_invalid_profiles"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_policy_conflict",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_policy_conflict"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-22",
+      "references": [
+        {
+          "reference": "test_corrective_executor.ExecutorTests.test_review_rejection",
+          "passed_test_ids": [
+            "test_corrective_executor.ExecutorTests.test_review_rejection"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_corrective_executor.ExecutorTests.test_qa_rejection",
+          "passed_test_ids": [
+            "test_corrective_executor.ExecutorTests.test_qa_rejection"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_corrective_executor.ExecutorTests.test_appsec_rejection",
+          "passed_test_ids": [
+            "test_corrective_executor.ExecutorTests.test_appsec_rejection"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-23",
+      "references": [
+        {
+          "reference": "test_unified_integration.CorrectiveJourneys.test_documented_bounce_preview_cli",
+          "passed_test_ids": [
+            "test_unified_integration.CorrectiveJourneys.test_documented_bounce_preview_cli"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_corrective_creation.CreationTests.test_hand_edit_or_feedback_authorizes_nothing",
+          "passed_test_ids": [
+            "test_corrective_creation.CreationTests.test_hand_edit_or_feedback_authorizes_nothing"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-24",
+      "references": [
+        {
+          "reference": "test_corrective_creation.CreationTests.test_untouched_preview_durable_creation_and_exact_roots",
+          "passed_test_ids": [
+            "test_corrective_creation.CreationTests.test_untouched_preview_durable_creation_and_exact_roots"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_corrective_creation.CreationTests.test_evidence_checked_again_before_invalidation",
+          "passed_test_ids": [
+            "test_corrective_creation.CreationTests.test_evidence_checked_again_before_invalidation"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-25",
+      "references": [
+        {
+          "reference": "test_unified_integration.CorrectiveJourneys.test_review_root_repair_dependent_revalidation_and_fresh_gates",
+          "passed_test_ids": [
+            "test_unified_integration.CorrectiveJourneys.test_review_root_repair_dependent_revalidation_and_fresh_gates"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_corrective_executor.ExecutorTests.test_tier_s_always_reruns_appsec_after_repair",
+          "passed_test_ids": [
+            "test_corrective_executor.ExecutorTests.test_tier_s_always_reruns_appsec_after_repair"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-26",
+      "references": [
+        {
+          "reference": "test_corrective_creation.CreationTests.test_hand_edit_or_feedback_authorizes_nothing",
+          "passed_test_ids": [
+            "test_corrective_creation.CreationTests.test_hand_edit_or_feedback_authorizes_nothing"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_unified_execution.UnifiedExecutionTests.test_reject_records_no_execution_authority",
+          "passed_test_ids": [
+            "test_unified_execution.UnifiedExecutionTests.test_reject_records_no_execution_authority"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-27",
+      "references": [
+        {
+          "reference": "test_corrective_creation.CreationTests.test_diagnostic_replan_ambiguous_and_tool_failure",
+          "passed_test_ids": [
+            "test_corrective_creation.CreationTests.test_diagnostic_replan_ambiguous_and_tool_failure"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_corrective_creation.CreationTests.test_frozen_report_response_input_and_captured_proof_mutations",
+          "passed_test_ids": [
+            "test_corrective_creation.CreationTests.test_frozen_report_response_input_and_captured_proof_mutations"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_corrective_creation.CreationTests.test_changed_journal_head",
+          "passed_test_ids": [
+            "test_corrective_creation.CreationTests.test_changed_journal_head"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-28",
+      "references": [
+        {
+          "reference": "test_corrective_creation.CreationTests.test_real_scanner_control_failure_refuses_without_repair",
+          "passed_test_ids": [
+            "test_corrective_creation.CreationTests.test_real_scanner_control_failure_refuses_without_repair"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-29",
+      "references": [
+        {
+          "reference": "test_task_repair.RepairTests.test_exact_roots_interleave_verification_and_keep_history",
+          "passed_test_ids": [
+            "test_task_repair.RepairTests.test_exact_roots_interleave_verification_and_keep_history"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_corrective_executor.ExecutorTests.test_repeated_rejection_reenters_corrective_with_preserved_attempts",
+          "passed_test_ids": [
+            "test_corrective_executor.ExecutorTests.test_repeated_rejection_reenters_corrective_with_preserved_attempts"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-3",
+      "references": [
+        {
+          "reference": "test_unified_integration.StartupJourneys.test_documented_default_cli_and_tier_s",
+          "passed_test_ids": [
+            "test_unified_integration.StartupJourneys.test_documented_default_cli_and_tier_s"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_unified_execution.UnifiedExecutionTests.test_tier_s_two_nodes_are_repaired_before_dispatch",
+          "passed_test_ids": [
+            "test_unified_execution.UnifiedExecutionTests.test_tier_s_two_nodes_are_repaired_before_dispatch"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_review_closure.ReviewClosureTests.test_every_tier_requires_appsec_without_a_specialist_trigger",
+          "passed_test_ids": [
+            "test_review_closure.ReviewClosureTests.test_every_tier_requires_appsec_without_a_specialist_trigger"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-30",
+      "references": [
+        {
+          "reference": "test_unified_integration.CorrectiveJourneys.test_cli_recovery_after_invalidation",
+          "passed_test_ids": [
+            "test_unified_integration.CorrectiveJourneys.test_cli_recovery_after_invalidation"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_unified_integration.CorrectiveJourneys.test_cli_recovery_after_repair",
+          "passed_test_ids": [
+            "test_unified_integration.CorrectiveJourneys.test_cli_recovery_after_repair"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_corrective_recovery.RecoveryTests.test_two_concurrent_resumes_have_one_invalidation_and_repair",
+          "passed_test_ids": [
+            "test_corrective_recovery.RecoveryTests.test_two_concurrent_resumes_have_one_invalidation_and_repair"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-31",
+      "references": [
+        {
+          "reference": "test_corrective_executor.ExecutorTests.test_completed_and_approved_replay_are_zero_write",
+          "passed_test_ids": [
+            "test_corrective_executor.ExecutorTests.test_completed_and_approved_replay_are_zero_write"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-32",
+      "references": [
+        {
+          "reference": "test_unified_integration.CorrectiveJourneys.test_attempts_exhausted_through_pipeline",
+          "passed_test_ids": [
+            "test_unified_integration.CorrectiveJourneys.test_attempts_exhausted_through_pipeline"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_corrective_executor.ExecutorTests.test_attempt_exhaustion_precedes_invalidation",
+          "passed_test_ids": [
+            "test_corrective_executor.ExecutorTests.test_attempt_exhaustion_precedes_invalidation"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-33",
+      "references": [
+        {
+          "reference": "test_unified_integration.CorrectiveJourneys.test_source_mutation_refused_through_pipeline",
+          "passed_test_ids": [
+            "test_unified_integration.CorrectiveJourneys.test_source_mutation_refused_through_pipeline"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_corrective_creation.CreationTests.test_moved_head_dirty_tree_and_protected_path",
+          "passed_test_ids": [
+            "test_corrective_creation.CreationTests.test_moved_head_dirty_tree_and_protected_path"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-34",
+      "references": [
+        {
+          "reference": "test_corrective_recovery.RecoveryTests.test_cancel_boundaries_preserve_frozen_limits",
+          "passed_test_ids": [
+            "test_corrective_recovery.RecoveryTests.test_cancel_boundaries_preserve_frozen_limits"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_corrective_publication.PublicationTests.test_every_nested_dispatch_uses_frozen_guard",
+          "passed_test_ids": [
+            "test_corrective_publication.PublicationTests.test_every_nested_dispatch_uses_frozen_guard"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-35",
+      "references": [
+        {
+          "reference": "test_corrective_executor.ExecutorTests.test_scope_controller_gate_and_contract_changes_fail_closed",
+          "passed_test_ids": [
+            "test_corrective_executor.ExecutorTests.test_scope_controller_gate_and_contract_changes_fail_closed"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_task_repair.RepairTests.test_scope_and_protected_edits_rolled_back",
+          "passed_test_ids": [
+            "test_task_repair.RepairTests.test_scope_and_protected_edits_rolled_back"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-36",
+      "references": [
+        {
+          "reference": "test_corrective_executor.ExecutorTests.test_repeated_rejection_reenters_corrective_with_preserved_attempts",
+          "passed_test_ids": [
+            "test_corrective_executor.ExecutorTests.test_repeated_rejection_reenters_corrective_with_preserved_attempts"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-37",
+      "references": [
+        {
+          "reference": "test_repair_prompt.RepairPromptTests.test_registered_reference_suppresses_log_read_and_excerpt",
+          "passed_test_ids": [
+            "test_repair_prompt.RepairPromptTests.test_registered_reference_suppresses_log_read_and_excerpt"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_repair_prompt.RepairPromptTests.test_full_retry_prompt_projection_and_scrubbing",
+          "passed_test_ids": [
+            "test_repair_prompt.RepairPromptTests.test_full_retry_prompt_projection_and_scrubbing"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_repair_prompt.RepairPromptTests.test_oversize_refused_before_provider_and_dispatch_assertion",
+          "passed_test_ids": [
+            "test_repair_prompt.RepairPromptTests.test_oversize_refused_before_provider_and_dispatch_assertion"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-38",
+      "references": [
+        {
+          "reference": "test_unified_integration.StartupJourneys.test_documented_default_cli_and_tier_s",
+          "passed_test_ids": [
+            "test_unified_integration.StartupJourneys.test_documented_default_cli_and_tier_s"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_unified_integration.StartupJourneys.test_existing_task_cli_resume_preserves_seals_attempts_and_budget",
+          "passed_test_ids": [
+            "test_unified_integration.StartupJourneys.test_existing_task_cli_resume_preserves_seals_attempts_and_budget"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_unified_integration.CorrectiveJourneys.test_review_root_repair_dependent_revalidation_and_fresh_gates",
+          "passed_test_ids": [
+            "test_unified_integration.CorrectiveJourneys.test_review_root_repair_dependent_revalidation_and_fresh_gates"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_unified_integration.CorrectiveJourneys.test_qa_rejection",
+          "passed_test_ids": [
+            "test_unified_integration.CorrectiveJourneys.test_qa_rejection"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_unified_integration.CorrectiveJourneys.test_appsec_rejection",
+          "passed_test_ids": [
+            "test_unified_integration.CorrectiveJourneys.test_appsec_rejection"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_unified_integration.CorrectiveJourneys.test_stale_evidence_refused_through_pipeline",
+          "passed_test_ids": [
+            "test_unified_integration.CorrectiveJourneys.test_stale_evidence_refused_through_pipeline"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_unified_integration.CorrectiveJourneys.test_source_mutation_refused_through_pipeline",
+          "passed_test_ids": [
+            "test_unified_integration.CorrectiveJourneys.test_source_mutation_refused_through_pipeline"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_registered_contract_without_journal_refuses_clean_cli_and_supervisor",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_registered_contract_without_journal_refuses_clean_cli_and_supervisor"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_unregistered_contract_and_forged_ready_status_do_not_renew_exemption",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_unregistered_contract_and_forged_ready_status_do_not_renew_exemption"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_direct_pipeline_refuses_persisted_unproven_contract_before_writes",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_direct_pipeline_refuses_persisted_unproven_contract_before_writes"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_direct_scheduler_factory_refuses_unproven_contract_before_planning",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_direct_scheduler_factory_refuses_unproven_contract_before_planning"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_first_invocation_claim_is_cleared_after_interruption",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_first_invocation_claim_is_cleared_after_interruption"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_contract_sealed_while_waiting_for_lock_refuses_before_state_write",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_contract_sealed_while_waiting_for_lock_refuses_before_state_write"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-39",
+      "references": [
+        {
+          "reference": "test_bounce_preview.PreviewTests.test_docs_required_facts_and_limits",
+          "passed_test_ids": [
+            "test_bounce_preview.PreviewTests.test_docs_required_facts_and_limits"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_doc_contracts.DocContractTests.test_repository_documentation_is_reachable",
+          "passed_test_ids": [
+            "test_doc_contracts.DocContractTests.test_repository_documentation_is_reachable"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-4",
+      "references": [
+        {
+          "reference": "test_unified_execution.UnifiedExecutionTests.test_no_mode_switch_or_legacy_executor_remains",
+          "passed_test_ids": [
+            "test_unified_execution.UnifiedExecutionTests.test_no_mode_switch_or_legacy_executor_remains"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-5",
+      "references": [
+        {
+          "reference": "test_unified_execution.SetupSmokeTests.test_supported_setup_creates_usable_local_configuration",
+          "passed_test_ids": [
+            "test_unified_execution.SetupSmokeTests.test_supported_setup_creates_usable_local_configuration"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-6",
+      "references": [
+        {
+          "reference": "test_legacy_compat.CompatibilityTests.test_refusals_before_every_constructor",
+          "passed_test_ids": [
+            "test_legacy_compat.CompatibilityTests.test_refusals_before_every_constructor"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-7",
+      "references": [
+        {
+          "reference": "test_legacy_compat.CompatibilityTests.test_read_only_status_and_monitor_without_supervisor_records",
+          "passed_test_ids": [
+            "test_legacy_compat.CompatibilityTests.test_read_only_status_and_monitor_without_supervisor_records"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_legacy_compat.CompatibilityTests.test_history_import_confined_and_read_only",
+          "passed_test_ids": [
+            "test_legacy_compat.CompatibilityTests.test_history_import_confined_and_read_only"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-8",
+      "references": [
+        {
+          "reference": "test_legacy_compat.CompatibilityTests.test_schema_invalid_registered_inputs_are_refused_before_mutation",
+          "passed_test_ids": [
+            "test_legacy_compat.CompatibilityTests.test_schema_invalid_registered_inputs_are_refused_before_mutation"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_legacy_compat.CompatibilityTests.test_journal_matrix_and_approval",
+          "passed_test_ids": [
+            "test_legacy_compat.CompatibilityTests.test_journal_matrix_and_approval"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_signoff_provenance.SignoffProvenanceTests.test_ready_status_without_gate_receipts_is_refused_before_constructor",
+          "passed_test_ids": [
+            "test_signoff_provenance.SignoffProvenanceTests.test_ready_status_without_gate_receipts_is_refused_before_constructor"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_signoff_provenance.SignoffProvenanceTests.test_full_native_provenance_admits_approval",
+          "passed_test_ids": [
+            "test_signoff_provenance.SignoffProvenanceTests.test_full_native_provenance_admits_approval"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_signoff_provenance.SignoffProvenanceTests.test_tampered_or_incomplete_phase_never_falls_back_to_old_approval",
+          "passed_test_ids": [
+            "test_signoff_provenance.SignoffProvenanceTests.test_tampered_or_incomplete_phase_never_falls_back_to_old_approval"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_legacy_compat.CompatibilityTests.test_missing_state_with_old_execution_evidence_is_not_a_new_run",
+          "passed_test_ids": [
+            "test_legacy_compat.CompatibilityTests.test_missing_state_with_old_execution_evidence_is_not_a_new_run"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "AC-9",
+      "references": [
+        {
+          "reference": "test_unified_integration.StartupJourneys.test_existing_task_cli_resume_preserves_seals_attempts_and_budget",
+          "passed_test_ids": [
+            "test_unified_integration.StartupJourneys.test_existing_task_cli_resume_preserves_seals_attempts_and_budget"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_unified_execution.UnifiedExecutionTests.test_historical_scheduler_resume_preserves_contract_and_journal_prefix",
+          "passed_test_ids": [
+            "test_unified_execution.UnifiedExecutionTests.test_historical_scheduler_resume_preserves_contract_and_journal_prefix"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_review_closure.ReviewClosureTests.test_pre_isolation_sealed_history_keeps_its_execution_mode",
+          "passed_test_ids": [
+            "test_review_closure.ReviewClosureTests.test_pre_isolation_sealed_history_keeps_its_execution_mode"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "SEC-1",
+      "references": [
+        {
+          "reference": "test_corrective_creation.CreationTests.test_hand_edit_or_feedback_authorizes_nothing",
+          "passed_test_ids": [
+            "test_corrective_creation.CreationTests.test_hand_edit_or_feedback_authorizes_nothing"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "SEC-10",
+      "references": [
+        {
+          "reference": "test_unified_execution.UnifiedExecutionTests.test_registered_historical_contract_bytes_are_unchanged",
+          "passed_test_ids": [
+            "test_unified_execution.UnifiedExecutionTests.test_registered_historical_contract_bytes_are_unchanged"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_unified_execution.UnifiedExecutionTests.test_historical_scheduler_resume_preserves_contract_and_journal_prefix",
+          "passed_test_ids": [
+            "test_unified_execution.UnifiedExecutionTests.test_historical_scheduler_resume_preserves_contract_and_journal_prefix"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "SEC-11",
+      "references": [
+        {
+          "reference": "test_repair_prompt.RepairPromptTests.test_credentials_in_approved_context_are_scrubbed_from_full_prompt",
+          "passed_test_ids": [
+            "test_repair_prompt.RepairPromptTests.test_credentials_in_approved_context_are_scrubbed_from_full_prompt"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_repair_prompt.RepairPromptTests.test_scrubber_covers_keys_identifiers_and_pem",
+          "passed_test_ids": [
+            "test_repair_prompt.RepairPromptTests.test_scrubber_covers_keys_identifiers_and_pem"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_corrective_publication.PublicationTests.test_archive_symlink_escape",
+          "passed_test_ids": [
+            "test_corrective_publication.PublicationTests.test_archive_symlink_escape"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_corrective_publication.PublicationTests.test_archive_traversal_in_intent",
+          "passed_test_ids": [
+            "test_corrective_publication.PublicationTests.test_archive_traversal_in_intent"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_review_closure.ReviewClosureTests.test_corrective_failed_check_console_redacts_but_keeps_private_evidence",
+          "passed_test_ids": [
+            "test_review_closure.ReviewClosureTests.test_corrective_failed_check_console_redacts_but_keeps_private_evidence"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_review_closure.ReviewClosureTests.test_corrective_developer_blocker_console_is_redacted",
+          "passed_test_ids": [
+            "test_review_closure.ReviewClosureTests.test_corrective_developer_blocker_console_is_redacted"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "SEC-12",
+      "references": [
+        {
+          "reference": "test_corrective_executor.ExecutorTests.test_tier_s_always_reruns_appsec_after_repair",
+          "passed_test_ids": [
+            "test_corrective_executor.ExecutorTests.test_tier_s_always_reruns_appsec_after_repair"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_unified_integration.CorrectiveJourneys.test_review_root_repair_dependent_revalidation_and_fresh_gates",
+          "passed_test_ids": [
+            "test_unified_integration.CorrectiveJourneys.test_review_root_repair_dependent_revalidation_and_fresh_gates"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_review_closure.ReviewClosureTests.test_every_tier_requires_appsec_without_a_specialist_trigger",
+          "passed_test_ids": [
+            "test_review_closure.ReviewClosureTests.test_every_tier_requires_appsec_without_a_specialist_trigger"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_signoff_provenance.SignoffProvenanceTests.test_ready_status_without_gate_receipts_is_refused_before_constructor",
+          "passed_test_ids": [
+            "test_signoff_provenance.SignoffProvenanceTests.test_ready_status_without_gate_receipts_is_refused_before_constructor"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_signoff_provenance.SignoffProvenanceTests.test_full_native_provenance_admits_approval",
+          "passed_test_ids": [
+            "test_signoff_provenance.SignoffProvenanceTests.test_full_native_provenance_admits_approval"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_signoff_provenance.SignoffProvenanceTests.test_tampered_or_incomplete_phase_never_falls_back_to_old_approval",
+          "passed_test_ids": [
+            "test_signoff_provenance.SignoffProvenanceTests.test_tampered_or_incomplete_phase_never_falls_back_to_old_approval"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "SEC-2",
+      "references": [
+        {
+          "reference": "test_corrective_creation.CreationTests.test_evidence_checked_again_before_invalidation",
+          "passed_test_ids": [
+            "test_corrective_creation.CreationTests.test_evidence_checked_again_before_invalidation"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_corrective_creation.CreationTests.test_swapped_plan_contract_roster_completion_and_missing",
+          "passed_test_ids": [
+            "test_corrective_creation.CreationTests.test_swapped_plan_contract_roster_completion_and_missing"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_corrective_executor.ExecutorTests.test_every_append_is_verified_from_each_acknowledgment_anchor",
+          "passed_test_ids": [
+            "test_corrective_executor.ExecutorTests.test_every_append_is_verified_from_each_acknowledgment_anchor"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "SEC-3",
+      "references": [
+        {
+          "reference": "test_legacy_compat.CompatibilityTests.test_refusals_before_every_constructor",
+          "passed_test_ids": [
+            "test_legacy_compat.CompatibilityTests.test_refusals_before_every_constructor"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_legacy_compat.CompatibilityTests.test_journal_matrix_and_approval",
+          "passed_test_ids": [
+            "test_legacy_compat.CompatibilityTests.test_journal_matrix_and_approval"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_signoff_provenance.SignoffProvenanceTests.test_ready_status_without_gate_receipts_is_refused_before_constructor",
+          "passed_test_ids": [
+            "test_signoff_provenance.SignoffProvenanceTests.test_ready_status_without_gate_receipts_is_refused_before_constructor"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_signoff_provenance.SignoffProvenanceTests.test_full_native_provenance_admits_approval",
+          "passed_test_ids": [
+            "test_signoff_provenance.SignoffProvenanceTests.test_full_native_provenance_admits_approval"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_signoff_provenance.SignoffProvenanceTests.test_tampered_or_incomplete_phase_never_falls_back_to_old_approval",
+          "passed_test_ids": [
+            "test_signoff_provenance.SignoffProvenanceTests.test_tampered_or_incomplete_phase_never_falls_back_to_old_approval"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_legacy_compat.CompatibilityTests.test_missing_state_with_old_execution_evidence_is_not_a_new_run",
+          "passed_test_ids": [
+            "test_legacy_compat.CompatibilityTests.test_missing_state_with_old_execution_evidence_is_not_a_new_run"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "SEC-4",
+      "references": [
+        {
+          "reference": "test_unified_execution.UnifiedExecutionTests.test_obsolete_values_have_identical_journals_and_one_bounded_warning",
+          "passed_test_ids": [
+            "test_unified_execution.UnifiedExecutionTests.test_obsolete_values_have_identical_journals_and_one_bounded_warning"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "SEC-5",
+      "references": [
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_existing_tests",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_existing_tests"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_dirty",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_dirty"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_execution_boundary_rechecks_eligibility",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_execution_boundary_rechecks_eligibility"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_bootstrap.CheckpointTests.test_crash_before_proof_refuses_resume",
+          "passed_test_ids": [
+            "test_bootstrap.CheckpointTests.test_crash_before_proof_refuses_resume"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_bootstrap.CheckpointTests.test_unproven_initialized_bootstrap_refuses_resume_before_dispatch",
+          "passed_test_ids": [
+            "test_bootstrap.CheckpointTests.test_unproven_initialized_bootstrap_refuses_resume_before_dispatch"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_registered_contract_without_journal_refuses_clean_cli_and_supervisor",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_registered_contract_without_journal_refuses_clean_cli_and_supervisor"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_unregistered_contract_and_forged_ready_status_do_not_renew_exemption",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_unregistered_contract_and_forged_ready_status_do_not_renew_exemption"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_direct_pipeline_refuses_persisted_unproven_contract_before_writes",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_direct_pipeline_refuses_persisted_unproven_contract_before_writes"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_direct_scheduler_factory_refuses_unproven_contract_before_planning",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_direct_scheduler_factory_refuses_unproven_contract_before_planning"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_first_invocation_claim_is_cleared_after_interruption",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_first_invocation_claim_is_cleared_after_interruption"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_bootstrap.BootstrapTests.test_contract_sealed_while_waiting_for_lock_refuses_before_state_write",
+          "passed_test_ids": [
+            "test_bootstrap.BootstrapTests.test_contract_sealed_while_waiting_for_lock_refuses_before_state_write"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "SEC-6",
+      "references": [
+        {
+          "reference": "test_bootstrap.CheckpointTests.test_checkpoint_failures",
+          "passed_test_ids": [
+            "test_bootstrap.CheckpointTests.test_checkpoint_failures"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_positive_test_proof.PositiveTestProofTests",
+          "passed_test_ids": [
+            "test_positive_test_proof.PositiveTestProofTests.test_all_skipped_and_mixed_runner_summaries",
+            "test_positive_test_proof.PositiveTestProofTests.test_all_skipped_real_unittest_baseline_is_not_sealed",
+            "test_positive_test_proof.PositiveTestProofTests.test_candidate_collection_does_not_reuse_older_weak_proof_for_new_contract",
+            "test_positive_test_proof.PositiveTestProofTests.test_new_silent_test_baseline_is_not_sealed",
+            "test_positive_test_proof.PositiveTestProofTests.test_reported_counts_use_final_summary_and_supported_nonpython_runners",
+            "test_positive_test_proof.PositiveTestProofTests.test_scheduler_refuses_silent_current_tests_without_changing_old_contract_semantics"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "SEC-7",
+      "references": [
+        {
+          "reference": "test_task_repair.RepairTests.test_scope_and_protected_edits_rolled_back",
+          "passed_test_ids": [
+            "test_task_repair.RepairTests.test_scope_and_protected_edits_rolled_back"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_corrective_executor.ExecutorTests.test_scope_controller_gate_and_contract_changes_fail_closed",
+          "passed_test_ids": [
+            "test_corrective_executor.ExecutorTests.test_scope_controller_gate_and_contract_changes_fail_closed"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "SEC-8",
+      "references": [
+        {
+          "reference": "test_corrective_creation.CreationTests.test_real_diagnostic_and_scanner_failure",
+          "passed_test_ids": [
+            "test_corrective_creation.CreationTests.test_real_diagnostic_and_scanner_failure"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "SEC-9",
+      "references": [
+        {
+          "reference": "test_corrective_recovery.RecoveryTests.test_two_concurrent_resumes_have_one_invalidation_and_repair",
+          "passed_test_ids": [
+            "test_corrective_recovery.RecoveryTests.test_two_concurrent_resumes_have_one_invalidation_and_repair"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_corrective_executor.ExecutorTests.test_completed_and_approved_replay_are_zero_write",
+          "passed_test_ids": [
+            "test_corrective_executor.ExecutorTests.test_completed_and_approved_replay_are_zero_write"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "NFR-1",
+      "references": [
+        {
+          "reference": "test_stage_observability.StageObservabilityTests",
+          "passed_test_ids": [
+            "test_stage_observability.StageObservabilityTests.test_bootstrap_refusal_has_run_and_bounded_reason_without_repository_or_payload",
+            "test_stage_observability.StageObservabilityTests.test_default_cli_handler_has_utc_timestamps_and_leaves_stdout_untouched",
+            "test_stage_observability.StageObservabilityTests.test_missing_recovered_transaction_stops_before_fresh_gates",
+            "test_stage_observability.StageObservabilityTests.test_obsolete_warning_is_once_bound_to_run_and_never_contains_flag_value",
+            "test_stage_observability.StageObservabilityTests.test_untrusted_and_oversize_stage_fields_are_bounded_and_credentials_scrubbed"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_i2_corrective_integration.NativeI2CorrectiveIntegrationTests",
+          "passed_test_ids": [
+            "test_i2_corrective_integration.NativeI2CorrectiveIntegrationTests.test_exclusive_native_admission_repair_and_fresh_gates",
+            "test_i2_corrective_integration.NativeI2CorrectiveIntegrationTests.test_historical_additive_native_admission_repair_and_fresh_gates"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_review_closure.ReviewClosureTests.test_console_redaction_precedes_excerpt_truncation",
+          "passed_test_ids": [
+            "test_review_closure.ReviewClosureTests.test_console_redaction_precedes_excerpt_truncation"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "NFR-2",
+      "references": [
+        {
+          "reference": "test_corrective_creation.CreationTests.test_untouched_preview_durable_creation_and_exact_roots",
+          "passed_test_ids": [
+            "test_corrective_creation.CreationTests.test_untouched_preview_durable_creation_and_exact_roots"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "NFR-3",
+      "references": [
+        {
+          "reference": "test_corrective_executor.ExecutorTests.test_every_append_is_verified_from_each_acknowledgment_anchor",
+          "passed_test_ids": [
+            "test_corrective_executor.ExecutorTests.test_every_append_is_verified_from_each_acknowledgment_anchor"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_corrective_recovery.RecoveryTests.test_two_concurrent_resumes_have_one_invalidation_and_repair",
+          "passed_test_ids": [
+            "test_corrective_recovery.RecoveryTests.test_two_concurrent_resumes_have_one_invalidation_and_repair"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "NFR-4",
+      "references": [
+        {
+          "reference": "test_task_bootstrap.RevalidateTests.test_old_loaders_tolerate_events",
+          "passed_test_ids": [
+            "test_task_bootstrap.RevalidateTests.test_old_loaders_tolerate_events"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_corrective_recovery.RecoveryTests.test_native_candidate_isolation_is_preserved",
+          "passed_test_ids": [
+            "test_corrective_recovery.RecoveryTests.test_native_candidate_isolation_is_preserved"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "NFR-5",
+      "references": [
+        {
+          "reference": "test_legacy_compat.CompatibilityTests.test_refusals_before_every_constructor",
+          "passed_test_ids": [
+            "test_legacy_compat.CompatibilityTests.test_refusals_before_every_constructor"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_legacy_compat.CompatibilityTests.test_read_only_status_and_monitor_without_supervisor_records",
+          "passed_test_ids": [
+            "test_legacy_compat.CompatibilityTests.test_read_only_status_and_monitor_without_supervisor_records"
+          ],
+          "kind": "test"
+        }
+      ]
+    },
+    {
+      "id": "NFR-6",
+      "references": [
+        {
+          "reference": "Fresh full integrated-source Docker suite; final log and exact tested head linked from PR",
+          "passed_test_ids": [],
+          "kind": "full_suite_attestation"
+        }
+      ]
+    },
+    {
+      "id": "NFR-7",
+      "references": [
+        {
+          "reference": "test_unified_execution.UnifiedExecutionTests.test_no_mode_switch_or_legacy_executor_remains",
+          "passed_test_ids": [
+            "test_unified_execution.UnifiedExecutionTests.test_no_mode_switch_or_legacy_executor_remains"
+          ],
+          "kind": "test"
+        },
+        {
+          "reference": "test_scheduler_extractions.SchedulerExtractionTests.test_ordinary_run_trace_and_noop_resume",
+          "passed_test_ids": [
+            "test_scheduler_extractions.SchedulerExtractionTests.test_ordinary_run_trace_and_noop_resume"
+          ],
+          "kind": "test"
+        }
+      ]
+    }
+  ],
+  "independent_semantic_QA_required": true,
+  "raw_log_sha256": "1bf40ee54e5e33932a5a3f9cb31fb0441d52b4d377c1f0557247a4311a829fdc"
+}

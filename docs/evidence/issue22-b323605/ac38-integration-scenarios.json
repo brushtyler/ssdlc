@@ -1,0 +1,183 @@
+{
+  "reviewed_commit": "b3236051d98a4af1655fd3803843de283e11ab60",
+  "scenarios": [
+    {
+      "scenario": "new default and obsolete flag",
+      "requirement_ids": [
+        "AC-1",
+        "AC-2"
+      ],
+      "passed_test_ids": [
+        "test_unified_execution.UnifiedExecutionTests.test_default_new_run_uses_scheduler_and_all_gates",
+        "test_unified_execution.UnifiedExecutionTests.test_obsolete_values_have_identical_journals_and_one_bounded_warning"
+      ],
+      "status": "SUPPORTED_BY_PASSING_SCOPED_TESTS"
+    },
+    {
+      "scenario": "Tier S single task",
+      "requirement_ids": [
+        "AC-3"
+      ],
+      "passed_test_ids": [
+        "test_review_closure.ReviewClosureTests.test_every_tier_requires_appsec_without_a_specialist_trigger",
+        "test_unified_execution.UnifiedExecutionTests.test_tier_s_two_nodes_are_repaired_before_dispatch",
+        "test_unified_integration.StartupJourneys.test_documented_default_cli_and_tier_s"
+      ],
+      "status": "SUPPORTED_BY_PASSING_SCOPED_TESTS"
+    },
+    {
+      "scenario": "legacy read-only and refusal without writes",
+      "requirement_ids": [
+        "AC-6",
+        "AC-7"
+      ],
+      "passed_test_ids": [
+        "test_legacy_compat.CompatibilityTests.test_history_import_confined_and_read_only",
+        "test_legacy_compat.CompatibilityTests.test_read_only_status_and_monitor_without_supervisor_records",
+        "test_legacy_compat.CompatibilityTests.test_refusals_before_every_constructor"
+      ],
+      "status": "SUPPORTED_BY_PASSING_SCOPED_TESTS"
+    },
+    {
+      "scenario": "existing task compatibility",
+      "requirement_ids": [
+        "AC-9"
+      ],
+      "passed_test_ids": [
+        "test_review_closure.ReviewClosureTests.test_pre_isolation_sealed_history_keeps_its_execution_mode",
+        "test_unified_execution.UnifiedExecutionTests.test_historical_scheduler_resume_preserves_contract_and_journal_prefix",
+        "test_unified_integration.StartupJourneys.test_existing_task_cli_resume_preserves_seals_attempts_and_budget"
+      ],
+      "status": "SUPPORTED_BY_PASSING_SCOPED_TESTS"
+    },
+    {
+      "scenario": "bootstrap valid/empty/failing/restart/ineligible",
+      "requirement_ids": [
+        "AC-13",
+        "AC-15",
+        "AC-17",
+        "AC-19"
+      ],
+      "passed_test_ids": [
+        "test_bootstrap.BootstrapTests.test_binding_and_contract",
+        "test_bootstrap.BootstrapTests.test_contract_sealed_while_waiting_for_lock_refuses_before_state_write",
+        "test_bootstrap.BootstrapTests.test_direct_pipeline_refuses_persisted_unproven_contract_before_writes",
+        "test_bootstrap.BootstrapTests.test_direct_scheduler_factory_refuses_unproven_contract_before_planning",
+        "test_bootstrap.BootstrapTests.test_discovered_checks",
+        "test_bootstrap.BootstrapTests.test_existing_tests",
+        "test_bootstrap.BootstrapTests.test_first_invocation_claim_is_cleared_after_interruption",
+        "test_bootstrap.BootstrapTests.test_pre_execution_resume_refuses_before_writes",
+        "test_bootstrap.BootstrapTests.test_registered_contract_without_journal_refuses_clean_cli_and_supervisor",
+        "test_bootstrap.BootstrapTests.test_unregistered_contract_and_forged_ready_status_do_not_renew_exemption",
+        "test_bootstrap.CheckpointTests.test_checkpoint_failures",
+        "test_bootstrap.CheckpointTests.test_crash_before_proof_refuses_resume",
+        "test_bootstrap.CheckpointTests.test_unproven_initialized_bootstrap_refuses_resume_before_dispatch",
+        "test_unified_integration.StartupJourneys.test_bootstrap_empty_checkpoint_and_restart",
+        "test_unified_integration.StartupJourneys.test_bootstrap_failing_checkpoint_and_restart",
+        "test_unified_integration.StartupJourneys.test_documented_bootstrap_profile"
+      ],
+      "status": "SUPPORTED_BY_PASSING_SCOPED_TESTS"
+    },
+    {
+      "scenario": "approved new candidate",
+      "requirement_ids": [
+        "AC-8",
+        "AC-1"
+      ],
+      "passed_test_ids": [
+        "test_legacy_compat.CompatibilityTests.test_journal_matrix_and_approval",
+        "test_legacy_compat.CompatibilityTests.test_missing_state_with_old_execution_evidence_is_not_a_new_run",
+        "test_legacy_compat.CompatibilityTests.test_schema_invalid_registered_inputs_are_refused_before_mutation",
+        "test_signoff_provenance.SignoffProvenanceTests.test_full_native_provenance_admits_approval",
+        "test_signoff_provenance.SignoffProvenanceTests.test_ready_status_without_gate_receipts_is_refused_before_constructor",
+        "test_signoff_provenance.SignoffProvenanceTests.test_tampered_or_incomplete_phase_never_falls_back_to_old_approval",
+        "test_unified_execution.UnifiedExecutionTests.test_default_new_run_uses_scheduler_and_all_gates"
+      ],
+      "status": "SUPPORTED_BY_PASSING_SCOPED_TESTS"
+    },
+    {
+      "scenario": "Review root repair, dependents and fresh gates",
+      "requirement_ids": [
+        "AC-25"
+      ],
+      "passed_test_ids": [
+        "test_corrective_executor.ExecutorTests.test_tier_s_always_reruns_appsec_after_repair",
+        "test_unified_integration.CorrectiveJourneys.test_review_root_repair_dependent_revalidation_and_fresh_gates"
+      ],
+      "status": "SUPPORTED_BY_PASSING_SCOPED_TESTS"
+    },
+    {
+      "scenario": "QA and AppSec rejection",
+      "requirement_ids": [
+        "AC-22"
+      ],
+      "passed_test_ids": [
+        "test_corrective_executor.ExecutorTests.test_appsec_rejection",
+        "test_corrective_executor.ExecutorTests.test_qa_rejection",
+        "test_corrective_executor.ExecutorTests.test_review_rejection"
+      ],
+      "status": "SUPPORTED_BY_PASSING_SCOPED_TESTS"
+    },
+    {
+      "scenario": "stale evidence",
+      "requirement_ids": [
+        "AC-27"
+      ],
+      "passed_test_ids": [
+        "test_corrective_creation.CreationTests.test_changed_journal_head",
+        "test_corrective_creation.CreationTests.test_diagnostic_replan_ambiguous_and_tool_failure",
+        "test_corrective_creation.CreationTests.test_frozen_report_response_input_and_captured_proof_mutations"
+      ],
+      "status": "SUPPORTED_BY_PASSING_SCOPED_TESTS"
+    },
+    {
+      "scenario": "replay after invalidation and after repair",
+      "requirement_ids": [
+        "AC-30",
+        "AC-31"
+      ],
+      "passed_test_ids": [
+        "test_corrective_executor.ExecutorTests.test_completed_and_approved_replay_are_zero_write",
+        "test_corrective_recovery.RecoveryTests.test_two_concurrent_resumes_have_one_invalidation_and_repair",
+        "test_unified_integration.CorrectiveJourneys.test_cli_recovery_after_invalidation",
+        "test_unified_integration.CorrectiveJourneys.test_cli_recovery_after_repair"
+      ],
+      "status": "SUPPORTED_BY_PASSING_SCOPED_TESTS"
+    },
+    {
+      "scenario": "attempts exhausted",
+      "requirement_ids": [
+        "AC-32"
+      ],
+      "passed_test_ids": [
+        "test_corrective_executor.ExecutorTests.test_attempt_exhaustion_precedes_invalidation",
+        "test_unified_integration.CorrectiveJourneys.test_attempts_exhausted_through_pipeline"
+      ],
+      "status": "SUPPORTED_BY_PASSING_SCOPED_TESTS"
+    },
+    {
+      "scenario": "source mutation",
+      "requirement_ids": [
+        "AC-33"
+      ],
+      "passed_test_ids": [
+        "test_corrective_creation.CreationTests.test_moved_head_dirty_tree_and_protected_path",
+        "test_unified_integration.CorrectiveJourneys.test_source_mutation_refused_through_pipeline"
+      ],
+      "status": "SUPPORTED_BY_PASSING_SCOPED_TESTS"
+    },
+    {
+      "scenario": "budget and cancellation boundaries",
+      "requirement_ids": [
+        "AC-34"
+      ],
+      "passed_test_ids": [
+        "test_corrective_publication.PublicationTests.test_every_nested_dispatch_uses_frozen_guard",
+        "test_corrective_recovery.RecoveryTests.test_cancel_boundaries_preserve_frozen_limits"
+      ],
+      "status": "SUPPORTED_BY_PASSING_SCOPED_TESTS"
+    }
+  ],
+  "count": 13,
+  "note": "Grouped original AC38 scenarios, not 13 additional test executions. See full-suite and requirement trace for exact execution evidence; deterministic fake providers exercise real CLI/pipeline/scheduler entry points."
+}
