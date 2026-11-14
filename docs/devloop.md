@@ -110,7 +110,9 @@ signed with the `openssl` binary. Tokens stay in the dispatcher: they reach `gh`
 `GH_TOKEN` and `git push` through an HTTP header in the environment of that single command, never
 through a file or the command line. No other credential can join the push: it refuses a URL that
 an `insteadOf` or `pushInsteadOf` rule would rewrite, allows only the HTTPS transport, and
-disables credential helpers, askpass programs and preconfigured authentication headers. An actor
+disables credential helpers, askpass programs and preconfigured authentication headers. The
+header is keyed on the exact push URL, so that no `http.<url>.extraHeader` in a config file is
+more specific, and `git -c` settings inherited through `GIT_CONFIG_PARAMETERS` are dropped. An actor
 without an app uses the ambient `gh` login and its records must come from `trusted_users`, as
 before. An app that is configured but whose key is missing stops devloop at startup instead of
 silently falling back to the operator's login: remove it from `[apps]` (or use `--config`) to run

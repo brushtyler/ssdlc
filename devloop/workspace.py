@@ -29,8 +29,11 @@ class Workspace:
         self._run = run
         self._test_env = test_env
 
-    def _git(self, *args, cwd=None, check=True, stdin=None, env=None):
-        kwargs = {'env': dict(os.environ, **env)} if env else {}
+    def _git(self, *args, cwd=None, check=True, stdin=None, env=None, unset=()):
+        kwargs = {}
+        if env or unset:
+            inherited = {k: v for k, v in os.environ.items() if k not in unset}
+            kwargs['env'] = dict(inherited, **(env or {}))
         try:
             done = self._run(['git', *args], cwd=cwd or self.repo_root, input=stdin,
                              capture_output=True, text=True, timeout=600, **kwargs)
@@ -116,19 +119,27 @@ class Workspace:
         command line. No other credential can take part: URL rewrites are refused, only the
         HTTPS transport is allowed, and credential helpers, askpass programs and preconfigured
         authentication headers are disabled."""
-        env, remote = None, 'origin'
+        env, unset, remote = None, (), 'origin'
         if auth:
             remote = auth['url']
             self._refuse_rewrites(path, remote)
             basic = base64.b64encode(f'x-access-token:{auth["token"]}'.encode()).decode()
+            # Git applies the http.<url>.* entries of the most specific URL that matches and
+            # drops the others, whatever their order. Keyed on the exact push URL, the reset and
+            # the header win over every config file (a tie goes to the later entry, and these
+            # come last); a less specific key would lose to, say, a repository-level
+            # http.<this url>.extraHeader. Credential helpers are reset by the plain key: git
+            # applies every matching credential.* entry in order.
             env = git_config_env([
-                ('credential.helper', ''), ('http.extraHeader', ''),
-                ('http.https://github.com/.extraHeader', ''),
-                ('http.https://github.com/.extraHeader', f'AUTHORIZATION: basic {basic}')])
+                ('credential.helper', ''),
+                (f'http.{remote}.extraHeader', ''),
+                (f'http.{remote}.extraHeader', f'AUTHORIZATION: basic {basic}')])
             env.update({'GIT_TERMINAL_PROMPT': '0', 'GIT_ASKPASS': 'false', 'SSH_ASKPASS': 'false',
                         'GIT_ALLOW_PROTOCOL': 'https', 'GIT_SSH_COMMAND': 'false'})
+            # `git -c` settings inherited from a parent git are applied after GIT_CONFIG_*.
+            unset = ('GIT_CONFIG_PARAMETERS',)
         self._git('push', *(['--force'] if replace else []), remote,
-                  f'HEAD:refs/heads/{branch}', cwd=path, env=env)
+                  f'HEAD:refs/heads/{branch}', cwd=path, env=env, unset=unset)
 
     def _refuse_rewrites(self, path, url):
         """A ``url.<base>.insteadOf`` or ``pushInsteadOf`` rule matching ``url`` could send the

@@ -1,11 +1,14 @@
 import dataclasses
+import http.server
 import json
 import os
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from devloop import agents, apps, config, markdown, review, schema
 from devloop.dispatcher import (Action, Dispatcher, PullRequest, Snapshot, UntrustedChange, plan,
@@ -1156,17 +1159,19 @@ class CredentialIsolationTests(unittest.TestCase):
             calls.append((argv, kw.get('env')))
             return SimpleNamespace(returncode=1 if 'config' in argv else 0, stdout='', stderr='')
         ws = Workspace('/repo', '.state', 'main', run=fake_run)
-        ws.push('/wt', 'agent/issue-7', auth={'url': 'https://github.com/o/r.git', 'token': 'T'})
+        with mock.patch.dict(os.environ, {'GIT_CONFIG_PARAMETERS': "'http.extraheader'='x'"}):
+            ws.push('/wt', 'agent/issue-7', auth={'url': 'https://github.com/o/r.git', 'token': 'T'})
         argv, env = calls[-1]
         self.assertEqual(argv, ['git', 'push', 'https://github.com/o/r.git',
                                 'HEAD:refs/heads/agent/issue-7'])
         self.assertNotIn('T', ' '.join(argv))
+        self.assertNotIn('GIT_CONFIG_PARAMETERS', env)
         pairs = [(env[f'GIT_CONFIG_KEY_{i}'], env[f'GIT_CONFIG_VALUE_{i}'])
                  for i in range(int(env['GIT_CONFIG_COUNT']))]
         basic = apps.base64.b64encode(b'x-access-token:T').decode()
-        self.assertEqual(pairs, [('credential.helper', ''), ('http.extraHeader', ''),
-                                 ('http.https://github.com/.extraHeader', ''),
-                                 ('http.https://github.com/.extraHeader', f'AUTHORIZATION: basic {basic}')])
+        key = 'http.https://github.com/o/r.git.extraHeader'
+        self.assertEqual(pairs, [('credential.helper', ''), (key, ''),
+                                 (key, f'AUTHORIZATION: basic {basic}')])
         self.assertEqual((env['GIT_ALLOW_PROTOCOL'], env['GIT_ASKPASS'], env['GIT_SSH_COMMAND']),
                          ('https', 'false', 'false'))
         ws.commit_all('/wt', 'msg', author={'name': 'x-agent[bot]', 'email': 'e@x'})
@@ -1186,6 +1191,61 @@ class CredentialIsolationTests(unittest.TestCase):
                 ws = Workspace(tmp, '.state', 'main')
                 with self.assertRaisesRegex(WorkspaceError, 'rewrites'):
                     ws.push(tmp, 'b', auth={'url': 'https://github.com/o/r.git', 'token': 'T'})
+
+    def test_push_sends_only_the_app_token(self):
+        # Codex review of #70: a repository-level http.<push url>.extraHeader is more specific
+        # than a header keyed on https://github.com/, so git sent it instead of the app token;
+        # a header in an inherited GIT_CONFIG_PARAMETERS was sent alongside it. Real git pushes
+        # to a local server that records the Authorization headers and answers 401.
+        seen = []
+
+        class Recorder(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen.extend(self.headers.get_all('Authorization') or [])
+                self.send_response(401)
+                self.send_header('WWW-Authenticate', 'Basic realm="r"')
+                self.end_headers()
+            do_POST = do_GET
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(('127.0.0.1', 0), Recorder)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        url = f'http://127.0.0.1:{server.server_port}/o/r.git'
+
+        def basic(user_pass):
+            return 'basic ' + apps.base64.b64encode(user_pass.encode()).decode()
+
+        def http_allowed(argv, **kw):
+            # The server has no TLS: let this one push use plain HTTP, nothing else changes.
+            if argv[1] == 'push':
+                kw['env'] = dict(kw['env'], GIT_ALLOW_PROTOCOL='http')
+            return subprocess.run(argv, **kw)
+
+        personal = f'AUTHORIZATION: {basic("me:PERSONAL")}'
+        helper = '!f() { echo username=me; echo password=HELPER; }; f'
+        cases = {'repository header for the push url': [(f'http.{url}.extraHeader', personal)],
+                 'generic header': [('http.extraHeader', personal)],
+                 'credential helper for the push url': [(f'credential.{url}.helper', helper)],
+                 'inherited git -c': []}
+        for name, repo_config in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                self.git('init', '-q', cwd=tmp)
+                self.git('-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-q',
+                         '--allow-empty', '-m', 'base', cwd=tmp)
+                for key, value in repo_config:
+                    self.git('config', key, value, cwd=tmp)
+                inherited = ({'GIT_CONFIG_PARAMETERS': f"'http.{url}.extraheader'='{personal}'"}
+                             if not repo_config else {})
+                seen.clear()
+                ws = Workspace(tmp, '.state', 'main', run=http_allowed)
+                with mock.patch.dict(os.environ, inherited), self.assertRaises(WorkspaceError):
+                    ws.push(tmp, 'b', auth={'url': url, 'token': 'APP'})
+                # One request: git did not retry with credentials from a helper either.
+                self.assertEqual(seen, [basic('x-access-token:APP')])
 
     def test_changed_files_are_real_names(self):
         # Codex review of #70: without -z git quotes unusual names and they slip past the
